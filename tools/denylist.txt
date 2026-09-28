@@ -1,0 +1,17 @@
+# Words the engine must never contain (case-insensitive substring match).
+# The engine is generic: anything team-specific belongs in a workspace's
+# .claude/dashboard/ config, not in plugins/agentic-os/engine/.
+# One per line; lines starting with # are comments.
+getconfirmed
+GetConfirmed
+Confirm.Core
+fi-dashboard
+admin-web
+Pindrop
+TrustCloud
+Symitar
+Keystone
+azure-environment
+confirm-postgres
+confirm-ports
+lhoezee
