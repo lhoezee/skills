@@ -97,6 +97,8 @@ resource app 'Microsoft.Web/sites@2023-12-01' = {
     'natterjack-profile': profile
     'natterjack-applied': applied
     'natterjack-share': appName
+    // Where the share is (a profile can pick another account), so removing deletes the right one.
+    'natterjack-storage': storageAccount
   }
   properties: {
     serverFarmId: servicePlan.id

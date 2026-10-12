@@ -132,8 +132,8 @@ interface Pending { row: PersonRow; action: PeopleActionName; profile?: string; 
 
     @if (pending(); as pd) {
       <div class="scrim" (click)="cancel()"></div>
-      <div class="dialog panel" role="dialog" aria-modal="true">
-        <div class="panel-h"><h2>{{ title(pd) }}</h2></div>
+      <div class="dialog panel" role="dialog" aria-modal="true" aria-labelledby="people-dialog-title">
+        <div class="panel-h"><h2 id="people-dialog-title">{{ title(pd) }}</h2></div>
         <div class="dbody">
           @if (pd.action === 'provision') {
             <label>Profile
@@ -245,7 +245,7 @@ export class PeopleComponent implements OnInit {
     this.pending.set(next);
     if ('profile' in patch || 'keepVolume' in patch) void this.previewIt();
   }
-  cancel(): void { this.pending.set(null); }
+  cancel(): void { this.previewSeq++; this.pending.set(null); }
 
   canConfirm = computed(() => {
     const p = this.pending();
@@ -258,21 +258,26 @@ export class PeopleComponent implements OnInit {
     return { action: p.action, email: p.row.email, profile: p.profile, keepVolume: p.keepVolume, dryRun };
   }
 
+  /** Bumped by each preview, cancel and confirm: only the latest preview's answer is shown. */
+  private previewSeq = 0;
+
   async previewIt(): Promise<void> {
     const p = this.pending();
     if (!p) return;
+    const seq = ++this.previewSeq;
     this.pending.set({ ...p, busy: true, error: null, preview: null });
     try {
       const preview = await this.api.post<PeopleActionResponse>('/api/people/action', this.body(p, true));
-      if (this.pending()?.row.email === p.row.email) this.pending.set({ ...this.pending()!, busy: false, preview });
+      if (seq === this.previewSeq && this.pending()) this.pending.set({ ...this.pending()!, busy: false, preview });
     } catch (e) {
-      if (this.pending()?.row.email === p.row.email) this.pending.set({ ...this.pending()!, busy: false, error: (e as Error).message });
+      if (seq === this.previewSeq && this.pending()) this.pending.set({ ...this.pending()!, busy: false, error: (e as Error).message });
     }
   }
 
   async confirm(): Promise<void> {
     const p = this.pending();
     if (!p || !this.canConfirm()) return;
+    this.previewSeq++;
     this.pending.set({ ...p, busy: true });
     try {
       await this.api.post<PeopleActionResponse>('/api/people/action', this.body(p, false));

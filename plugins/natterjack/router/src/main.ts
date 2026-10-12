@@ -16,7 +16,7 @@ import http from "node:http";
 import https from "node:https";
 import { SECRET_HEADER, checkHostedRequest } from "../../engine/server/src/hosted.ts";
 import { routerConfig } from "./config.ts";
-import { backendUrl, makeBackend, type Backend } from "./backends.ts";
+import { HOP, backendHeaders, backendUrl, makeBackend, type Backend } from "./backends.ts";
 
 const cfg = (() => {
   try { return routerConfig(process.env, (f) => { try { return fs.readFileSync(f, "utf-8"); } catch { return null; } }); }
@@ -34,7 +34,6 @@ const touch = (email: string, d: number) => {
   activity.set(email, a);
 };
 
-const HOP = new Set(["connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "proxy-connection", "te", "trailer", "transfer-encoding", "upgrade"]);
 const esc = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 
 function page(res: http.ServerResponse, status: number, title: string, text: string, refresh = false) {
@@ -62,21 +61,6 @@ function startOnce(email: string) {
   startsInFlight.set(email, p);
 }
 
-/** Headers for the dashboard: the client's, minus anything identity-like it sent, plus ours. */
-function backendHeaders(req: http.IncomingMessage, email: string, host?: string): http.OutgoingHttpHeaders {
-  const out: http.OutgoingHttpHeaders = {};
-  for (const [k, v] of Object.entries(req.headers)) {
-    if (HOP.has(k) || k === SECRET_HEADER || k === cfg.front.identityHeader || k === cfg.backendIdentityHeader) continue;
-    out[k] = v;
-  }
-  out[SECRET_HEADER] = cfg.backendSecret;
-  out[cfg.backendIdentityHeader] = email;
-  // Host and Origin pass through: each dashboard's DASHBOARD_PUBLIC_URL is this one address.
-  // Except where the platform routes by Host (App Service): then the backend's, which the dashboard allows.
-  if (host) out.host = host;
-  return out;
-}
-
 function proxy(req: http.IncomingMessage, res: http.ServerResponse, base: string, email: string, host?: string) {
   const target = backendUrl(base, req.url || "/");
   const lib = target.protocol === "https:" ? https : http;
@@ -85,7 +69,7 @@ function proxy(req: http.IncomingMessage, res: http.ServerResponse, base: string
   const finish = () => { if (!done) { done = true; touch(email, -1); } };
   res.on("close", finish);
 
-  const up = lib.request(target, { method: req.method, headers: backendHeaders(req, email, host) }, (r) => {
+  const up = lib.request(target, { method: req.method, headers: backendHeaders(cfg, req.headers, email, host) }, (r) => {
     const headers: http.OutgoingHttpHeaders = {};
     for (const [k, v] of Object.entries(r.headers)) if (!HOP.has(k)) headers[k] = v;
     res.writeHead(r.statusCode || 502, headers);

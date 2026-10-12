@@ -5,7 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import { routerConfig } from "../src/config.ts";
-import { AppServiceBackend, ownerOf } from "../src/backends.ts";
+import { AppServiceBackend, backendHeaders, ownerOf } from "../src/backends.ts";
 
 const SECRETS = { ROUTER_PUBLIC_URL: "https://natterjack.example.com", ROUTER_PROXY_SECRET: "f".repeat(40), ROUTER_BACKEND_SECRET: "b".repeat(40) };
 const GROUP = "/subscriptions/sub-1/resourceGroups/dashboard-rg/providers/Microsoft.Web/sites";
@@ -81,4 +81,21 @@ test("App Service backend: finds each person's Web App by tag, routes by its hos
     assert.equal((await b.find("luke@example.com"))!.ready, true);
     assert.equal(tokens, 1, "the token is reused until it nearly expires");
   } finally { id.close(); arm.close(); }
+});
+
+test("backendHeaders: an App Service target gets its own Host (it routes by Host); others keep the public one; identity headers are the router's", async () => {
+  const cfg = routerConfig({ ...SECRETS, ROUTER_BACKEND: "azure-app-service", ROUTER_AZ_SUBSCRIPTION: "sub-1", ROUTER_AZ_RESOURCE_GROUP: "dashboard-rg", ROUTER_AZ_TOKEN: "arm-token", ROUTER_AZ_ARM: "http://unused" });
+  const inbound = { host: "natterjack.example.com", accept: "text/html", connection: "keep-alive", "x-forwarded-email": "eve@example.com", "x-dashboard-proxy-secret": "forged" };
+  const b = new AppServiceBackend(cfg.azure);
+  (b as any).sites = async () => new Map([["ana@example.com", { name: "dash-ana", host: "dash-ana.azurewebsites.net", running: true }]]);
+  const target = (await b.find("ana@example.com"))!;
+
+  const h = backendHeaders(cfg, inbound, "ana@example.com", target.host);
+  assert.equal(h.host, "dash-ana.azurewebsites.net", "never the public Host, which App Service would 404");
+  assert.equal(h.accept, "text/html");
+  assert.equal(h.connection, undefined);
+  assert.equal(h[cfg.backendIdentityHeader], "ana@example.com");
+  assert.equal(h["x-dashboard-proxy-secret"], cfg.backendSecret);
+
+  assert.equal(backendHeaders(cfg, inbound, "ana@example.com").host, "natterjack.example.com", "no target host: the public one passes through");
 });

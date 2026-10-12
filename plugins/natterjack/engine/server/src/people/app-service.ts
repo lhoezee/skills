@@ -19,7 +19,7 @@ import type { AppServicePlatform, HostingConfig } from "./config.ts";
 import type { Dashboard, Person, Platform, Rendered } from "./platform.ts";
 import { cliError, notInstalled, parseJson, type Runner } from "./cli.ts";
 
-export interface WebAppDashboard extends Dashboard { host: string | null; share: string | null }
+export interface WebAppDashboard extends Dashboard { host: string | null; share: string | null; storageAccount: string | null }
 
 /** The person's deployment: what `az deployment group create` gets. */
 interface Deployment { appName: string; parameters: Record<string, unknown> }
@@ -79,6 +79,7 @@ export class AppService implements Platform {
         applied: tags["natterjack-applied"] || null,
         host: s.host || null,
         share: tags["natterjack-share"] || s.name,
+        storageAccount: tags["natterjack-storage"] || null,
       };
       byEmail.set(owner, d);
     }
@@ -166,11 +167,18 @@ export class AppService implements Platform {
     return `Stopped ${d.name}.`;
   }
 
-  /** The Web App (its plan stays), and its file share unless kept. */
+  /**
+   * The Web App (its plan stays), and its file share unless kept. The share is deleted from the
+   * account the app was deployed with (its natterjack-storage tag), since a profile can pick
+   * another one. An app without the tag (set up by hand, or before the tag) only falls back to
+   * the platform's account when no profile overrides it; otherwise we can't know which it is.
+   */
   async remove(dash: Dashboard, keepShare: boolean, dryRun: boolean): Promise<string> {
     const d = dash as WebAppDashboard;
-    const account = typeof this.p.parameters.storageAccount === "string" ? this.p.parameters.storageAccount : null;
-    if (!keepShare && !account) throw Object.assign(new Error('To delete the file share, set "storageAccount" in hosting.json platform.parameters.'), { status: 400 });
+    const fallback = typeof this.p.parameters.storageAccount === "string" && !this.cfg.profiles.some((p) => "storageAccount" in (p.parameters || {}))
+      ? this.p.parameters.storageAccount : null;
+    const account = d.storageAccount || fallback;
+    if (!keepShare && !account) throw Object.assign(new Error(`Can't tell which storage account holds ${d.name}'s file share (it has no natterjack-storage tag). Nothing was changed.`), { status: 400, fix: 'keep the data and delete the share by hand, or update their dashboard first so it gets the tag' });
     const what = [`Web App ${d.name}`, ...(keepShare ? [] : [`file share ${d.share} in ${account}`])];
     if (dryRun) return `Would delete: ${what.join(", ")}. The App Service plan stays.`;
     await this.az("Removing the Web App", ["webapp", "delete", ...this.scope(), "--name", d.name, "--keep-empty-plan"]);

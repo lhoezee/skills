@@ -216,6 +216,15 @@ test("Roster: no file is an empty roster; writes are sorted, with a $comment, an
   assert.equal(state.commits.length, 2);
 });
 
+test("Roster: a roster that exists but can't be read is an error, never an empty roster", () => {
+  const { cfg } = workspace();
+  const { run } = world(cfg);
+  const r = new Roster(path.dirname(path.dirname(cfg)), cfg, run);
+  fs.mkdirSync(r.file); // reading a folder fails with EISDIR, not ENOENT
+  assert.throws(() => r.load(), /Couldn't read \.claude\/dashboard\/people\.json/);
+  assert.throws(() => r.update(() => true), /Couldn't read/, "and nothing is written over it");
+});
+
 test("Roster: describe() lists who was added, removed, or changed profile", () => {
   const p = (profile: string) => ({ name: "", slug: "s", profile, provisionedAt: "", provisionedBy: "" });
   assert.deepEqual(describe({ people: { "a@x.io": p("m"), "b@x.io": p("m") } }, { people: { "a@x.io": p("f"), "c@x.io": p("m") } }),
@@ -386,7 +395,7 @@ function azWorld(cfg: string) {
       const whatIf = a.includes("what-if");
       deployments.push({ whatIf, params, args });
       if (whatIf) return ok(`\x1b[32mResource changes: 1 to create.\x1b[0m\n  + Microsoft.Web/sites/${params.appName}\n`);
-      apps[params.appName] = { state: apps[params.appName]?.state || "Running", tags: { "natterjack-owner": params.email, "natterjack-person": params.person, "natterjack-profile": params.profile, "natterjack-applied": params.applied, "natterjack-share": params.appName } };
+      apps[params.appName] = { state: apps[params.appName]?.state || "Running", tags: { "natterjack-owner": params.email, "natterjack-person": params.person, "natterjack-profile": params.profile, "natterjack-applied": params.applied, "natterjack-share": params.appName, "natterjack-storage": params.storageAccount } };
       return ok("Succeeded\n");
     }
     if (a.startsWith("webapp start") || a.startsWith("webapp stop")) { apps[arg("--name")].state = a.startsWith("webapp start") ? "Running" : "Stopped"; return ok(); }
@@ -479,6 +488,27 @@ test("People (App Service): stop, start, and remove keeping or deleting the file
   await people.act({ action: "remove", email: "bo@acme.com", keepVolume: false });
   assert.deepEqual(az.deleted, ["app dash-bo", "share dash-bo in confirmdashdata"]);
   assert.equal(az.roster().people["bo@acme.com"], undefined);
+});
+
+test("People (App Service): the file share is deleted from the account the app was deployed with, never a guessed one", async () => {
+  const { root, cfg } = appServiceWorkspace();
+  const hosting = { ...APP_SERVICE, profiles: { ...APP_SERVICE.profiles, finance: { ...APP_SERVICE.profiles.finance, parameters: { plan: "dashboard-asp-big", storageAccount: "financedata" } } } };
+  setHosting(cfg, hosting);
+  const az = azWorld(cfg);
+  az.resources.push(["Microsoft.Storage/storageAccounts", "financedata"]);
+  const people = new People(root, { run: az.run, fetcher: az.fetcher, configDir: cfg });
+
+  await people.act({ action: "provision", email: "ana@acme.com", profile: "finance" });
+  assert.equal(az.apps["dash-ana"].tags["natterjack-storage"], "financedata");
+  await people.act({ action: "remove", email: "ana@acme.com", keepVolume: false });
+  assert.deepEqual(az.deleted, ["app dash-ana", "share dash-ana in financedata"], "the profile's account, not hosting.json's");
+
+  // dash-luke (set up by hand, no natterjack-storage tag) while a profile picks its own account: refuse rather than guess.
+  await people.act({ action: "adopt", email: "luke@acme.com" });
+  await assert.rejects(people.act({ action: "remove", email: "luke@acme.com", keepVolume: false, dryRun: true }), /Can't tell which storage account holds dash-luke's file share/);
+  // Keeping the share needs no account.
+  await people.act({ action: "remove", email: "luke@acme.com", keepVolume: true });
+  assert.deepEqual(az.deleted.slice(2), ["app dash-luke"]);
 });
 
 test("People (App Service): a Key Vault (or plan, storage, registry) that doesn't exist yet stops the preview and the deployment before anything runs", async () => {

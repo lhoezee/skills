@@ -8,6 +8,7 @@
 import fs from "node:fs";
 import http from "node:http";
 import https from "node:https";
+import { SECRET_HEADER } from "../../engine/server/src/hosted.ts";
 import type { RouterConfig } from "./config.ts";
 
 export interface Target {
@@ -43,6 +44,23 @@ export function backendUrl(base: string, reqUrl: string): URL {
   target.search = inbound.search;
   target.hash = "";
   return target;
+}
+
+export const HOP = new Set(["connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "proxy-connection", "te", "trailer", "transfer-encoding", "upgrade"]);
+
+/** Headers for the dashboard: the client's, minus anything identity-like it sent, plus ours. */
+export function backendHeaders(cfg: Pick<RouterConfig, "front" | "backendSecret" | "backendIdentityHeader">, inbound: http.IncomingHttpHeaders, email: string, host?: string): http.OutgoingHttpHeaders {
+  const out: http.OutgoingHttpHeaders = {};
+  for (const [k, v] of Object.entries(inbound)) {
+    if (HOP.has(k) || k === SECRET_HEADER || k === cfg.front.identityHeader || k === cfg.backendIdentityHeader) continue;
+    out[k] = v;
+  }
+  out[SECRET_HEADER] = cfg.backendSecret;
+  out[cfg.backendIdentityHeader] = email;
+  // Host and Origin pass through: each dashboard's DASHBOARD_PUBLIC_URL is this one address.
+  // Except where the platform routes by Host (App Service): then the backend's, which the dashboard allows.
+  if (host) out.host = host;
+  return out;
 }
 
 export function makeBackend(cfg: RouterConfig): Backend {
@@ -211,7 +229,7 @@ export class AppServiceBackend implements Backend {
     if (this.token && Date.now() < this.token.until) return this.token.value;
     if (!this.cfg.identityEndpoint || !this.cfg.identityHeader) throw new Error("No managed identity: turn on the router app's system-assigned identity (IDENTITY_ENDPOINT isn't set).");
     const u = `${this.cfg.identityEndpoint}?resource=${encodeURIComponent("https://management.azure.com/")}&api-version=2019-08-01`;
-    const res = await fetch(u, { headers: { "X-IDENTITY-HEADER": this.cfg.identityHeader } });
+    const res = await fetch(u, { headers: { "X-IDENTITY-HEADER": this.cfg.identityHeader }, signal: AbortSignal.timeout(15_000) });
     if (!res.ok) throw new Error(`Managed identity token: ${res.status} ${(await res.text()).slice(0, 200)}`);
     const body: any = await res.json();
     const expires = Number(body.expires_on) * 1000 || Date.now() + 30 * 60_000;

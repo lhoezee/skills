@@ -48,7 +48,12 @@ export class Roster {
 
   load(): RosterDoc {
     let text: string;
-    try { text = fs.readFileSync(this.file, "utf-8"); } catch { return { people: {} }; }
+    try { text = fs.readFileSync(this.file, "utf-8"); }
+    catch (e) {
+      // Only a missing roster is an empty one: reading past any other error could overwrite it.
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return { people: {} };
+      throw Object.assign(new Error(`Couldn't read ${this.rel}: ${(e as Error).message}`), { status: 500 });
+    }
     return parse(text, this.rel);
   }
 
