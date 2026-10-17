@@ -64,9 +64,23 @@ function git(repoPath, args) {
   return gitRaw(repoPath, args).trim();
 }
 
+/**
+ * Two paths name the same folder. Compares real paths: git reports the resolved
+ * one, which differs from what we were given behind a symlink (macOS's /var →
+ * /private/var), a junction, or a Windows 8.3 short name (RUNNER~1).
+ */
 const samePath = (a, b) => {
-  const norm = (p) => path.resolve(p).replace(/[\\/]+$/, "");
-  return process.platform === "win32" ? norm(a).toLowerCase() === norm(b).toLowerCase() : norm(a) === norm(b);
+  const norm = (p) => {
+    let r = path.resolve(p);
+    try {
+      r = fs.realpathSync.native(r);
+    } catch {
+      /* doesn't exist: compare as given */
+    }
+    r = r.replace(/[\\/]+$/, "");
+    return process.platform === "win32" ? r.toLowerCase() : r;
+  };
+  return norm(a) === norm(b);
 };
 
 /** dir is the top of its own git checkout (not just somewhere inside one). */

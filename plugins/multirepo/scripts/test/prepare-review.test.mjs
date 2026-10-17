@@ -165,8 +165,20 @@ test("in a linked git worktree, .copilot/ is excluded via the shared info/exclud
   const linked = path.join(tmp("mr-linked-wt-"), "wt");
   git(main, "worktree", "add", "-q", "-b", "feature/ENG-12", linked);
   fs.writeFileSync(path.join(linked, "b.txt"), "new\n");
-  prepareReview({ root: linked });
+  const m = prepareReview({ root: linked });
+  assert.equal(m.repos.length, 1); // reviewed, so the exclude check below means something
   assert.equal(git(linked, "status", "--porcelain").includes(".copilot"), false);
+});
+
+test("a root reached through a symlink or junction is still recognised as the repo", () => {
+  // git reports the resolved path; macOS temp folders (/var → /private/var) and
+  // Windows short names (RUNNER~1) differ from it the same way.
+  const real = makeRepo(tmp("mr-real-"), { branch: "feature/ENG-13" });
+  const link = path.join(tmp("mr-link-"), "via-link");
+  fs.symlinkSync(real, link, process.platform === "win32" ? "junction" : "dir");
+  const m = prepareReview({ root: link });
+  assert.equal(m.reviewId, "ENG-13");
+  assert.equal(m.repos.length, 1);
 });
 
 test("diff commands: committed range, working tree, or both", () => {
