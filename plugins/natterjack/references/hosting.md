@@ -173,6 +173,7 @@ Backends:
   - Set `ROUTER_AZ_SUBSCRIPTION` and `ROUTER_AZ_RESOURCE_GROUP`. The router runs as a Web App itself, with its system-assigned managed identity turned on; give that identity **Reader** and **Website Contributor** on the resource group, nothing else.
   - It reaches each dashboard at `https://<app>.azurewebsites.net` with that as the Host (App Service routes by Host); the template lists it in the dashboard's `DASHBOARD_ALLOWED_HOSTS`.
   - Starting and stopping is `start` / `stop` on the Web App, which keeps its file share.
+  - Azure says Running as soon as it starts the container, minutes before a first start has installed the workspace. So the router also asks the dashboard's `/healthz`, and shows the starting page until it answers. Without that, a request would be held by App Service until the login proxy gave up (a Cloudflare 524).
 - **`static`.** `ROUTER_STATIC_FILE` names a JSON file of `{ "<email>": "<dashboard URL>" }`, re-read when it changes. Use it for containers someone else keeps running: a VM with Docker, ECS services. The router never starts or stops them.
 - **Another platform.** Implement `Backend` in `router/src/backends.ts` (find a person's URL, and optionally start/stop/list running ones) and add it to `makeBackend()`.
 
