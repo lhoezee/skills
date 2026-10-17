@@ -29,7 +29,10 @@ The team's dashboard is a copy of this plugin's engine (`${CLAUDE_PLUGIN_ROOT}/e
 5. **Verify**: `cd <workspace>/<engine> && npm ci && npm test`, then `node "$ROOT/scripts/validate.mjs" <workspace>` (new engine versions can add config options; the warnings say what's new).
 6. **Restart** the dashboard: `node <workspace>/<engine>/bin/dashboard.mjs restart`. This ends any Claude run in progress in the dashboard, so if you are running inside it (headless), ask the user to run it in a terminal instead.
 7. **Hosted dashboards** (the workspace has `.claude/dashboard/hosting.json`): the upgrade's `next` says when the release changes what hosted dashboards run outside the engine folder.
-   - `hostedImages`: the images changed. Rebuilding them is a push to the team's registry, so ask first, then run `node <workspace>/<engine>/bin/hosted-images.mjs --all --dry-run` and, with their OK, again with `--push --update-hosting` (it builds from this plugin release). Moving the router to its new tag (its Web App or Deployment) is theirs to do.
+   - `hostedImages`: the images changed. Rebuilding them is a push to the team's registry, so ask first. The script builds from this plugin release.
+     - **App Service:** run `node <workspace>/<engine>/bin/hosted-images.mjs --all --dry-run`, then, with their OK, again with `--push --update-hosting`.
+     - **Kubernetes:** run it with `--all --registry <their registry> --dry-run`, then `--push`. Then set the new dashboard image in their template copy.
+     - **Either way,** moving the router to its new tag (its Web App or Deployment) is theirs to do.
    - `hostedTemplates`: a per-person template changed. Their copy (`hosting.json` `platform.template`) is theirs: bring the same change into it, keeping their settings.
    - Neither: the rest reaches hosted dashboards when they next publish the snapshot.
 8. Summarize what changed and offer to commit (`<engine>/` and `.claude/dashboard/engine.json` together, plus their template copy and `hosting.json` if step 7 changed them).

@@ -277,3 +277,33 @@ test("access is separate from the role: its own setting over the role's default,
   p = readProfile(fresh, roles, reader);
   assert.deepEqual([p.roleChosen, p.profile], [false, "developer"]);
 });
+
+test("an assigned access goes with its assignment; an access they chose themselves stays", async () => {
+  const { setAccess } = await import("../src/profile.ts");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "dash-assigned-"));
+  const ledger = path.join(root, ".claude", "ledger");
+  const reader = { hiddenPages: ["apps"], hiddenSkills: [] };
+  const roles = [role("engineering", "developer"), role("operations", "reader")];
+  setRole(ledger, root, { role: "operations" }, roles, reader);
+
+  // Assigned full on the People page, then the assignment is removed ("Role's"): back to the role's read.
+  reapplyProfile(ledger, root, roles, null, "developer");
+  assert.deepEqual([readProfile(ledger, roles, reader).profile, readProfile(ledger, roles, reader).accessAssigned], ["developer", true]);
+  reapplyProfile(ledger, root, roles, null, null);
+  assert.deepEqual([readProfile(ledger, roles, reader).profile, readProfile(ledger, roles, reader).access], ["reader", null]);
+
+  // The reverse: assigned read on a full-access role, then removed: full again.
+  setRole(ledger, root, { role: "engineering" }, roles, reader);
+  reapplyProfile(ledger, root, roles, null, "reader");
+  assert.equal(readProfile(ledger, roles, reader).profile, "reader");
+  reapplyProfile(ledger, root, roles, null, null);
+  assert.equal(readProfile(ledger, roles, reader).profile, "developer");
+
+  // Their own choice (locally, no assignment) survives every restart, and a role change.
+  setAccess(ledger, root, "reader", roles, reader);
+  reapplyProfile(ledger, root, roles, null, null);
+  setRole(ledger, root, { role: "operations" }, roles, reader);
+  reapplyProfile(ledger, root, roles, null, null);
+  const p = readProfile(ledger, roles, reader);
+  assert.deepEqual([p.current.id, p.profile, p.access, p.accessAssigned], ["operations", "reader", "reader", false]);
+});

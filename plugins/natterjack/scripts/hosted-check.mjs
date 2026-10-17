@@ -94,20 +94,25 @@ export async function hostedChecks(root, o = {}) {
   const platform = hosting.platform || {};
   const p = platform.parameters || {};
 
-  // ---- the workspace hosted dashboards install
-  const ahead = git(root, ["rev-list", "--count", "@{u}..HEAD"]);
-  if (ahead !== null && Number(ahead) > 0) add("warn", "workspace", `${ahead} commit(s) here aren't pushed; hosted dashboards install origin's default branch`, "git push, then publish the snapshot (Repos page → Publish now).");
+  // ---- the workspace hosted dashboards install: origin's default branch, as the publisher packages it
+  // (not the checked-out branch's upstream: on a feature branch that would be the wrong thing to compare).
+  const originDefault = git(root, ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
+    || (git(root, ["rev-parse", "--verify", "--quiet", "origin/main"]) ? "origin/main" : null);
+  const localDefault = originDefault && originDefault.replace(/^origin\//, "");
+  const ahead = localDefault && git(root, ["rev-parse", "--verify", "--quiet", localDefault]) ? git(root, ["rev-list", "--count", `${originDefault}..${localDefault}`]) : null;
+  if (ahead !== null && Number(ahead) > 0) add("warn", "workspace", `${ahead} commit(s) on ${localDefault} aren't pushed; hosted dashboards install ${originDefault}`, "git push, then publish the snapshot (Repos page → Publish now).");
   const dirty = git(root, ["status", "--porcelain", "--", ".claude/dashboard", "hosting", "repos.json"]);
   // Porcelain lines are "XY path"; the output was trimmed, so the first may have lost its leading space.
   if (dirty) add("warn", "workspace", `uncommitted config: ${dirty.split(/\r?\n/).map((l) => l.replace(/^\s*\S{1,2}\s+/, "")).join(", ")}`, "Commit and push it, then publish, or hosted dashboards won't have it.");
 
   const snap = o.snapshot;
   if (snap && snap.workspace && snap.workspace.latest) {
-    const head = git(root, ["rev-parse", "@{u}"]) || git(root, ["rev-parse", "HEAD"]);
+    const head = originDefault ? git(root, ["rev-parse", originDefault]) : null;
     const published = snap.workspace.latest.sha;
-    if (head && published && !head.startsWith(published) && !published.startsWith(head.slice(0, published.length))) {
-      add("warn", "snapshot", `published workspace is ${published.slice(0, 10)} (built ${String(snap.builtAt || snap.workspace.latest.builtAt || "").slice(0, 10)}), origin is at ${head.slice(0, 10)}`, "Publish the snapshot (Repos page → Publish now, or node <engine>/bin/snapshot.mjs publish).");
-    } else if (published) add("ok", "snapshot", `published workspace is origin's ${published.slice(0, 10)}`);
+    if (!head) add("ok", "snapshot", `published workspace is ${published.slice(0, 10)}; not compared (couldn't tell origin's default branch: git remote set-head origin --auto)`);
+    else if (published && !head.startsWith(published) && !published.startsWith(head.slice(0, published.length))) {
+      add("warn", "snapshot", `published workspace is ${published.slice(0, 10)} (built ${String(snap.builtAt || snap.workspace.latest.builtAt || "").slice(0, 10)}), ${originDefault} is at ${head.slice(0, 10)}`, "Publish the snapshot (Repos page → Publish now, or node <engine>/bin/snapshot.mjs publish).");
+    } else if (published) add("ok", "snapshot", `published workspace is ${originDefault}'s ${published.slice(0, 10)}`);
   } else if (hosting.platform?.parameters?.snapshotConfig || readJson(path.join(root, "repos.json"))?.snapshot) {
     add("ok", "snapshot", snap
       ? "not compared with origin: connect the snapshot source on the Repos page so the dashboard can read what's published"

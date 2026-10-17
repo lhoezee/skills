@@ -58,7 +58,7 @@ import type { SnapshotFile } from "./snapshot-sources/index.ts";
 import type { Manifest } from "./snapshot-sources/manifest.ts";
 import { SnapshotSources } from "./snapshot-sources/index.ts";
 import type { SnapshotSource } from "./snapshot-sources/index.ts";
-import { accessInfo, lockedAccess, lockedRole, parseAccess, readProfile, reapplyProfile, refuseAccessChange, refuseRoleChange, setAccess, setRole } from "./profile.ts";
+import { ACCESS_LOCKED, accessInfo, lockedAccess, lockedRole, parseAccess, readProfile, reapplyProfile, refuseAccessChange, refuseRoleChange, setAccess, setRole } from "./profile.ts";
 import { DocSites, docAreas, docSources } from "./docs.ts";
 import { Knowledge } from "./knowledge/index.ts";
 import { agentOf, agentStatuses, isAgentId, type AgentStatus } from "./agents/index.ts";
@@ -420,6 +420,12 @@ const ROLE_LOCK = ((ws) => lockedRole(ws.rolesConfigured ? ws.roles : []))(works
 const ACCESS_LOCK = lockedAccess();
 // Someone's hidden skills and output style follow workspace.json roles if they changed while the dashboard was down.
 reapplyProfile(LEDGER_DIR, MAIN_WORKSPACE_PATH, undefined, ROLE_LOCK, ACCESS_LOCK);
+// Hosted, someone whose checks no longer offer the GitHub sign-in (their access or role changed) loses the
+// one they had: refusing new sign-ins isn't enough, since the token on /data would still push for their runs.
+// Signing out removes it and their signing key; runs fall back to the read token (GIT_TOKEN).
+if (HOSTED && !resolvedSpecs(MAIN_WORKSPACE_PATH, { hosted: true }).specs.some((s) => s.hostedSignIn === "github")) {
+  githubLogin.logout().then((r) => { if (r.ok) console.log("Signed out of GitHub: this dashboard's access no longer includes it."); }, () => {});
+}
 
 const isReader = () => readProfile(LEDGER_DIR).profile === "reader";
 
@@ -1631,6 +1637,8 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
     const pick = typeof body.role === "string" ? { role: body.role }
       : body.profile === "reader" || body.profile === "developer" ? { profile: body.profile as "reader" | "developer" } : null;
     if (!pick) return sendError(res, 400, 'Send { role: "<id>" } (one of workspace.json roles).');
+    // A bare profile would replace an assigned access (setRole clears it); a role keeps it.
+    if (ACCESS_LOCK && "profile" in pick) return sendError(res, 403, ACCESS_LOCKED);
     const refused = refuseRoleChange(ROLE_LOCK, pick);
     if (refused) return sendError(res, 403, refused);
     try { setRole(LEDGER_DIR, MAIN_WORKSPACE_PATH, pick); }

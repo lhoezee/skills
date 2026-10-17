@@ -98,3 +98,21 @@ test("pullRepos: clones missing repos and snapshot copies, fast-forwards clean c
   assert.equal(again.behind, "current");
   assert.equal(again.snapshot, "current");
 });
+
+test("fingerprint: the same folder gives the same answer; an edit, a new file or a clone appearing changes it", async () => {
+  const { fingerprint } = await import("../src/repo-pull.ts");
+  const dir = path.join(TMP, "fp");
+  assert.equal(fingerprint(dir), null, "not there yet");
+  fs.mkdirSync(path.join(dir, "src"), { recursive: true });
+  fs.writeFileSync(path.join(dir, "src", "a.ts"), "one\n");
+  const first = fingerprint(dir);
+  assert.equal(fingerprint(dir), first);
+  fs.writeFileSync(path.join(dir, "src", "a.ts"), "one, edited by a run\n");
+  const edited = fingerprint(dir);
+  assert.notEqual(edited, first);
+  fs.writeFileSync(path.join(dir, "src", "b.ts"), "new\n");
+  assert.notEqual(fingerprint(dir), edited);
+  const withB = fingerprint(dir);
+  fs.mkdirSync(path.join(dir, ".git"));
+  assert.notEqual(fingerprint(dir), withB, "Clone missing made it a clone meanwhile");
+});

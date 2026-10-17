@@ -13,6 +13,7 @@
  * used for this (credential.helper is emptied), only the token, as for the workspace.
  */
 
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { execFile } from "node:child_process";
@@ -45,15 +46,47 @@ async function defaultBranch(dir: string, repo: RepoDef): Promise<string> {
   return head.ok && head.out.startsWith("origin/") ? head.out.slice("origin/".length) : "main";
 }
 
+/** Folders a person's own tooling fills, left out of the fingerprint (their contents go with the copy anyway). */
+const SKIP = new Set([".git", "node_modules", ".angular", "dist", "bin", "obj"]);
+
+/**
+ * What's in a folder, as a hash of every file's path, size and modified time (null: it isn't
+ * there). The pull runs while the dashboard is already up, so Clone missing or a run can
+ * create or edit the folder during a clone that takes minutes: comparing this before the swap
+ * keeps that work instead of deleting it.
+ */
+export function fingerprint(dir: string): string | null {
+  if (!fs.existsSync(dir)) return null;
+  const h = crypto.createHash("sha1");
+  const walk = (d: string, rel: string) => {
+    let entries: fs.Dirent[] = [];
+    try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
+    for (const e of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+      if (SKIP.has(e.name)) { h.update(`${rel}${e.name}/\n`); continue; }
+      const p = path.join(d, e.name);
+      if (e.isDirectory()) walk(p, `${rel}${e.name}/`);
+      else { try { const st = fs.statSync(p); h.update(`${rel}${e.name}\0${st.size}\0${st.mtimeMs}\n`); } catch {} }
+    }
+  };
+  walk(dir, "");
+  return h.digest("hex");
+}
+
 async function cloneOver(root: string, repo: RepoDef, replacing: boolean): Promise<PullResult> {
   const dest = path.join(root, repo.relativePath);
   const tmp = `${dest}.natterjack-clone`;
+  const before = fingerprint(dest);
   fs.rmSync(tmp, { recursive: true, force: true });
   fs.mkdirSync(path.dirname(dest), { recursive: true });
   const r = await git(root, ["clone", "--quiet", "--filter=blob:none", ...(repo.defaultBranch ? ["--branch", repo.defaultBranch] : []), "--", repo.remote!, tmp], CLONE_TIMEOUT_MS);
   if (!r.ok) {
     fs.rmSync(tmp, { recursive: true, force: true });
     return { name: repo.name, action: "failed", detail: `couldn't clone: ${why(r.err)}${replacing ? "; keeping the snapshot copy" : ""}` };
+  }
+  // Someone cloned it, or changed the copy, while this cloned: theirs wins; the next start tries again.
+  if (fingerprint(dest) !== before) {
+    fs.rmSync(tmp, { recursive: true, force: true });
+    return { name: repo.name, action: "skipped", detail: "changed while it was being cloned; left alone (the next start tries again)" };
   }
   // Swap in whole: the old copy goes only once the clone is in place.
   const old = `${dest}.natterjack-old`;

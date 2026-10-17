@@ -6,10 +6,10 @@ import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { brandCandidates, contrast, isHashedBuild, mapToContract, parseColor, themeCss, tokensOnly, withoutVendorVars } from "../extract-brand.mjs";
-import { compareVersions, engineVersion, fetchEngine, latestRelease, normalizeRepo, pluginVersion, readRepos, releaseCheck } from "../lib.mjs";
+import { ENGINE_DIR, compareVersions, engineVersion, fetchEngine, latestRelease, normalizeRepo, pluginVersion, readRepos, releaseCheck } from "../lib.mjs";
 import { listRepos } from "../discover.mjs";
 import { scaffold } from "../scaffold.mjs";
-import { imageChanges, upgrade } from "../upgrade.mjs";
+import { bootFiles, imageChanges, upgrade } from "../upgrade.mjs";
 import { validate } from "../validate.mjs";
 
 test("compareVersions orders x.y.z numerically, a leading v is fine", () => {
@@ -397,12 +397,18 @@ test("imageChanges: only what the hosted images bake in, and nothing to say with
     for (const [rel, text] of Object.entries(files)) { fs.mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true }); fs.writeFileSync(path.join(dir, rel), text); }
     return dir;
   };
-  const same = { "templates/hosted/Dockerfile": "FROM node\n", "router/Dockerfile": "FROM node\n", "engine/server/src/main.ts": "a" };
+  // The boot step's modules are found through snapshot-cli.ts's imports; main.ts isn't one.
+  const same = { "templates/hosted/Dockerfile": "FROM node\n", "router/Dockerfile": "FROM node\n", "engine/server/src/main.ts": "a", "engine/server/src/snapshot-cli.ts": 'import { s3 } from "./snapshot-sources/s3.ts";\n' };
   const older = plugin({ ...same, "engine/server/src/hosted.ts": "old checks", "engine/server/src/snapshot-sources/s3.ts": "v1" });
   const newer = plugin({ ...same, "engine/server/src/main.ts": "b", "engine/server/src/hosted.ts": "new checks", "engine/server/src/snapshot-sources/s3.ts": "v2", "templates/hosted/entrypoint.sh": "#!/bin/sh\n" });
   assert.deepEqual(imageChanges(older, newer), ["engine/server/src/hosted.ts", "engine/server/src/snapshot-sources/s3.ts", "templates/hosted/entrypoint.sh"], "main.ts reaches hosted dashboards through the snapshot");
   assert.deepEqual(imageChanges(newer, newer), []);
   assert.equal(imageChanges(path.join(older, "engine"), newer), null, "a --base engine folder has no images to compare");
+
+  // The real boot step: every module the image runs at start, through the imports.
+  const boot = bootFiles(path.dirname(ENGINE_DIR));
+  for (const f of ["engine/bin/snapshot.mjs", "engine/server/src/snapshot-cli.ts", "engine/server/src/repo-pull.ts", "engine/server/src/repos.ts", "engine/server/src/config.ts", "engine/server/src/snapshot.ts"]) assert.ok(boot.has(f), f);
+  assert.ok(!boot.has("engine/server/src/main.ts"), "the dashboard itself comes from the snapshot");
 });
 
 test("scaffold refuses an engineDir it can't use; an older workspace keeps dashboard/", () => {

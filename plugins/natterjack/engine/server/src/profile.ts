@@ -40,6 +40,8 @@ interface ProfileState {
   profile: Profile;
   /** Their own access, over the role's default; null = the role's. */
   access: Profile | null;
+  /** `access` came from DASHBOARD_ACCESS, not their own choice: it goes when the assignment does. */
+  accessAssigned: boolean;
   chosenAt: string | null;
   /** Skill names this dashboard set to "off" in settings.local.json skillOverrides. */
   skillsOff: string[];
@@ -103,6 +105,7 @@ export function readProfile(ledgerDir: string, roles: RoleConfig[] = workspaceCo
     role: picked ? picked.id : null,
     profile,
     access,
+    accessAssigned: !!(access && s && s.accessAssigned === true),
     chosenAt: s && typeof s.chosenAt === "string" ? s.chosenAt : null,
     skillsOff: s && Array.isArray(s.skillsOff) ? s.skillsOff.filter((n: unknown) => typeof n === "string") : [],
     outputStyle: s && typeof s.outputStyle === "string" ? s.outputStyle : null,
@@ -188,18 +191,21 @@ export function setRole(ledgerDir: string, root: string, pick: { role: string } 
   const role = "role" in pick ? roles.find((r) => r.id === pick.role) : firstOn(roles, pick.profile);
   if (!role) throw new Error(`There's no role "${(pick as { role: string }).role}" (this workspace has ${roles.map((r) => r.id).join(", ")}).`);
   const roleId = "role" in pick ? role.id : null;
-  // Picking a role keeps the access they set themselves; setting only a profile replaces it.
-  const access = "role" in pick ? current.access : null;
-  return write(ledgerDir, root, current, role, roleId, access, reader, roles);
+  // Picking a role keeps the access they have (their own, or an assigned one); setting only a profile replaces it.
+  const keep = "role" in pick;
+  return write(ledgerDir, root, current, role, roleId, keep ? current.access : null, reader, roles, keep && current.accessAssigned);
 }
 
-/** Their own access over the role's default (null = the role's). Keeps the role and its question. */
-export function setAccess(ledgerDir: string, root: string, access: Profile | null, roles: RoleConfig[] = workspaceConfig().roles, reader: ReaderBase = readerBase()): ResolvedProfile {
+/**
+ * Their access over the role's default (null = the role's). Keeps the role and its question.
+ * `assigned`: it's DASHBOARD_ACCESS's, not their own choice (it goes when the assignment does).
+ */
+export function setAccess(ledgerDir: string, root: string, access: Profile | null, roles: RoleConfig[] = workspaceConfig().roles, reader: ReaderBase = readerBase(), assigned = false): ResolvedProfile {
   const current = readProfile(ledgerDir, roles, reader);
-  return write(ledgerDir, root, current, current.current, current.role, access, reader, roles);
+  return write(ledgerDir, root, current, current.current, current.role, access, reader, roles, assigned && !!access);
 }
 
-function write(ledgerDir: string, root: string, current: ResolvedProfile, role: RoleConfig, roleId: string | null, access: Profile | null, reader: ReaderBase, roles: RoleConfig[]): ResolvedProfile {
+function write(ledgerDir: string, root: string, current: ResolvedProfile, role: RoleConfig, roleId: string | null, access: Profile | null, reader: ReaderBase, roles: RoleConfig[], accessAssigned = false): ResolvedProfile {
   const profile = access || role.profile;
   const hidden = effectiveHidden(role, profile, reader);
   const applied = editSettings(root, (s) => {
@@ -208,7 +214,7 @@ function write(ledgerDir: string, root: string, current: ResolvedProfile, role: 
     return { changed: skills.changed || style.changed, result: { skillsOff: skills.next, outputStyle: style.next } };
   });
   const same = current.chosen && current.role === roleId && current.profile === profile;
-  const state: ProfileState = { role: roleId, profile, access, chosenAt: same ? current.chosenAt : new Date().toISOString(), ...applied };
+  const state: ProfileState = { role: roleId, profile, access, accessAssigned, chosenAt: same ? current.chosenAt : new Date().toISOString(), ...applied };
   writeJsonAtomic(profileFile(ledgerDir), state);
   return readProfile(ledgerDir, roles, reader);
 }
@@ -224,8 +230,10 @@ export function reapplyProfile(ledgerDir: string, root: string, roles: RoleConfi
   if (!p.chosen && !locked && !lockedAccess) return;
   try {
     if (p.chosen || locked) setRole(ledgerDir, root, locked ? { role: locked } : p.role ? { role: p.role } : { profile: p.access || p.profile }, roles);
-    // An assigned access (DASHBOARD_ACCESS) over whatever they had; else their own stays (setRole kept it).
-    if (lockedAccess) setAccess(ledgerDir, root, lockedAccess, roles);
+    // An assigned access (DASHBOARD_ACCESS) over whatever they had. An assignment that's gone takes
+    // its access with it (back to the role's); an access they chose themselves stays (setRole kept it).
+    if (lockedAccess) setAccess(ledgerDir, root, lockedAccess, roles, undefined, true);
+    else if (p.accessAssigned) setAccess(ledgerDir, root, null, roles);
   } catch (e) {
     if (locked || lockedAccess) throw new Error(`Couldn't apply the assigned ${locked ? `role "${locked}" (DASHBOARD_ROLE)` : ""}${locked && lockedAccess ? " and " : ""}${lockedAccess ? `access "${accessName(lockedAccess)}" (DASHBOARD_ACCESS)` : ""}: ${(e as Error).message}`);
   }
