@@ -63,6 +63,7 @@ test("pullRepos: clones missing repos and snapshot copies, fast-forwards clean c
   const by = Object.fromEntries(results.map((r) => [r.name, r]));
 
   assert.equal(by.missing.action, "cloned");
+  assert.match(by.missing.detail, /^cloned at [0-9a-f]{7,}/, "names the commit it cloned");
   assert.ok(fs.existsSync(path.join(ws, "apps", "missing", ".git")));
 
   assert.equal(by.snapshot.action, "cloned");

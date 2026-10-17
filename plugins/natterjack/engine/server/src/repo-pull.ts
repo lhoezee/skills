@@ -22,7 +22,10 @@ export interface PullResult { name: string; action: "cloned" | "updated" | "curr
 
 const CLONE_TIMEOUT_MS = 30 * 60_000;
 const FETCH_TIMEOUT_MS = 5 * 60_000;
-const NO_HELPER = ["-c", "credential.helper="];
+// No credential helper (only the token), and trust the folders: a hosted /data volume (an Azure
+// Files share, an NFS mount) can belong to another user than the container's, and git then
+// refuses to work in it ("dubious ownership").
+const NO_HELPER = ["-c", "credential.helper=", "-c", "safe.directory=*"];
 
 function git(cwd: string, args: string[], timeout = 60_000): Promise<{ ok: boolean; out: string; err: string }> {
   return new Promise((resolve) => {

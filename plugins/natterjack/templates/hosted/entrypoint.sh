@@ -13,9 +13,9 @@
 #   GIT_USERNAME    optional: the user name sent with GIT_TOKEN (default x-access-token)
 #
 # Either way, with GIT_TOKEN set every start also brings each repos.json repo to its latest
-# default branch with git (`snapshot.mjs pull-repos`): snapshot copies become clones, clean
-# clones are fast-forwarded, and one with local work is left alone. The token needs read
-# access to those repos too.
+# default branch with git (`snapshot.mjs pull-repos`, in the background once the dashboard
+# is starting): snapshot copies become clones, clean clones are fast-forwarded, and one with
+# local work is left alone. The token needs read access to those repos too.
 #
 # The workspace is always fetched with GIT_TOKEN, never with the person's own GitHub sign-in
 # (the Machine page's, which git reaches through its credential helper): `-c credential.helper=`
@@ -67,8 +67,11 @@ else
 fi
 
 if [ -n "${GIT_TOKEN:-}" ]; then
-  node --disable-warning=ExperimentalWarning /opt/natterjack/engine/bin/snapshot.mjs pull-repos --into "$WORKSPACE_ROOT" \
-    || echo "Couldn't bring every repo up to date (above); starting with what's there." >&2
+  # In the background, so the dashboard is up at once (the first start clones every repo, which
+  # takes minutes); the Repos page shows each repo as it lands. It outlives the exec below: tini
+  # (PID 1) takes it over.
+  ( node --disable-warning=ExperimentalWarning /opt/natterjack/engine/bin/snapshot.mjs pull-repos --into "$WORKSPACE_ROOT" \
+      || echo "Couldn't bring every repo up to date (above)." >&2 ) &
 fi
 
 cd "$WORKSPACE_ROOT"

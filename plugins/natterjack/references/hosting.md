@@ -82,7 +82,7 @@ On start, `entrypoint.sh` puts the workspace in `/data/workspace` or updates it.
 
 **From git:** `WORKSPACE_REPO` is cloned the first time and pulled afterwards. Add `GIT_TOKEN` if the repo is private; it goes through `GIT_ASKPASS`, so it's never written to disk. The first start runs `npm ci` and `ng build` on the volume, which takes a minute or two and about 1.6 GB of memory. Later starts skip the build. The person's app repos come from the Repos page: clones with a token the container can use, or read-only snapshots.
 
-**The latest repos on every start.** In either mode, set `GIT_TOKEN` to a read token for the repos in `repos.json`. On GitHub, use a fine-grained token owned by the organization, with Contents: Read on those repos. Every start then brings each repo to its latest default branch with git (`snapshot.mjs pull-repos`):
+**The latest repos on every start.** In either mode, set `GIT_TOKEN` to a read token for the repos in `repos.json`. On GitHub, use a fine-grained token owned by the organization, with Contents: Read on those repos. Every start then brings each repo to its latest default branch with git (`snapshot.mjs pull-repos`). It runs in the background, so the dashboard is up at once: the first start's clones take a few minutes, and the Repos page shows each repo as it lands.
 - **A snapshot copy, or a missing repo**, becomes a clone. Blobs are fetched as they're needed, so it's quick.
 - **A clone on its default branch with nothing uncommitted** is fast-forwarded.
 - **A clone with uncommitted work, on another branch, or with commits that aren't on origin** is left alone, and the start log says why.
