@@ -82,6 +82,13 @@ On start, `entrypoint.sh` puts the workspace in `/data/workspace` or updates it.
 
 **From git:** `WORKSPACE_REPO` is cloned the first time and pulled afterwards. Add `GIT_TOKEN` if the repo is private; it goes through `GIT_ASKPASS`, so it's never written to disk. The first start runs `npm ci` and `ng build` on the volume, which takes a minute or two and about 1.6 GB of memory. Later starts skip the build. The person's app repos come from the Repos page: clones with a token the container can use, or read-only snapshots.
 
+**The latest repos on every start.** In either mode, set `GIT_TOKEN` to a read token for the repos in `repos.json`. On GitHub, use a fine-grained token owned by the organization, with Contents: Read on those repos. Every start then brings each repo to its latest default branch with git (`snapshot.mjs pull-repos`):
+- **A snapshot copy, or a missing repo**, becomes a clone. Blobs are fetched as they're needed, so it's quick.
+- **A clone on its default branch with nothing uncommitted** is fast-forwarded.
+- **A clone with uncommitted work, on another branch, or with commits that aren't on origin** is left alone, and the start log says why.
+
+A failure is logged and never stops the start. With a snapshot, this keeps the prebuilt UI and the fast boot, and the repos no longer wait for someone to publish. The snapshot install never replaces a clone. On App Service, put the token in the Key Vault and name it in the template's `gitTokenSecret`.
+
 ## Signing in to Claude
 
 Each person signs in with their own seat on the company's Claude Team or Enterprise plan. On the Machine page, **Sign in to Claude** runs `claude auth login` in the container and shows two steps:
@@ -122,6 +129,11 @@ Only hosted dashboards do this; a local dashboard leaves the machine's own signi
   - `admin:ssh_signing_key`: to add the signing key and remove it again. What a person can push to is still decided by their own GitHub permissions.
 - **`GIT_TOKEN` stays the workspace's read token.** `entrypoint.sh` fetches the workspace with `git -c credential.helper=`, so a person's sign-in never affects boot. In runs, git asks the credential helper (the person's token) before `GIT_ASKPASS` (`GIT_TOKEN`), so a signed-in person pushes as themselves, and someone who isn't signed in can still read.
 - **Egress:** the container needs HTTPS to `github.com`, `api.github.com` and `*.githubusercontent.com`. Pushes use https, not ssh.
+
+**Only some roles.** To offer the sign-in to some roles and not others, give the check a `when`, e.g. `{ "use": "gh", "when": { "role": ["engineering"] } }`, and assign roles from the People page.
+- **Roles left out** don't get the check, and the server refuses to start a GitHub sign-in for them.
+- **What they can still do:** their runs use only `GIT_TOKEN`, so they can read the code but can't push or open pull requests.
+- **Who else matters:** keep that token read-only, since everyone's container has it.
 
 ## One address for everyone (the router)
 

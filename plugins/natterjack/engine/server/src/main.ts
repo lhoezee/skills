@@ -49,7 +49,7 @@ import { LiveHub } from "./live.ts";
 import { Trackers } from "./issues/index.ts";
 import { Meetings } from "./meetings/index.ts";
 import { readLinks, saveLink, deleteLink, readRepoReadme } from "./links.ts";
-import { Machine, openTerminal } from "./machine.ts";
+import { Machine, openTerminal, resolvedSpecs } from "./machine.ts";
 import { cloneStep, cloneTargets, readRepos, reposStatus } from "./repos.ts";
 import { buildSnapshot, carryOver, downloadStep, downloadTargets, dropManifestCache, fetchManifest, planSnapshot, publishSnapshot, snapshotStatus, writeManifest } from "./snapshot.ts";
 import type { PublishPlan } from "./snapshot.ts";
@@ -1372,6 +1372,11 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
   }
   if (p === "/api/github/login") {
     // { action: "start" } → the code to enter on GitHub's device page; "status" is polled until done or failed.
+    // Only for someone whose checks include it: a role whose machine.json `when` leaves out the
+    // GitHub CLI has no sign-in, so its runs use only the workspace's read token (GIT_TOKEN).
+    if (body.action === "start" && !resolvedSpecs(MAIN_WORKSPACE_PATH).specs.some((s) => s.hostedSignIn === "github")) {
+      return sendError(res, 403, "Your role doesn't sign in to GitHub here.");
+    }
     if (body.action === "start") return sendJson(res, await githubLogin.start(user));
     if (body.action === "status") return sendJson(res, githubLogin.status());
     if (body.action === "cancel") { githubLogin.cancel(); return sendJson(res, { ok: true }); }
