@@ -206,7 +206,7 @@ export function ticketRegex(root) {
       /* fall through */
     }
   }
-  return /([A-Z][A-Z0-9]+-\d+)/i; // ABC-123, ENG-196, KREDIT-7833...
+  return /([A-Z][A-Z0-9]+-\d+)/i; // ABC-123, ENG-196, PROJ-7833...
 }
 
 export function deriveReviewId(root, repos, now = new Date()) {
