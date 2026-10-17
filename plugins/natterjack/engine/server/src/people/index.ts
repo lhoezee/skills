@@ -61,6 +61,7 @@ export interface PeopleAction {
 }
 
 const DIRECTORY_TTL = 5 * 60_000;
+const CLUSTER_TTL = 60_000;
 const errOf = (source: PeopleView["errors"][number]["source"], e: any) => ({ source, message: String(e?.message || e), fix: e?.fix || null });
 const httpError = (status: number, message: string) => Object.assign(new Error(message), { status });
 
@@ -72,6 +73,7 @@ export class People {
   private readonly roles: () => RoleConfig[];
   private dirCache: { key: string; at: number; people: DirectoryPerson[] } | null = null;
   private platformCache: { key: string; p: Platform } | null = null;
+  private clusterCache: { p: Platform; at: number; list: Map<string, Dashboard> } | null = null;
   private me: string | null = null;
 
   constructor(workspaceRoot: string, opts: { run?: Runner; fetcher?: Fetcher; configDir?: string; roles?: () => RoleConfig[] } = {}) {
@@ -93,6 +95,20 @@ export class People {
     const key = JSON.stringify([cfg.platform, cfg.areas]);
     if (!this.platformCache || this.platformCache.key !== key) this.platformCache = { key, p: makePlatform(cfg, this.run) };
     return this.platformCache.p;
+  }
+
+  /**
+   * Who has a dashboard. Listing it is a slow CLI call (az's start-up alone is seconds), so a
+   * page load and the previews after it share one listing for CLUSTER_TTL. `fresh` (Refresh, and
+   * every change for real) asks the platform again; a change clears it for the next load.
+   */
+  private async cluster(cfg: HostingConfig, fresh: boolean): Promise<Map<string, Dashboard>> {
+    const k = this.platform(cfg);
+    const c = this.clusterCache;
+    if (!fresh && c && c.p === k && Date.now() - c.at < CLUSTER_TTL) return c.list;
+    const list = await k.list();
+    this.clusterCache = { p: k, at: Date.now(), list };
+    return list;
   }
 
   private async directory(cfg: HostingConfig, force: boolean): Promise<DirectoryPerson[]> {
@@ -118,7 +134,7 @@ export class People {
     const k = this.platform(cfg);
     const roster = this.roster();
     const dirLabel = makeDirectory(cfg.directory, this.run, this.fetcher).label;
-    const [dir, ros, clu] = await Promise.allSettled([this.directory(cfg, force), roster.status().then((status) => ({ doc: roster.load(), status })), k.list()]);
+    const [dir, ros, clu] = await Promise.allSettled([this.directory(cfg, force), roster.status().then((status) => ({ doc: roster.load(), status })), this.cluster(cfg, force)]);
     const errors: PeopleView["errors"] = [];
     if (dir.status === "rejected") errors.push(errOf("directory", dir.reason));
     if (ros.status === "rejected") errors.push(errOf("roster", ros.reason));
@@ -191,7 +207,9 @@ export class People {
     const dryRun = !!a.dryRun;
     const k = this.platform(cfg);
     const roster = this.roster();
-    const cluster = await k.list();
+    // A preview can use the page's listing; a change for real checks the platform first.
+    const cluster = await this.cluster(cfg, !dryRun);
+    if (!dryRun) this.clusterCache = null; // whatever happens next, the next load asks again
     const c = cluster.get(email) || null;
     const by = await this.who();
     const at = new Date().toISOString();

@@ -189,6 +189,46 @@ test("Entra directory: only the domain's members (no guests), filtered by depart
   assert.match(calls[0], /az account get-access-token --resource-type ms-graph/);
 });
 
+test("directory tokens are kept between lists; one the directory refuses is replaced once", async () => {
+  let issued = 0;
+  const run: Runner = async () => ok(`tok${++issued}\n`);
+  let refused = (_token: string) => false;
+  const fetcher: Fetcher = async (_url, init) => {
+    if (refused(String(init?.headers?.Authorization).replace("Bearer ", ""))) return { ok: false, status: 401, json: async () => ({}), text: async () => '{"error":{"message":"Invalid Credentials"}}' };
+    return { ok: true, status: 200, json: async () => ({ users: [{ primaryEmail: "ana@acme.com" }] }), text: async () => "" };
+  };
+  const google = () => makeDirectory({ type: "google", domain: "acme.com", orgUnit: null, department: null, adminUnit: null, project: null }, run, fetcher);
+  await google().list();
+  await google().list();
+  assert.equal(issued, 1, "gcloud is slow to start: one token serves both lists");
+
+  refused = (t) => t === "tok1"; // signed out, or signed in again with other scopes
+  assert.equal((await google().list()).length, 1, "the list still comes back");
+  assert.equal(issued, 2, "with a new token in place of the refused one");
+
+  refused = () => true; // the new token is refused too: say so, no loop
+  await assert.rejects(google().list(), /can't read the Workspace directory/);
+  assert.equal(issued, 3);
+});
+
+test("People: the page and its previews share one listing for a minute; Refresh and real changes ask again", async () => {
+  const { root, cfg } = workspace();
+  const { run, fetcher, state } = world(cfg);
+  const people = new People(root, { run, fetcher, configDir: cfg });
+  const lists = () => state.calls.filter((c) => c.includes("get statefulsets")).length;
+  await people.view();
+  await people.view();
+  await people.act({ action: "provision", email: "ana@acme.com", dryRun: true });
+  assert.equal(lists(), 1, "load, reload and a preview: one listing");
+  await people.view(true);
+  assert.equal(lists(), 2, "Refresh asks the platform");
+  await people.act({ action: "provision", email: "ana@acme.com" });
+  assert.equal(lists(), 3, "a change for real checks the platform first");
+  const view = await people.view();
+  assert.equal(lists(), 4, "and the next load sees what it did");
+  assert.equal(view.rows.find((r) => r.email === "ana@acme.com")?.state, "stopped");
+});
+
 // ------------------------------------------------------------------ roster
 
 test("Roster: no file is an empty roster; writes are sorted, with a $comment, and git says what isn't committed", async () => {
