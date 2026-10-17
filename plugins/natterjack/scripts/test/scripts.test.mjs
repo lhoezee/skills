@@ -368,6 +368,7 @@ test("scaffold into a nested engineDir: engine, engine.json, .gitignore, skill n
   for (const d of ["templates", "router"]) copyTree(path.join(ENGINE_DIR, "..", d), path.join(baseRoot, d));
   fs.appendFileSync(path.join(baseRoot, "templates", "hosted", "Dockerfile"), "# old\n");
   fs.appendFileSync(path.join(baseRoot, "templates", "hosted", "app-service-person.bicep"), "// old\n");
+  fs.appendFileSync(path.join(baseRoot, "templates", "hosted", "kubernetes-person.yaml"), "# old\n");
   fs.writeFileSync(path.join(root, ".claude", "dashboard", "hosting.json"), JSON.stringify({ platform: { type: "azure-app-service", template: "hosting/app-service-person.bicep" } }));
   const rel = path.join("bin", "snapshot.mjs");
   fs.appendFileSync(path.join(base, rel), "// old\n");
@@ -380,7 +381,8 @@ test("scaffold into a nested engineDir: engine, engine.json, .gitignore, skill n
   assert.equal(fs.readFileSync(path.join(root, "tools", "ops", rel), "utf-8"), fs.readFileSync(path.join(ENGINE_DIR, rel), "utf-8").replace(/\r\n/g, "\n"));
   assert.ok(up.next.includes("cd tools/ops && npm ci && npm test"));
   assert.deepEqual(up.hostedImages, ["engine/bin/snapshot.mjs", "templates/hosted/Dockerfile"], "the boot-time snapshot install is in the image too");
-  assert.deepEqual(up.hostedTemplates, ["templates/hosted/app-service-person.bicep"]);
+  assert.deepEqual(up.hostedTemplates, ["templates/hosted/app-service-person.bicep", "templates/hosted/kubernetes-person.yaml"]);
+  assert.ok(!up.next.some((n) => n.includes("kubernetes-person.yaml")), "an App Service team isn't told about the Kubernetes templates");
   assert.ok(up.next.some((n) => n.includes("node tools/ops/bin/hosted-images.mjs --all --dry-run")), "a changed image: rebuild it");
   assert.ok(up.next.some((n) => /changes templates\/hosted\/app-service-person\.bicep: bring the same change into your copy, hosting\/app-service-person\.bicep/.test(n)));
   const after = JSON.parse(fs.readFileSync(path.join(root, ".claude", "dashboard", "engine.json"), "utf-8"));
