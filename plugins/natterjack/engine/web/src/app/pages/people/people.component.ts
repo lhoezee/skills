@@ -1,4 +1,5 @@
 import { ChangeDetectionStrategy, Component, OnInit, computed, inject, signal } from '@angular/core';
+import { RouterLink } from '@angular/router';
 import type { PeopleActionName, PeopleActionResponse, PeopleResponse, PeopleRoster, PersonRow, PersonState } from '../../../../../shared/api';
 import { ApiService } from '../../core/api.service';
 import { LaunchService } from '../../core/launch.service';
@@ -29,7 +30,7 @@ interface Pending { row: PersonRow; action: PeopleActionName; profile?: string; 
  */
 @Component({
   selector: 'dash-people',
-  imports: [PageHeaderComponent],
+  imports: [PageHeaderComponent, RouterLink],
   changeDetection: ChangeDetectionStrategy.OnPush,
   styleUrl: './people.component.scss',
   template: `
@@ -57,6 +58,10 @@ interface Pending { row: PersonRow; action: PeopleActionName; profile?: string; 
     } @else {
       @for (e of view()!.errors; track e.source) {
         <div class="warn-note err"><b>{{ sourceLabel(e.source) }}:</b> {{ e.message }}
+          @if (e.source === 'directory' && view()!.directory.type === 'google') {
+            <!-- The Machine page takes the OAuth client file and runs this sign-in (people/google-login.ts). -->
+            <div class="fix"><a class="btn primary sm" routerLink="/machine">Sign in on the Machine page</a> <span class="muted">(Google Workspace directory, under People page)</span></div>
+          }
           @if (e.fix) { <div class="fix">Fix: <code>{{ e.fix }}</code> <button class="btn ghost sm" (click)="copy(e.fix)">Copy</button></div> }
         </div>
       }

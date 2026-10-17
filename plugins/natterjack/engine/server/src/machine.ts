@@ -6,7 +6,10 @@
  * declared (an .nvmrc, a csproj, go.mod, ...), so the page stays right as they change.
  *
  * Each result: { id, group, label, status: ok|warn|missing|info, version,
- * required, detail, fix, install?, action?, apps: [appKey] }
+ * required, detail, fix, install?, action?, upload?, apps: [appKey] }
+ * (upload: the page offers a file picker; "google-client" is the People page's
+ * Google OAuth client, people/google-login.ts. A hosting.json with a Google
+ * directory adds that check by itself, on local dashboards.)
  *   ok       satisfied
  *   warn     works, but something is off (old default Node rescued by nvm, …)
  *   missing  a required piece is absent; the listed apps won't start
@@ -32,6 +35,7 @@ import { agentStatuses } from "./agents/index.ts";
 import { NOT_HOSTED } from "./hosted.ts";
 import { statusAccount } from "./github-login.ts";
 import { hardware } from "./hardware.ts";
+import { googleDirectoryCheck } from "./people/google-login.ts";
 
 const IS_WIN = process.platform === "win32";
 const IS_MAC = process.platform === "darwin";
@@ -276,12 +280,12 @@ class Machine {
   }
 
   /**
-   * machine.json and apps.json mtimes, plus the viewer's profile and role: an edit to either file,
-   * or a role change (which `when` filters on), re-runs the checks on the next request.
+   * machine.json, apps.json and hosting.json mtimes, plus the viewer's profile and role: an edit to
+   * any of them, or a role change (which `when` filters on), re-runs the checks on the next request.
    */
   _configSig() {
     const me = readProfile(LEDGER_DIR);
-    return ["machine.json", "apps.json"].map((f): number | string => {
+    return ["machine.json", "apps.json", "hosting.json"].map((f): number | string => {
       try { return fs.statSync(path.join(this.root, ".claude", "dashboard", f)).mtimeMs; } catch { return 0; }
     }).concat([me.profile, me.current.id]).join(":");
   }
@@ -353,6 +357,12 @@ class Machine {
       checks.push({ apps: [], ...c, detail: c.detail || "", fix: fixText });
     }
     checks.push(...(await agentChecks(checks)));
+    // The People page's directory sign-in (people/google-login.ts): engineers' own machines only.
+    const hosting = this.hosted ? null : readConfigFile("hosting.json").data;
+    if (hosting?.directory?.type === "google") {
+      checks.push(await googleDirectoryCheck({ probe: p.probe, ledgerDir: LEDGER_DIR, osKey: OS_KEY, project: typeof hosting.directory.project === "string" ? hosting.directory.project : null })
+        .catch((e) => ({ id: "google-directory", kind: "google-directory", group: "People page", label: "Google Workspace directory", apps: [], status: "warn", detail: `Check failed: ${e.message}`, fix: "" })));
+    }
     // Install buttons only where there's something to do.
     for (const c of checks) if (c.status === "ok") delete c.install;
 

@@ -81,6 +81,7 @@ import { forgetAtlassianKeys } from "./atlassian.ts";
 import { HOSTED_HIDDEN_PAGES, NOT_HOSTED, checkHostedRequest, hostedConfig } from "./hosted.ts";
 import { ClaudeLogin } from "./claude-login.ts";
 import { GithubLogin } from "./github-login.ts";
+import { saveClient as saveGoogleClient } from "./people/google-login.ts";
 import { Models } from "./models/index.ts";
 import { isRoutedId, routeOf } from "./models/routes.ts";
 
@@ -1128,7 +1129,7 @@ function serveExploreRaw(res: http.ServerResponse, pathname: string) {
 }
 
 /** POSTs that open something on the server's own screen or ports, refused when hosted. */
-const LOCAL_ONLY_POSTS = new Set(["/api/models/routing", "/api/models/start", "/api/models/pull", "/api/models/cancel", "/api/models/delete", "/api/models/prepare", "/api/models/install-ollama", "/api/machine/install", "/api/knowledge/setup", "/api/knowledge/store-source", "/api/docs/preview", "/api/apps/action", "/api/restart"]);
+const LOCAL_ONLY_POSTS = new Set(["/api/models/routing", "/api/models/start", "/api/models/pull", "/api/models/cancel", "/api/models/delete", "/api/models/prepare", "/api/models/install-ollama", "/api/machine/install", "/api/machine/google-client", "/api/knowledge/setup", "/api/knowledge/store-source", "/api/docs/preview", "/api/apps/action", "/api/restart"]);
 
 async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, url: URL, user: string | null) {
   const p = url.pathname;
@@ -1487,6 +1488,8 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
     return sendJson(res, { run }, 201);
   }
   if (p === "/api/machine/install") return sendJson(res, await machine.install(String(body.id || ""))); // only the id crosses the wire
+  // The People page's Google OAuth client file, kept in the ledger (people/google-login.ts).
+  if (p === "/api/machine/google-client") return sendJson(res, { ok: true, ...saveGoogleClient(LEDGER_DIR, String(body.content || "")) });
   if (p.startsWith("/api/models/")) {
     const what = p.slice("/api/models/".length);
     const name = String(body.name || "");

@@ -6,7 +6,7 @@
  */
 
 import type { DirectoryConfig } from "./config.ts";
-import { cliError, notInstalled, type Runner } from "./cli.ts";
+import { cliError, notInstalled, runReading, type Runner } from "./cli.ts";
 
 export interface DirectoryPerson { email: string; name: string; active: boolean }
 export type Fetcher = (url: string, init?: { headers?: Record<string, string> }) => Promise<{ ok: boolean; status: number; json(): Promise<any>; text(): Promise<string> }>;
@@ -37,7 +37,7 @@ class GoogleDirectory implements Directory {
   }
 
   async list(): Promise<DirectoryPerson[]> {
-    const r = await this.run("gcloud", ["auth", "application-default", "print-access-token"], { timeout: 30_000 });
+    const r = await runReading(this.run, "gcloud", ["auth", "application-default", "print-access-token"], { timeout: 30_000 });
     if (notInstalled(r)) throw fail("The Google Cloud CLI (gcloud) isn't installed.", "Install it from https://cloud.google.com/sdk/docs/install, then sign in");
     if (!r.ok) throw cliError("gcloud couldn't give a directory token", r, `run: ${GOOGLE_LOGIN}`);
     const token = r.stdout.trim();
@@ -89,7 +89,7 @@ class EntraDirectory implements Directory {
   }
 
   async list(): Promise<DirectoryPerson[]> {
-    const r = await this.run("az", ["account", "get-access-token", "--resource-type", "ms-graph", "--query", "accessToken", "-o", "tsv"], { timeout: 30_000 });
+    const r = await runReading(this.run, "az", ["account", "get-access-token", "--resource-type", "ms-graph", "--query", "accessToken", "-o", "tsv"], { timeout: 30_000 });
     if (notInstalled(r)) throw fail("The Azure CLI (az) isn't installed.", "install it, then run: az login");
     if (!r.ok) throw cliError("az couldn't give a Microsoft Graph token", r, "run: az login");
     const token = r.stdout.trim();

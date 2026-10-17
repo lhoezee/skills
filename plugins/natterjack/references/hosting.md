@@ -48,13 +48,29 @@ What changes for the person:
 
 ## The image
 
-`templates/hosted/Dockerfile` is Node 24 plus git, the Claude CLI and the engine's server code, with everything personal on a volume at `/data`. Build it from `plugins/natterjack` once per workspace, and run one container per person:
+`templates/hosted/Dockerfile` is Node 24 plus git, the Claude CLI and the engine's server code, with everything personal on a volume at `/data`. Build it from `plugins/natterjack` once per workspace, and run one container per person. The workspace's engine has a script that builds it, and the router's, from the plugin release the engine is:
+
+```sh
+node <engine>/bin/hosted-images.mjs --all --dry-run              # what it would run
+node <engine>/bin/hosted-images.mjs --all --push --update-hosting
+```
+
+- **Where they go:** `--registry <server>`. On App Service it defaults to hosting.json's `registry` (`<name>.azurecr.io`, signed in to with `az acr login`); other registries need `docker login` first.
+- **The tag:** `--tag`, default `<engine version>-<yyyymmddhhmm>`, so each build is new and the containers actually move to it.
+- **`--update-hosting`** (App Service) points hosting.json's `image` at the new dashboard image, so the People page shows who needs an update. On Kubernetes, change the image in your copy of the template.
+- **The router** isn't moved for you: point its Web App or Deployment at the new tag.
+- **One fixed command** (`node <engine>/bin/hosted-images.mjs`) is easy to allow for Claude in `.claude/settings.local.json`, so a run can rebuild the images when you ask.
+
+By hand it's one `docker build` per image (`router/Dockerfile` for the router):
 
 ```sh
 docker build -f plugins/natterjack/templates/hosted/Dockerfile --pull --no-cache -t <registry>/natterjack-dashboard:<tag> plugins/natterjack
 ```
 
-Rebuild this image and the router's (`router/Dockerfile`) to pick up OS security fixes. Both upgrade Debian's packages at build time, because the `node:24-bookworm-slim` base often doesn't have them yet. Without `--pull --no-cache` Docker reuses the cached upgrade layer and the rebuild changes nothing. Give each build a new `<tag>` (for example `2`, `3`, ...) so the pods actually move to it.
+**When to rebuild.** Most engine upgrades don't need it: hosted dashboards run the engine from the published snapshot. Rebuild when:
+- **A release changes the images.** `upgrade` says so (its `hostedImages`).
+- **You want a newer Claude CLI.** Auto-update is off in the image, so everyone runs the version it was built with.
+- **For OS security fixes**, every month or so. Both images upgrade Debian's packages at build time, because the `node:24-bookworm-slim` base often doesn't have them yet. Without `--pull --no-cache` Docker reuses the cached upgrade layer and the rebuild changes nothing (the script always passes both).
 
 On start, `entrypoint.sh` puts the workspace in `/data/workspace` or updates it. Then it runs `node <engine>/bin/dashboard.mjs run` (`<engine>` is the engine folder: `natterjack/` by default, `dashboard/` in older workspaces; `.claude/dashboard/engine.json` `dir` says which), which is the server in the foreground. The workspace comes from one of two places.
 
@@ -148,7 +164,7 @@ Backends:
 - **`static`.** `ROUTER_STATIC_FILE` names a JSON file of `{ "<email>": "<dashboard URL>" }`, re-read when it changes. Use it for containers someone else keeps running: a VM with Docker, ECS services. The router never starts or stops them.
 - **Another platform.** Implement `Backend` in `router/src/backends.ts` (find a person's URL, and optionally start/stop/list running ones) and add it to `makeBackend()`.
 
-Build it from `plugins/natterjack`, so it gets the engine's shared request checks:
+Build it from `plugins/natterjack`, so it gets the engine's shared request checks: `node <engine>/bin/hosted-images.mjs --router --push` ("The image" above), or by hand:
 
 ```sh
 docker build -f plugins/natterjack/router/Dockerfile --pull --no-cache -t <registry>/natterjack-router:<tag> plugins/natterjack
@@ -190,11 +206,18 @@ Every change is checked first: the page shows the platform's own preview (`kubec
      2. **Google Auth Platform → Branding/Audience:** set the audience to **Internal** (only your Workspace's accounts; no Google review). Under **Data access**, add the `admin.directory.user.readonly` scope.
      3. **Clients → Create client → Desktop app**, and download its JSON. Share it with the engineers who manage people (it identifies the app, it isn't a password; keep it out of the repo all the same).
 
-     Then each of those engineers, who needs a Workspace admin role that can read users (a custom role with Users > Read is enough), signs in once:
-     ```sh
-     gcloud auth application-default login --client-id-file=<the client JSON> --scopes="https://www.googleapis.com/auth/admin.directory.user.readonly,https://www.googleapis.com/auth/cloud-platform"
-     ```
-     Set `directory.project` in hosting.json to that project, so the Admin SDK calls are billed to it. In PowerShell, run it through cmd with the whole line in single quotes, `cmd /c 'gcloud auth application-default login ...'`: PowerShell drops the inner quotes and gcloud then splits the scopes at the comma ("cloud-platform scope is required but not requested").
+     Set `directory.project` in hosting.json to that project, so the Admin SDK calls are billed to it.
+
+     Then each of those engineers signs in once. They need a Workspace admin role that can read users (a custom role with Users > Read is enough).
+     - **From the Machine page** (easiest): a Google directory in hosting.json adds a **Google Workspace directory** check under "People page".
+       1. **Choose client file…** takes the client JSON. The page checks it's a Desktop app client and keeps it in `.claude/ledger/` (never committed, never in a snapshot).
+       2. **Sign in** opens a terminal running the command below, then the browser.
+       3. The check turns green once Google confirms the sign-in can read the directory, whichever way it was made.
+     - **By hand:**
+       ```sh
+       gcloud auth application-default login --client-id-file=<the client JSON> --scopes="https://www.googleapis.com/auth/admin.directory.user.readonly,https://www.googleapis.com/auth/cloud-platform"
+       ```
+       In PowerShell, run it through cmd with the whole line in single quotes, `cmd /c 'gcloud auth application-default login ...'`. PowerShell drops the inner quotes, and gcloud then splits the scopes at the comma ("cloud-platform scope is required but not requested").
 
 ## Running it
 

@@ -27,6 +27,25 @@ import path from "node:path";
 import { ENGINE_DIR, TAG_PREFIX, args, compareVersions, engineDirOf, engineVersion, fetchEngine, gitMergeFile, hashFile, isMain, latestRelease, listFiles, readJson, releaseCheck, writeJson } from "./lib.mjs";
 
 /**
+ * What the hosted images bake in (templates/hosted/Dockerfile, router/Dockerfile): the image
+ * files themselves, the router's shared request checks, and the boot-time snapshot install.
+ * The rest of the engine reaches hosted dashboards through the published snapshot.
+ */
+const IMAGE_PATHS = ["templates/hosted/", "router/", "engine/bin/snapshot.mjs", "engine/server/src/hosted.ts", "engine/server/src/snapshot", "engine/server/src/zip.ts", "engine/server/src/tar.ts"];
+
+/**
+ * The files in the hosted images, and the per-person templates beside them in templates/hosted/,
+ * that differ between two plugin folders, sorted; null when the old one isn't a whole plugin
+ * (a --base engine folder), so there's nothing to compare.
+ */
+export function imageChanges(oldPlugin, newPlugin) {
+  if (!fs.existsSync(path.join(oldPlugin, "templates", "hosted"))) return null;
+  const inImage = (rel) => IMAGE_PATHS.some((p) => rel.startsWith(p));
+  const files = new Set([...listFiles(oldPlugin), ...listFiles(newPlugin)].filter(inImage));
+  return [...files].filter((rel) => hashFile(path.join(oldPlugin, rel)) !== hashFile(path.join(newPlugin, rel))).sort();
+}
+
+/**
  * @param o.latest      newest release version; left out, it's looked up on the source repo
  *                      (tests pass it, or null to skip the check)
  * @param o.allowStale  go ahead even though a newer release than this plugin is out
@@ -89,6 +108,17 @@ export function upgrade(root, { base: baseArg, dry = false, latest, allowStale =
     ? ["Resolve the conflict markers in the files listed under conflicts (search for <<<<<<<), then build and restart."]
     : [];
   r.next.push(`cd ${dir} && npm ci && npm test`, `node ${dir}/bin/dashboard.mjs restart  (ends any run in progress in the dashboard)`);
+  // Teams with hosted dashboards (hosting.json): what this release changes there that the merge above doesn't reach.
+  const hosted = imageChanges(path.dirname(baseDir), path.dirname(ENGINE_DIR));
+  const hosting = readJson(path.join(root, ".claude", "dashboard", "hosting.json"));
+  if (hosted?.length) {
+    // The per-person templates aren't in an image: teams deploy their own copy (hosting.json platform.template).
+    r.hostedTemplates = hosted.filter((f) => /^templates\/hosted\/.*\.(bicep|ya?ml)$/.test(f));
+    r.hostedImages = hosted.filter((f) => !r.hostedTemplates.includes(f));
+    const list = (files) => files.slice(0, 4).join(", ") + (files.length > 4 ? `, and ${files.length - 4} more` : "");
+    if (hosting && r.hostedImages.length) r.next.push(`This release changes the hosted images (${list(r.hostedImages)}): rebuild them with node ${dir}/bin/hosted-images.mjs --all --dry-run, then --all --push --update-hosting, and move the router to its new tag`);
+    if (hosting && r.hostedTemplates.length) r.next.push(`This release changes ${list(r.hostedTemplates)}: bring the same change into your copy${hosting.platform?.template ? `, ${hosting.platform.template}` : ""}, keeping your settings`);
+  }
   return r;
 }
 

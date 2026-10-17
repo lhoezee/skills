@@ -807,7 +807,11 @@ export interface MachineCheck {
   install?: { label: string; cmd: string; cwd?: string } | null; action?: 'setup';
   /** Hosted: this check's sign-in happens in the page (github-login.ts); `account` is who's signed in. */
   signIn?: 'github'; account?: string;
+  /** Local: the page offers a file picker for this check ("google-client": the People page's Google OAuth client). */
+  upload?: 'google-client';
 }
+/** POST /api/machine/google-client { content } → the client it saved (people/google-login.ts). */
+export interface GoogleClientSaved { ok: true; clientId: string; projectId: string | null }
 /**
  * POST /api/github/login { action: "start" | "status" | "cancel" | "logout" }. start → the code to
  * enter at `url` (GitHub's device page); status → how it's going, polled until done or failed.
