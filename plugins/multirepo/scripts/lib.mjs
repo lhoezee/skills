@@ -112,9 +112,19 @@ export function findRoot(start = process.cwd()) {
   return top ? path.resolve(top) : path.resolve(start);
 }
 
-/** .claude/dashboard/workspace.json, or {}. */
+/**
+ * .claude/dashboard/workspace.json, or {}. A worktree has no copy of its own, so
+ * when root has none and its .worktree.json names a sourceWorkspace, that
+ * workspace's file is read instead.
+ */
 export function readWorkspaceConfig(root) {
-  return readJson(path.join(root, ".claude", "dashboard", "workspace.json")) ?? {};
+  const own = readJson(path.join(root, ".claude", "dashboard", "workspace.json"));
+  if (own) return own;
+  const src = readWorktreeMeta(root)?.sourceWorkspace;
+  if (typeof src === "string" && src && !samePath(src, root)) {
+    return readJson(path.join(path.resolve(src), ".claude", "dashboard", "workspace.json")) ?? {};
+  }
+  return {};
 }
 
 /** .worktree.json at root, or null. */
@@ -149,12 +159,14 @@ export function readReposJson(root) {
  *   2. repos.json;
  *   3. root itself when it's a git repo;
  *   4. the git repos one level down.
- * Entries are listed whether or not they're cloned; check `exists`.
+ * Entries are listed whether or not they're cloned; check `exists` (true only
+ * when the folder is the top of its own checkout, not a plain folder inside a
+ * git-backed workspace).
  */
 export function listRepos(root) {
   const withPath = (r) => {
     const p = path.join(root, r.relativePath.replace(/[\\/]+/g, path.sep));
-    return { ...r, path: p, exists: isGitRepo(p) };
+    return { ...r, path: p, exists: isRepoTop(p) };
   };
 
   const meta = readWorktreeMeta(root);

@@ -37,7 +37,6 @@ import {
   findRoot,
   git,
   gitRun,
-  isGitRepo,
   isMain,
   listRepos,
   parseArgs,
@@ -60,15 +59,21 @@ function gitAsync(cwd, args, timeout = 120000) {
 const firstLine = (s) => String(s ?? "").split("\n").map((l) => l.trim()).find(Boolean) ?? "";
 const key = pathKey;
 
-/** The root repo (when the workspace root is its own git repo) + listRepos, de-duplicated. */
+/**
+ * The root repo (when the workspace root is its own git repo) + listRepos,
+ * de-duplicated by path. A repos.json entry for the root (relativePath ".")
+ * keeps its own metadata (name, defaultBranch, layer...) and is marked isRoot.
+ */
 export function allRepos(root) {
   const out = [];
   if (isRepoTop(root)) {
     out.push({ name: path.basename(root), relativePath: ".", path: root, exists: true, layer: null, defaultBranch: null, isRoot: true });
   }
   for (const r of listRepos(root)) {
-    if (out.some((o) => key(o.path) === key(r.path))) continue;
-    out.push({ ...r, isRoot: key(r.path) === key(root) });
+    const isRoot = key(r.path) === key(root);
+    const i = out.findIndex((o) => key(o.path) === key(r.path));
+    if (i === -1) out.push({ ...r, isRoot });
+    else if (out[i].isRoot && isRoot) out[i] = { ...r, relativePath: ".", exists: true, isRoot: true };
   }
   return out;
 }

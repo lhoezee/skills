@@ -41,7 +41,7 @@ import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import {
-  defaultBranch, expandHome, findRoot, findTicket, git, gitRun, isMain, listRepos,
+  defaultBranch, expandHome, findRoot, findTicket, git, gitRun, isMain, isRepoTop, listRepos,
   normalizeRepo, parseArgs, readJson, readReposJson, readWorkspaceConfig, readWorktreeMeta, slash,
 } from "./lib.mjs";
 
@@ -71,12 +71,26 @@ const firstLine = (s) => String(s || "").split("\n")[0].trim();
 const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 const relPath = (root, rel) => path.join(root, String(rel).replace(/[\\/]+/g, path.sep));
 
-/** A workspace-relative path that stays inside it ("a/b", not "/x", "../x" or "a/../b"). */
-const safeRel = (p) =>
-  typeof p === "string" && p.trim() !== "" && !path.isAbsolute(p) && !/^[A-Za-z]:/.test(p) &&
-  !slash(p).split("/").some((s) => s === ".." );
+/**
+ * A workspace-relative path that stays strictly inside it, normalized ("./a/b/" →
+ * "a/b"), or null for anything that isn't: "", ".", "./", "/x", "C:\x", "../x",
+ * "a/../b". The workspace root itself is never a valid entry.
+ */
+export function normalizeRel(p) {
+  if (typeof p !== "string" || !p.trim()) return null;
+  const s = slash(p.trim());
+  if (path.isAbsolute(p) || s.startsWith("/") || /^[A-Za-z]:/.test(s)) return null;
+  if (s.split("/").some((x) => x === "..")) return null;
+  const n = path.posix.normalize(s).replace(/\/+$/, "");
+  return n === "" || n === "." ? null : n;
+}
 
-/** worktrees settings from workspace.json, resolved: { dir, portsFile, ports, copy }. */
+const isNeverCopy = (rel) => NEVER_COPY.some((n) => rel === n || rel.startsWith(n + "/"));
+
+/**
+ * worktrees settings from workspace.json, resolved: { dir, portsFile, ports, copy,
+ * copyRejected } (copyRejected: worktrees.copy entries that aren't safe relative paths).
+ */
 export function worktreeSettings(root, config = readWorkspaceConfig(root)) {
   const wt = config.worktrees || {};
   const str = (v, d) => (typeof v === "string" && v.trim() ? v : d);
@@ -84,14 +98,19 @@ export function worktreeSettings(root, config = readWorkspaceConfig(root)) {
   const slotSize = Number(wt.ports && wt.ports.slotSize);
   const ports = Number.isInteger(base) && base > 0 && Number.isInteger(slotSize) && slotSize > 0 && base + slotSize < 65535
     ? { base, slotSize } : null;
-  const copy = Array.isArray(wt.copy)
-    ? wt.copy.filter((p) => safeRel(p) && !NEVER_COPY.some((n) => slash(p).replace(/\/+$/, "") === n || slash(p).startsWith(n + "/")))
-    : [];
+  const copy = [];
+  const copyRejected = [];
+  for (const p of Array.isArray(wt.copy) ? wt.copy : []) {
+    const n = normalizeRel(p);
+    if (!n) copyRejected.push(String(p));
+    else if (!isNeverCopy(n) && !copy.includes(n)) copy.push(n);
+  }
   return {
     dir: path.resolve(root, str(wt.dir, "worktrees")),
     portsFile: path.resolve(expandHome(str(wt.portsFile, "~/.agentic-workspace-ports.json"))),
     ports,
     copy,
+    copyRejected,
   };
 }
 
@@ -125,15 +144,41 @@ export function writeMeta(wtPath, fields) {
 // ------------------------------------------------------------------ config copy
 
 /**
+ * Whether dir holds no git-tracked files: true when `git ls-files` there lists
+ * nothing, or when dir isn't inside any git work tree at all (nothing can be
+ * tracked). Any other git failure → false (keep the folder).
+ */
+export function hasNoTrackedFiles(dir) {
+  const inside = gitRun(dir, ["rev-parse", "--is-inside-work-tree"]);
+  if (!inside.ok) return /not a git repository/i.test(inside.err);
+  if (inside.out !== "true") return false; // e.g. inside a .git dir
+  const r = gitRun(dir, ["ls-files", "--", "."]);
+  return r.ok && r.out === "";
+}
+
+/**
  * Copies the config list from source into target (files and folders; a folder is
  * replaced so deletions carry over) and deletes stale .claude/skills|agents copies.
+ * Entries that aren't safe relative paths, or that would resolve to (or contain)
+ * the target root, are skipped and returned in `skipped`. A stale skills/agents
+ * folder holding git-tracked files (a single-repo worktree's own project files)
+ * is kept and returned in `kept`.
  */
 export function copyConfig(source, target, extra = []) {
   const copied = [];
   const removed = [];
-  for (const rel of [...BASE_COPY, ...extra]) {
+  const skipped = [];
+  const kept = [];
+  for (const raw of [...BASE_COPY, ...extra]) {
+    const rel = normalizeRel(raw);
+    if (!rel) { skipped.push({ path: String(raw), reason: "not a relative path inside the workspace" }); continue; }
     const src = relPath(source, rel);
     const dst = relPath(target, rel);
+    const lexical = path.relative(path.resolve(target), path.resolve(dst));
+    if (!lexical || lexical === ".." || lexical.startsWith(`..${path.sep}`) || path.isAbsolute(lexical) || samePath(dst, target)) {
+      skipped.push({ path: rel, reason: "resolves to the worktree root or outside it" });
+      continue;
+    }
     if (!fs.existsSync(src)) continue;
     fs.mkdirSync(path.dirname(dst), { recursive: true });
     if (fs.statSync(src).isDirectory()) {
@@ -142,16 +187,16 @@ export function copyConfig(source, target, extra = []) {
     } else {
       fs.copyFileSync(src, dst);
     }
-    copied.push(slash(rel));
+    copied.push(rel);
   }
   for (const rel of NEVER_COPY) {
     const stale = relPath(target, rel);
-    if (fs.existsSync(stale)) {
-      fs.rmSync(stale, { recursive: true, force: true, maxRetries: 3 });
-      removed.push(rel);
-    }
+    if (!fs.existsSync(stale)) continue;
+    if (!hasNoTrackedFiles(stale)) { kept.push(rel); continue; }
+    fs.rmSync(stale, { recursive: true, force: true, maxRetries: 3 });
+    removed.push(rel);
   }
-  return { copied, removed };
+  return { copied, removed, skipped, kept };
 }
 
 // ------------------------------------------------------------------ ports
@@ -322,6 +367,12 @@ function cloneRepo(mainRepo, repo, dst, branch) {
       const start = refExists(dst, `refs/remotes/origin/${base}`) ? [`origin/${base}`] : [];
       must(gitRun(dst, ["switch", "--quiet", "--no-track", "-c", branch, ...start]), `git switch -c ${branch}`);
     }
+  } else if (git(dst, ["branch", "--show-current"]) !== base) {
+    // Ad hoc (no --branch): the default branch, even when origin's HEAD points elsewhere.
+    if (refExists(dst, `refs/heads/${base}`)) must(gitRun(dst, ["switch", "--quiet", base]), `git switch ${base}`);
+    else if (refExists(dst, `refs/remotes/origin/${base}`)) {
+      must(gitRun(dst, ["switch", "--quiet", "--track", "-c", base, `origin/${base}`]), `git switch -c ${base}`);
+    }
   }
   return { base };
 }
@@ -426,7 +477,9 @@ export function createWorktree(opts, log = () => {}) {
     throw err;
   }
 
-  const { copied } = copyConfig(root, wtPath, settings.copy);
+  const { copied, skipped, kept } = copyConfig(root, wtPath, settings.copy);
+  const copySkipped = [...settings.copyRejected.map((p) => ({ path: p, reason: "not a relative path inside the workspace" })), ...skipped];
+  for (const s of copySkipped) log(`warning: worktrees.copy entry '${s.path}' skipped (${s.reason})`);
   if (rootRepo && done.some((d) => d.relativePath === ".")) excludeFromRepo(wtPath, [...copied, ".worktree.json"]);
 
   const ticketId = (typeof opts.ticket === "string" && opts.ticket) || findTicket([name, branch], config);
@@ -462,7 +515,7 @@ export function createWorktree(opts, log = () => {}) {
 
   return {
     name, path: slash(wtPath), branch, ticketId: meta.ticketId, tracker: meta.tracker, native,
-    repos: done, failures, copied, installs, ports, portsConfigured: !!settings.ports, created: meta.created,
+    repos: done, failures, copied, copySkipped, kept, installs, ports, portsConfigured: !!settings.ports, created: meta.created,
   };
 }
 
@@ -583,16 +636,68 @@ function spawnQuiet(cmd, args, cwd, timeoutMs) {
   });
 }
 
-/** The most recent merged PR for a branch per gh ({ number, mergedAt }), or null (no gh, offline, none). */
-async function ghMergedPr(repoPath, branch, timeoutMs = 8000) {
-  const out = await spawnQuiet("gh", ["pr", "list", "--head", branch, "--state", "merged", "--json", "number,mergedAt", "--limit", "1"], repoPath, timeoutMs);
+/** origin's URL → gh's --repo value ("owner/name", or "host/owner/name" off github.com), or null. */
+export function ghRepoFromUrl(url) {
+  const m = String(url || "").trim().match(/^(?:[\w+.-]+:\/\/)?(?:[^@/]+@)?([^/:]+)(?::\d+)?[:/]([^/]+)\/([^/]+?)(?:\.git)?\/?$/);
+  if (!m) return null;
+  const [, host, owner, name] = m;
+  return host.toLowerCase() === "github.com" ? `${owner}/${name}` : `${host}/${owner}/${name}`;
+}
+
+/** Merged PRs for a head branch per gh ([{ number, baseRefName, headRefOid, mergedAt }]), or null (no gh, offline). */
+async function ghMergedPrs(repoPath, branch, timeoutMs = 8000) {
+  const repo = ghRepoFromUrl(git(repoPath, ["remote", "get-url", "origin"]));
+  const args = ["pr", "list", ...(repo ? ["--repo", repo] : []), "--head", branch, "--state", "merged",
+    "--json", "number,baseRefName,headRefOid,mergedAt", "--limit", "20"];
+  const out = await spawnQuiet("gh", args, repoPath, timeoutMs);
   if (out === null) return null;
   try {
     const arr = JSON.parse(out.trim() || "[]");
-    return arr.length ? arr[0] : null;
+    return Array.isArray(arr) ? arr : null;
   } catch {
     return null;
   }
+}
+
+/**
+ * Whether a merged PR proves the local HEAD landed. Only PRs into defaultBranch
+ * count, newest first; one proves it when its headRefOid is HEAD or HEAD is an
+ * ancestor of it. When HEAD instead has commits beyond a merged PR's head, that's
+ * "stale": prMerged false, prMergedStale true, prAheadBy = those commits.
+ *   isAncestor(a, b): a is an ancestor of b (false when either isn't available).
+ *   countAhead(oid):  commits in HEAD not in oid (optional).
+ * Returns { prMerged, prNumber, prMergedStale, prAheadBy }.
+ */
+export function decidePrMerged(prs, { defaultBranch: base, headOid, isAncestor, countAhead = () => null }) {
+  const none = { prMerged: false, prNumber: null, prMergedStale: false, prAheadBy: null };
+  if (!Array.isArray(prs) || !headOid) return none;
+  const candidates = prs
+    .filter((p) => p && p.baseRefName === base && typeof p.headRefOid === "string" && p.headRefOid)
+    .sort((a, b) => String(b.mergedAt || "").localeCompare(String(a.mergedAt || "")));
+  for (const p of candidates) {
+    if (p.headRefOid === headOid || isAncestor(headOid, p.headRefOid)) {
+      return { prMerged: true, prNumber: p.number ?? null, prMergedStale: false, prAheadBy: 0 };
+    }
+  }
+  for (const p of candidates) {
+    if (isAncestor(p.headRefOid, headOid)) {
+      return { prMerged: false, prNumber: p.number ?? null, prMergedStale: true, prAheadBy: countAhead(p.headRefOid) };
+    }
+  }
+  return none;
+}
+
+/** isAncestor for decidePrMerged in a repo: fetches a missing commit once (may fail: then not proven). */
+function repoAncestry(repoPath) {
+  const have = (oid) => gitRun(repoPath, ["cat-file", "-e", `${oid}^{commit}`]).ok;
+  const ensure = (oid) => have(oid) || (gitRun(repoPath, ["fetch", "--quiet", "origin", oid], { timeout: 30000 }).ok && have(oid));
+  return {
+    isAncestor: (a, b) => ensure(a) && ensure(b) && gitRun(repoPath, ["merge-base", "--is-ancestor", a, b]).ok,
+    countAhead: (oid) => {
+      const n = parseInt(git(repoPath, ["rev-list", "--count", `${oid}..HEAD`]), 10);
+      return Number.isNaN(n) ? null : n;
+    },
+  };
 }
 
 /**
@@ -603,7 +708,7 @@ export function collectRepoStatus(repoPath, { base, ticketId = null } = {}) {
   const info = {
     branch: "unknown", uncommitted: 0, unpushed: null, aheadOfMain: null, behindMain: null,
     base, mainRef: null, merged: null, treesIdentical: false, allPatchesOnMain: false,
-    squashMergedByGrep: false, prMerged: null, prNumber: null,
+    squashMergedByGrep: false, prMerged: null, prNumber: null, prMergedStale: false, prAheadBy: null,
   };
   info.branch = git(repoPath, ["branch", "--show-current"]) || "(detached)";
   const porcelain = git(repoPath, ["status", "--porcelain"]);
@@ -683,9 +788,10 @@ export async function gatherWorktrees(root, { fetch = true, pr = true } = {}) {
       for (const r of wt.repos) {
         if (r.missing || r.merged || r.treesIdentical || r.allPatchesOnMain) continue;
         if (!r.branch || r.branch === r.base || ["main", "master", "(detached)", "unknown"].includes(r.branch)) continue;
-        checks.push(ghMergedPr(r.path, r.branch).then((hit) => {
-          r.prMerged = !!hit;
-          r.prNumber = hit ? hit.number : null;
+        checks.push(ghMergedPrs(r.path, r.branch).then((prs) => {
+          if (prs === null) return; // gh unavailable: stays unknown
+          const headOid = git(r.path, ["rev-parse", "HEAD"]);
+          Object.assign(r, decidePrMerged(prs, { defaultBranch: r.base, headOid, ...repoAncestry(r.path) }));
         }));
       }
     }
@@ -708,6 +814,7 @@ export function vsMain(r) {
   if (r.treesIdentical) return `squash-merged → ${r.mainRef}`;
   if (r.allPatchesOnMain) return `squash-merged → ${r.mainRef}${r.behindMain > 0 ? ` (-${r.behindMain})` : ""}`;
   if (r.prMerged) return `pr-merged → ${r.mainRef} #${r.prNumber}${delta(" since")}`;
+  if (r.prMergedStale) return `pr-merged #${r.prNumber}${r.prAheadBy > 0 ? ` (+${r.prAheadBy} since)` : ""}, newer commits not merged`;
   if (r.squashMergedByGrep) return `squash-merged${delta(" since")}`;
   return `not merged${delta()}`;
 }
@@ -752,6 +859,35 @@ function mainRoot(root) {
   return meta && meta.sourceWorkspace && fs.existsSync(meta.sourceWorkspace) ? path.resolve(meta.sourceWorkspace) : root;
 }
 
+/**
+ * Git checkouts in a folder without .worktree.json: the given relativePaths (the
+ * source workspace's repos.json), plus a scan up to `maxDepth` levels down for
+ * folders that are the top of their own checkout (skipping node_modules and
+ * dot-folders). Each: { rel, path, native, mainRepo: null }.
+ */
+export function findCheckouts(dir, relativePaths = [], maxDepth = 3) {
+  const out = [];
+  const add = (p) => {
+    if (out.some((x) => samePath(x.path, p)) || !fs.existsSync(path.join(p, ".git")) || !isRepoTop(p)) return;
+    out.push({ rel: slash(path.relative(dir, p)) || ".", path: p, native: fs.statSync(path.join(p, ".git")).isFile(), mainRepo: null });
+  };
+  for (const rel of relativePaths) {
+    if (rel === "." || rel === "") add(dir);
+    else if (normalizeRel(rel)) add(relPath(dir, normalizeRel(rel)));
+  }
+  const walk = (d, depth) => {
+    add(d);
+    if (depth >= maxDepth) return;
+    let entries;
+    try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      if (e.isDirectory() && !e.name.startsWith(".") && e.name !== "node_modules") walk(path.join(d, e.name), depth + 1);
+    }
+  };
+  walk(dir, 0);
+  return out;
+}
+
 /** Uncommitted and unpushed work per repo ([] = safe). No upstream: commits on no remote count. */
 export function unsavedWork(repos) {
   const out = [];
@@ -780,8 +916,20 @@ export function removeWorktree(opts, log = () => {}) {
   const wtPath = path.join(settings.dir, name);
   const entry = discoverWorktrees(root, settings).find((e) => samePath(e.path, wtPath));
   if (!entry && !fs.existsSync(wtPath)) throw new Error(`Worktree '${name}' not found at ${slash(wtPath)}`);
-  const repos = entry ? entry.repos : [];
   const force = opts.force === true;
+  const repos = entry ? [...entry.repos] : [];
+  if (!entry || !entry.hasMetadata) {
+    // No .worktree.json: find the checkouts in the folder ourselves before trusting it's safe.
+    for (const found of findCheckouts(wtPath, readReposJson(root).map((r) => r.relativePath))) {
+      if (!repos.some((x) => samePath(x.path, found.path))) repos.push(found);
+    }
+    const inspectable = repos.filter((r) => fs.existsSync(path.join(r.path, ".git")));
+    let nonEmpty = false;
+    try { nonEmpty = fs.readdirSync(wtPath).length > 0; } catch { /* gone */ }
+    if (!inspectable.length && nonEmpty && !force) {
+      throw new Error(`Worktree '${name}' has no .worktree.json and no git checkout could be inspected in ${slash(wtPath)}: use --force to delete it anyway`);
+    }
+  }
 
   const unsaved = unsavedWork(repos);
   if (unsaved.length && !force) {
@@ -847,8 +995,10 @@ export function syncWorktree(opts = {}) {
   if (!meta) throw new Error(`Not a worktree (no .worktree.json in ${slash(target)})`);
   const source = meta.sourceWorkspace ? path.resolve(meta.sourceWorkspace) : path.resolve(target, "..", "..");
   if (!fs.existsSync(source) || samePath(source, target)) throw new Error(`Source workspace not found (${slash(source)})`);
-  const { copied, removed } = copyConfig(source, target, worktreeSettings(source).copy);
-  return { source: slash(source), target: slash(target), copied, removed };
+  const settings = worktreeSettings(source);
+  const { copied, removed, skipped, kept } = copyConfig(source, target, settings.copy);
+  const copySkipped = [...settings.copyRejected.map((p) => ({ path: p, reason: "not a relative path inside the workspace" })), ...skipped];
+  return { source: slash(source), target: slash(target), copied, removed, copySkipped, kept };
 }
 
 // ------------------------------------------------------------------ CLI
@@ -924,6 +1074,8 @@ async function main(argv) {
     print(`Synced ${r.source} → ${r.target}`);
     for (const c of r.copied) print(`  copied ${c}`);
     for (const d of r.removed) print(`  removed stale ${d}/ (inherited from the parent workspace)`);
+    for (const d of r.kept) print(`  kept ${d}/ (it holds git-tracked files)`);
+    for (const s of r.copySkipped) print(`  warning: worktrees.copy entry '${s.path}' skipped (${s.reason})`);
     print("Restart the Claude Code session to load the new settings/CLAUDE.md.");
     return;
   }

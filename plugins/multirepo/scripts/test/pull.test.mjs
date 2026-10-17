@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { resolveTargets, runPull } from "../pull.mjs";
+import { allRepos, resolveTargets, runPull } from "../pull.mjs";
 
 const git = (cwd, ...args) => execFileSync("git", ["-C", cwd, ...args], { encoding: "utf-8", stdio: "pipe" }).trim();
 const tmp = (prefix) => fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -168,4 +168,19 @@ test("a fetch failure is an error (non-zero) and the repo isn't moved", async ()
   const s = await runPull({ root: ws });
   assert.equal(s.repos[0].state, "fetch-failed");
   assert.equal(s.errors, 1);
+});
+
+test("a repos.json entry for the root keeps its metadata (name, defaultBranch, layer) and is the root", async () => {
+  const base = tmp("pull-rootcfg-");
+  const remotes = path.join(base, "remotes");
+  fs.mkdirSync(remotes);
+  const root = makeCloned(remotes, base, "workspace");
+  makeCloned(remotes, root.work, "api");
+  fs.writeFileSync(path.join(root.work, "repos.json"), JSON.stringify({
+    repos: [{ name: "hub", relativePath: ".", defaultBranch: "main", layer: "meta" }, { name: "api", relativePath: "api" }],
+  }));
+  const repos = allRepos(root.work);
+  assert.deepEqual(repos.map((r) => [r.name, r.isRoot, r.defaultBranch, r.layer]), [["hub", true, "main", "meta"], ["api", false, null, null]]);
+  assert.deepEqual(resolveTargets(root.work, ["meta"]).map((r) => r.name), ["hub"]);
+  assert.deepEqual(resolveTargets(root.work, ["root"]).map((r) => r.name), ["hub"]);
 });

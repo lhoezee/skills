@@ -31,7 +31,6 @@ import {
   findTicket,
   git,
   gitRun,
-  isGitRepo,
   isMain,
   listRepos,
   parseArgs,

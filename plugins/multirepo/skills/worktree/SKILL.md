@@ -45,7 +45,8 @@ node "$W" sync   [--path <worktree>] [--json]
 |---|---|---|
 | `worktrees.dir` | `worktrees` | Where worktrees live. |
 | `worktrees.portsFile` / `worktrees.ports` | see the dashboard's config reference | Port slots (shared with the dashboard). |
-| `worktrees.copy` | `[]` | **Extra** workspace-relative files or folders copied into every worktree and re-copied by sync, e.g. `[".claude/references", "docs", "docker-compose.yml"]`. Add anything CLAUDE.md, AGENTS.md or agents point at, or those links dangle in the worktree. |
+| `worktrees.copy` | `[]` | **Extra** workspace-relative files or folders copied into every worktree and re-copied by sync, e.g. `[".claude/references", "docs", "docker-compose.yml"]`. Add anything CLAUDE.md, AGENTS.md or agents point at, or those links dangle in the worktree. Entries must be relative paths inside the workspace: `.`, `..`, absolute paths and anything resolving to the workspace itself are skipped with a warning. |
+| (in a worktree) | | Worktrees don't get their own `workspace.json`: the skills read the source workspace's (via `.worktree.json` `sourceWorkspace`). |
 | `issues.kind` / `issues.ticketPattern` | none / `KEY-123` | Tracker and ticket ids. |
 | `issues.doneStates` | `["Done"]` | Tracker states that count as shipped for `--purge` (case-insensitive), e.g. `["Ready to deploy", "Done"]`. |
 
@@ -65,11 +66,12 @@ When the argument matches the ticket pattern, or is a tracker URL (take the id f
    - `feature/<ID>` for everything else.
 3. **Repos**. If `--repos` was given, use it as is and skip this step and the next: the caller already confirmed it, and asking again re-opens a decision the user just made. Otherwise, propose repos from the ticket (title, description, labels, components) matched against `repos.json` names, `layer` and `dependencies`. If the ticket changes something another repo consumes, include the consumers it names. With nothing to go on, propose all.
 4. **Confirm**: `AskUserQuestion` (multiSelect), every repo as an option with the proposed ones first, marked "(suggested)".
-5. **Create**: `node "$W" create --name <ID> --repos <list> --branch <prefix><ID> --ticket <ID>` (+ `--native` if the user asked for git worktrees).
+5. **Create**: `node "$W" create --name <folder> --repos <list> --branch <prefix><ID> --ticket <ID>` (+ `--native` if the user asked for git worktrees).
+   - `<folder>` is the id when it's a valid name (`[A-Za-z0-9_.-]+`, e.g. `ENG-123`). Otherwise derive one by replacing every other character with `-`: GitHub's `acme/api#7` → `acme-api-7`. `--ticket` keeps the original id for the metadata (and so the tracker lookups), and the branch uses the derived form too (`#` and `/` in a ticket make awkward branch names).
 
 ## Create: ad-hoc mode (`/worktree spike-auth`)
 
-Any other name (`[A-Za-z0-9_.-]+`): ask which repos (multiSelect, unless `--repos`), then `create --name <name> --repos <list>`. Add `--branch` only if the user gives one: the clones stay on their default branch.
+Any other name (`[A-Za-z0-9_.-]+`): ask which repos (multiSelect, unless `--repos`), then `create --name <name> --repos <list>`. Add `--branch` only if the user gives one. Without it each clone is switched to its default branch (`repos.json` `defaultBranch`, else origin's HEAD).
 
 **After create**, relay the summary: the path, branch, any failures, and the ports. Tell the user to open a new session in the worktree folder.
 
@@ -99,19 +101,20 @@ Any other name (`[A-Za-z0-9_.-]+`): ask which repos (multiSelect, unless `--repo
      3. `merged → <mainRef>`: `merged`, meaning HEAD is in main (a normal or fast-forward merge).
      4. `squash-merged → <mainRef>`: `treesIdentical`.
      5. `squash-merged → <mainRef> (-N)`: `allPatchesOnMain`.
-     6. `pr-merged → <mainRef> #<prNumber> (+A/-B since)`: `prMerged`.
-     7. `squash-merged (+A/-B since)`: `squashMergedByGrep` only.
-     8. `not merged (+A/-B)`.
+     6. `pr-merged → <mainRef> #<prNumber>`: `prMerged`.
+     7. `pr-merged #<prNumber> (+<prAheadBy> since), newer commits not merged`: `prMergedStale`. The work in that PR shipped; the commits after it didn't.
+     8. `squash-merged (+A/-B since)`: `squashMergedByGrep` only.
+     9. `not merged (+A/-B)`.
 
    **Why so many signals.** A squash merge puts a new commit on main, so the ancestor check (`merged`) misses it.
    - `treesIdentical` catches "just squash-merged, nothing since".
    - `allPatchesOnMain` (`git cherry`: every branch commit's patch is on main) catches it after main moved on.
-   - When the content drifted from what landed (regenerated files, conflict fixes), no patch matches. Then `prMerged` asks `gh pr list --head <branch> --state merged`, the real merge event. It's only checked when git is inconclusive, and it degrades silently without `gh`.
+   - When the content drifted from what landed (regenerated files, conflict fixes), no patch matches. Then `prMerged` asks `gh pr list --head <branch> --state merged`, the real merge event, and only counts a PR merged **into the default branch** whose head commit **is** the local HEAD or contains it. A same-named branch with commits pushed after the merge is `prMergedStale`, not merged. It's only checked when git is inconclusive, and it degrades silently without `gh`.
    - `squashMergedByGrep` (main's log mentions the ticket id) is the weakest: a hint worth a manual look, never proof.
 
 ## Remove (`/worktree --remove <name>`)
 
-1. `node "$W" remove --name <name>`. It refuses (exit 1, details on stderr) when any repo has uncommitted changes or unpushed commits, including commits on a branch with no upstream that are on no remote.
+1. `node "$W" remove --name <name>`. It refuses (exit 1, details on stderr) when any repo has uncommitted changes or unpushed commits, including commits on a branch with no upstream that are on no remote. A folder without `.worktree.json` is scanned for checkouts (the source workspace's repo paths, then three levels down); if none can be inspected and the folder isn't empty, it refuses without `--force` rather than guess.
 2. If it refused, show the details and ask with `AskUserQuestion` ("Yes, remove it" / "No, keep it"). Only on an explicit yes, re-run with `--force`.
 3. It removes native repos with `git worktree remove` + `prune`, frees the port slot, and deletes the folder with retries. If the folder is locked (Windows: a shell, editor, dev server or build server inside it), it says so. Tell the user to `cd` out or close the process, then delete the folder.
 
@@ -126,7 +129,7 @@ Removes only worktrees that are safe by **both** gates. Git alone can lie (merge
    - `unpushed === 0`, or `null` when the repo is merged;
    - `merged || treesIdentical || allPatchesOnMain || prMerged`.
 
-   `squashMergedByGrep` alone is **not** safe.
+   `squashMergedByGrep` alone is **not** safe, and neither is `prMergedStale` (commits after the merged PR never shipped).
 2. **Tracker shipping-ready**: the ticket's state is in `issues.doneStates` (default `["Done"]`, case-insensitive). For GitHub Issues, "closed" also counts.
 
 Procedure:
@@ -153,7 +156,7 @@ Procedure:
 
 ## Sync (`/worktree --sync`, inside a worktree)
 
-`node "$W" sync [--path <worktree>]` re-copies the config list from the worktree's `sourceWorkspace`. Folders are replaced, so deletions carry over. It also deletes stale `.claude/skills` / `.claude/agents` copies an older tool left behind. Then tell the user to restart the session: settings and CLAUDE.md load at start.
+`node "$W" sync [--path <worktree>]` re-copies the config list from the worktree's `sourceWorkspace`. Folders are replaced, so deletions carry over. It also deletes stale `.claude/skills` / `.claude/agents` copies an older tool left behind, but keeps any that hold git-tracked files (in a single-repo workspace they're the project's own). Then tell the user to restart the session: settings and CLAUDE.md load at start.
 
 ## Headless runs
 

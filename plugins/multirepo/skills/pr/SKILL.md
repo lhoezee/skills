@@ -45,7 +45,7 @@ Open PRs with the GitHub CLI for every repo that has commits on the ticket branc
 2. **Read the ticket** for the PR descriptions, by tracker (`workspace.json` `issues.kind`, else what's connected): a Linear MCP (`…__get_issue`), an Atlassian/Jira MCP (`getJiraIssue`), or `gh issue view`. Match tools by suffix; names vary by server. None connected → carry on without it and say so.
 3. **In dependency order** (repos.json `dependencies`: a repo comes after the ones it consumes; else listed order), for each repo:
    - Read its commits and diff: `git -C <dir> log origin/<default>..HEAD --oneline`, `git -C <dir> diff origin/<default>...HEAD --stat`.
-   - Push if it has no upstream: `git -C <dir> push -u origin <branch>`.
+   - **Push every time**, upstream or not: `git -C <dir> push -u origin <branch>`. An existing upstream can still be behind the local branch, and a PR opened (or reused) from it would leave the latest commits out. If the push fails (rejected, non-fast-forward, hook), stop this repo's PR step and report it.
    - Create the PR: `gh pr create -R <owner/name> --base <default> --head <branch> --title "<title>" --body-file <file>` (`--draft` if asked). Write the body to a temp file; inline bodies break on quotes. If a PR already exists for the branch, use it instead.
    - Collect `{repo: "owner/name", number, dir}` into the **PR list**: the single source of truth for every later step.
 4. **Cross-link**: once all numbers are known, edit each body's "Related PRs" section to list the others (`gh pr edit <n> -R <repo> --body-file <file>`).
@@ -147,14 +147,17 @@ Step 1 — Still open? gh pr view <N> -R <REPO> --json state -q .state
   MERGED or CLOSED → done for this PR; skip to the table.
 
 Step 2 — Readiness, in one call:
-  gh pr view <N> -R <REPO> --json reviewDecision,mergeable,mergeStateStatus,latestReviews,statusCheckRollup,baseRefName,headRefName
-  checks: ❌ if any conclusion is FAILURE/TIMED_OUT/CANCELLED/ACTION_REQUIRED/STARTUP_FAILURE; ⏳ if any is QUEUED/IN_PROGRESS/PENDING or has no conclusion; ✅ if all SUCCESS/NEUTRAL/SKIPPED; — if none.
+  gh pr view <N> -R <REPO> --json reviewDecision,mergeable,mergeStateStatus,latestReviews,statusCheckRollup,baseRefName,headRefName,headRefOid
+  statusCheckRollup mixes two kinds: check runs (result in `conclusion`, progress in `status`) and legacy status contexts (`__typename` StatusContext, result in `state`: SUCCESS / PENDING / EXPECTED / FAILURE / ERROR). Read a check's result as `conclusion // state`.
+  checks: ❌ if any result is FAILURE/ERROR/TIMED_OUT/CANCELLED/ACTION_REQUIRED/STARTUP_FAILURE; ⏳ if any is QUEUED/IN_PROGRESS/PENDING/EXPECTED or has no result yet; ✅ if all SUCCESS/NEUTRAL/SKIPPED; — if none.
   copilot: a latest review by a login containing "copilot": CHANGES_REQUESTED → ⚠️; COMMENTED/APPROVED → ✅; none → ⏳.
+  Remember headRefOid: these results belong to that commit only.
 
 Step 3 — Act on new review comments (the heart of the cycle):
   gh api --paginate repos/<REPO>/pulls/<N>/comments   (inline threads; --paginate, or a busy PR's later comments are missed)
   gh api --paginate repos/<REPO>/pulls/<N>/reviews    (summaries; CHANGES_REQUESTED)
-  Actionable = an inline thread not started by <LOGIN> with no reply from <LOGIN> yet. A review with a summary and no inline comments is clean; skip it.
+  Actionable = an inline thread not started by <LOGIN> with no reply from <LOGIN> yet, OR a review whose body asks for something (CHANGES_REQUESTED, or a COMMENTED body with concrete requests) that no inline thread carries and that <LOGIN> hasn't answered in a later PR comment (gh api --paginate repos/<REPO>/issues/<N>/comments). A summary that only describes the PR ("reviewed 12 files, no issues") is not actionable.
+  Summary-only feedback has no thread to reply on: after fixing (or deciding not to), answer it with one PR comment quoting the point, e.g. gh pr comment <N> -R <REPO> --body-file <file> ("Claude replying on behalf of <LOGIN>: re <reviewer>'s review: ... Fixed in <sha>." or the reasoning).
   For each, judge it with the ticket and the sibling PRs in mind:
   - REAL → fix it (delegate to the repo's owning agent if CLAUDE.md names one), commit from <DIR> with `git -C <DIR> commit -F -` and push with `git -C <DIR> push`, then reply on the thread:
       gh api repos/<REPO>/pulls/<N>/comments/<COMMENT_ID>/replies -X POST -f body="Claude replying on behalf of <LOGIN>: Fixed in <sha>. <what changed>"
@@ -168,9 +171,13 @@ Step 4 — Keep the branch current:
   gh api repos/<OWNER>/<NAME>/compare/<BASE>...<HEAD> --jq .behind_by
   > 0 → gh pr update-branch <N> -R <REPO>; record "🔄 updated"; don't merge this cycle.
 
-Step 5 — Merge (only when auto-merge is on): when every gate condition holds THIS cycle, resolve any straggler threads (same queries, isResolved==false), then
-      gh pr merge <N> -R <REPO> --squash --delete-branch     (or --merge if the repo disallows squash)
-  and record "✅ merged". Anything ambiguous (a flaky check, an unanswered question) → don't merge; name what's blocking.
+Step 5 — Merge (only when auto-merge is on):
+  - Never in a cycle that pushed a fix or updated the branch (Steps 3–4): the readiness from Step 2 belongs to the old head. Record "⏳ re-check" and let the next cycle judge the new commit.
+  - Otherwise re-read readiness right before merging (gh pr view <N> -R <REPO> --json headRefOid,reviewDecision,mergeable,statusCheckRollup) and merge only if headRefOid is still the one Step 2 saw and every gate condition holds for it.
+  - Resolve any straggler threads (same queries, isResolved==false), then bind the merge to that verified commit:
+      gh pr merge <N> -R <REPO> --squash --delete-branch --match-head-commit <headRefOid>     (or --merge if the repo disallows squash)
+    and record "✅ merged". GitHub refuses it if the head moved meanwhile.
+  - Anything ambiguous (a flaky check, an unanswered question) → don't merge; name what's blocking.
 
 Step 6 — Print the table, every cycle:
   | PR | State | Approvals | Checks | Copilot | Behind | Mergeable | Action |

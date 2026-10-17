@@ -93,7 +93,7 @@ Finish with `git -C <repo> log --oneline -1` per repo committed.
 For an autonomous run (e.g. an implement pipeline), where nobody can answer:
 
 1. Run the script with `--root` and `--ticket` (or rely on `.worktree.json`'s ticket).
-2. For every repo with `eligible: true`: `git -C <repo> add -A`, then commit as above without asking: one logical commit per repo, dependency order. Still read the diff and write a real message.
+2. For every repo with `eligible: true`: stage **exactly the paths the script reported** for it (its `unstaged[]` and `untracked[]` entries, plus a rename's `oldPath`), `git -C <repo> add -A -- <path> ...` (write a long list to a file and use `--pathspec-from-file=<file>`). Never a bare `git add -A` / `git add .`: the script leaves nested repos and other repos' folders out of a root's lists, and an unrestricted add would stage them as embedded-repo gitlinks. Then commit as above without asking: one logical commit per repo, dependency order. Still read the diff and write a real message.
 3. **Never** commit in a repo that's on its default branch, detached, or on another ticket's branch; list those as skipped with their changes. If `ticket` is null, commit nothing and say so.
 4. A failing hook: fix the cause and retry once; if it still fails, stop and report it. Never bypass.
 5. Print what was committed: repo, short sha, subject.

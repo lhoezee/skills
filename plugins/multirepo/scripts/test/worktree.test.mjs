@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import {
-  allocatePorts, createWorktree, gatherWorktrees, readApps, releasePorts, removeWorktree,
+  allocatePorts, copyConfig, createWorktree, decidePrMerged, gatherWorktrees, ghRepoFromUrl, readApps, releasePorts, removeWorktree,
   slotOffsets, syncWorktree, vsMain, writeMeta,
 } from "../worktree.mjs";
 
@@ -369,4 +369,116 @@ test("ports: same result as the dashboard's ensureSlot on the same file", async 
     return d;
   };
   assert.deepEqual(strip(mine), strip(theirs));
+});
+
+test("worktrees.copy: '.', './', '', '..', absolute and root-normalizing entries are skipped, never deleting the worktree", () => {
+  const abs = path.resolve(os.tmpdir(), "elsewhere");
+  const ws = makeWorkspace({ worktrees: { copy: [".", "./", "", "docs/..", "../x", abs, "./docs/"] } });
+  const r = createWorktree({ root: ws.root, name: "c1", repos: "api", install: false });
+  const wt = path.join(ws.root, "worktrees", "c1");
+  assert.ok(fs.existsSync(path.join(wt, "api", ".git")));
+  assert.ok(fs.existsSync(path.join(wt, ".worktree.json")));
+  assert.ok(fs.existsSync(path.join(wt, "docs", "guide.md")));
+  assert.deepEqual(r.copySkipped.map((s) => s.path).sort(), ["", ".", "../x", "./", "docs/..", abs].sort());
+  assert.ok(r.copied.includes("docs"));
+
+  // copyConfig itself refuses the root too (callers that skip worktreeSettings).
+  const direct = copyConfig(ws.root, wt, [".", "./", "a/.."]);
+  assert.equal(direct.skipped.length, 3);
+  assert.ok(fs.existsSync(path.join(wt, "api", ".git")));
+  const s = syncWorktree({ path: wt });
+  assert.equal(s.copySkipped.length, 6);
+  assert.ok(fs.existsSync(path.join(wt, "api", ".git")));
+});
+
+test("single-repo worktree: tracked .claude/skills are kept on create and sync; untracked stale copies are removed", () => {
+  const base = tmp("mr-wt-single-");
+  const { bare, seed } = makeRemote(base, "app");
+  commit(seed, ".claude/skills/own/SKILL.md", "project skill\n", "add skill");
+  git(seed, "push", "-q", "origin", "HEAD:main");
+  const root = path.join(base, "ws");
+  execFileSync("git", ["clone", "-q", bare, root], { stdio: "pipe" });
+  write(path.join(root, "repos.json"), { repos: [{ name: "app", relativePath: "." }] });
+  write(path.join(root, "CLAUDE.md"), "# app\n");
+
+  const r = createWorktree({ root, name: "ENG-40", repos: "app", branch: "feature/ENG-40", install: false });
+  const wt = path.join(root, "worktrees", "ENG-40");
+  assert.deepEqual(r.failures, []);
+  assert.deepEqual(r.kept, [".claude/skills"]);
+  assert.ok(fs.existsSync(path.join(wt, ".claude", "skills", "own", "SKILL.md")));
+
+  write(path.join(wt, ".claude", "agents", "stale.md"), "stale\n");
+  const s = syncWorktree({ path: wt });
+  assert.deepEqual(s.kept, [".claude/skills"]);
+  assert.deepEqual(s.removed, [".claude/agents"]);
+  assert.ok(fs.existsSync(path.join(wt, ".claude", "skills", "own", "SKILL.md")));
+  assert.equal(fs.existsSync(path.join(wt, ".claude", "agents")), false);
+  assert.equal(git(wt, "status", "--porcelain"), "");
+});
+
+test("create without --branch switches to the configured default branch even when origin HEAD points elsewhere", () => {
+  const ws = makeWorkspace({ repos: [{ name: "api", relativePath: "api", defaultBranch: "main" }] });
+  const { bare, seed } = ws.remotes.api;
+  git(seed, "switch", "-q", "-c", "develop");
+  commit(seed, "dev.txt", "d\n", "develop work");
+  git(seed, "push", "-q", "origin", "develop");
+  git(bare, "symbolic-ref", "HEAD", "refs/heads/develop");
+  const r = createWorktree({ root: ws.root, name: "adhoc", repos: "api", install: false });
+  const repo = path.join(ws.root, "worktrees", "adhoc", "api");
+  assert.equal(r.repos[0].base, "main");
+  assert.equal(git(repo, "branch", "--show-current"), "main");
+  assert.equal(git(repo, "rev-parse", "--abbrev-ref", "@{u}"), "origin/main");
+  assert.equal(fs.existsSync(path.join(repo, "dev.txt")), false);
+});
+
+test("decidePrMerged: only a merged PR into the default branch whose head is (or contains) HEAD proves it", () => {
+  // A toy history: a ← b ← c (c newest). isAncestor(x, y): x is at or before y.
+  const order = ["a", "b", "c"];
+  const isAncestor = (x, y) => order.includes(x) && order.includes(y) && order.indexOf(x) <= order.indexOf(y);
+  const countAhead = (oid) => order.length - 1 - order.indexOf(oid);
+  const pr = (number, headRefOid, baseRefName = "main", mergedAt = "2026-01-01T00:00:00Z") => ({ number, headRefOid, baseRefName, mergedAt });
+  const decide = (prs, headOid) => decidePrMerged(prs, { defaultBranch: "main", headOid, isAncestor, countAhead });
+
+  assert.deepEqual(decide([pr(7, "c")], "c"), { prMerged: true, prNumber: 7, prMergedStale: false, prAheadBy: 0 });
+  assert.equal(decide([pr(7, "c")], "b").prMerged, true); // HEAD is an ancestor of what merged
+  assert.equal(decide([pr(7, "c", "release")], "c").prMerged, false); // merged elsewhere
+  assert.deepEqual(decide([pr(5, "a")], "c"), { prMerged: false, prNumber: 5, prMergedStale: true, prAheadBy: 2 });
+  assert.deepEqual(decide([pr(5, "x")], "c"), { prMerged: false, prNumber: null, prMergedStale: false, prAheadBy: null }); // unknown oid
+  assert.equal(decide([pr(5, "a"), pr(6, "c", "main", "2026-02-01T00:00:00Z")], "c").prNumber, 6);
+  assert.equal(decide([], "c").prMerged, false);
+  assert.equal(decide(null, "c").prMerged, false);
+
+  const row = { merged: false, treesIdentical: false, allPatchesOnMain: false, prMerged: false, prMergedStale: true, prNumber: 5, prAheadBy: 2, mainRef: "origin/main" };
+  assert.match(vsMain(row), /^pr-merged #5 \(\+2 since\)/);
+  assert.equal(ghRepoFromUrl("git@github.com:acme/widgets.git"), "acme/widgets");
+  assert.equal(ghRepoFromUrl("https://github.com/acme/widgets"), "acme/widgets");
+  assert.equal(ghRepoFromUrl("https://git.example.com/acme/widgets.git"), "git.example.com/acme/widgets");
+  assert.equal(ghRepoFromUrl("/tmp/remotes/widgets.git"), null);
+});
+
+test("remove without .worktree.json: finds checkouts (repos.json paths and a scan) and refuses on unsaved work", () => {
+  const ws = makeWorkspace();
+  const wt = path.join(ws.root, "worktrees", "loose");
+  execFileSync("git", ["clone", "-q", ws.remotes.api.bare, path.join(wt, "api")], { stdio: "pipe" });
+  commit(path.join(wt, "api"), "x.txt", "x\n", "local only");
+  assert.throws(() => removeWorktree({ root: ws.root, name: "loose" }), (e) => e.unsaved?.some((u) => u.repo === "api"));
+
+  // A checkout repos.json doesn't name, deeper down, is found by the scan.
+  const wt2 = path.join(ws.root, "worktrees", "deep");
+  execFileSync("git", ["clone", "-q", ws.remotes.api.bare, path.join(wt2, "services", "x", "api")], { stdio: "pipe" });
+  write(path.join(wt2, "services", "x", "api", "dirty.txt"), "d\n");
+  assert.throws(() => removeWorktree({ root: ws.root, name: "deep" }), (e) => e.unsaved?.some((u) => u.repo === "services/x/api"));
+  assert.ok(fs.existsSync(wt2));
+
+  // Nothing inspectable but not empty: refuse without --force.
+  const wt3 = path.join(ws.root, "worktrees", "junk");
+  write(path.join(wt3, "notes.txt"), "keep me?\n");
+  assert.throws(() => removeWorktree({ root: ws.root, name: "junk" }), /no git checkout could be inspected.*--force/);
+  assert.ok(fs.existsSync(path.join(wt3, "notes.txt")));
+  assert.equal(removeWorktree({ root: ws.root, name: "junk", force: true }).removed, true);
+  assert.equal(fs.existsSync(wt3), false);
+
+  // A clean, pushed checkout without metadata is removable.
+  git(path.join(wt, "api"), "reset", "-q", "--hard", "origin/main");
+  assert.equal(removeWorktree({ root: ws.root, name: "loose" }).removed, true);
 });

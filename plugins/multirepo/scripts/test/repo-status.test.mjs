@@ -5,7 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { collectStatus, formatText, parseNameStatus, walkRepos } from "../repo-status.mjs";
+import { collectStatus, discoverRepos, formatText, parseNameStatus, walkRepos } from "../repo-status.mjs";
 
 const git = (cwd, ...args) => execFileSync("git", ["-C", cwd, ...args], { encoding: "utf-8", stdio: "pipe" }).trim();
 const tmp = (prefix) => fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -132,4 +132,27 @@ test("walkRepos: depth-limited, skips node_modules / worktrees / dot-folders, do
   makeRepo(path.join(root, ".cache", "x"));
   makeRepo(path.join(root, "a", "b", "c", "d", "e", "deep"));
   assert.deepEqual(walkRepos(root).map((r) => r.relativePath), ["services/api"]);
+});
+
+test("a repos.json entry for the root keeps its metadata and is reported once, as the root", () => {
+  const root = makeRepo(tmp("rs-rootcfg-"));
+  makeRepo(path.join(root, "api"));
+  fs.writeFileSync(path.join(root, "repos.json"), JSON.stringify({ repos: [{ name: "hub", relativePath: ".", defaultBranch: "trunk" }, "api"] }));
+  const repos = discoverRepos(root);
+  assert.deepEqual(repos.map((r) => [r.name, r.isRoot, r.defaultBranch]), [["hub", true, "trunk"], ["api", false, null]]);
+  assert.equal(collectStatus({ root, all: true }).repos.find((r) => r.isRoot).defaultBranch, "trunk");
+});
+
+test("in a worktree, the ticket pattern comes from the source workspace's workspace.json", () => {
+  const ws = tmp("rs-wtcfg-");
+  fs.mkdirSync(path.join(ws, ".claude", "dashboard"), { recursive: true });
+  fs.writeFileSync(path.join(ws, ".claude", "dashboard", "workspace.json"), JSON.stringify({ issues: { ticketPattern: "[a-z]+#\\d+" } }));
+  const wt = path.join(ws, "worktrees", "w");
+  makeRepo(path.join(wt, "api"), { branch: "fix/acme#7" });
+  fs.writeFileSync(path.join(wt, "api", "a.txt"), "dirty\n");
+  fs.writeFileSync(path.join(wt, ".worktree.json"), JSON.stringify({ name: "w", repos: ["api"], sourceWorkspace: ws }));
+  const s = collectStatus({ root: wt });
+  assert.equal(s.repos[0].ticket, "ACME#7");
+  assert.equal(s.ticket, "ACME#7");
+  assert.equal(s.repos[0].eligible, true);
 });

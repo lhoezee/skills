@@ -5,7 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { defaultBranch, dependencyOrder, findRoot, findTicket, isRepoTop, listRepos, parseArgs, samePath, ticketRegex } from "../lib.mjs";
+import { defaultBranch, dependencyOrder, findRoot, findTicket, isRepoTop, listRepos, parseArgs, readWorkspaceConfig, samePath, ticketRegex } from "../lib.mjs";
 
 const git = (cwd, ...args) => execFileSync("git", ["-C", cwd, ...args], { encoding: "utf-8", stdio: "pipe" }).trim();
 const tmp = (prefix) => fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -90,4 +90,27 @@ test("defaultBranch: configured, else a branch that exists", () => {
 test("parseArgs: flags, booleans, positionals", () => {
   const a = parseArgs(["all", "--dry-run", "--root", "x", "API"], { booleans: ["dry-run"] });
   assert.deepEqual(a, { _: ["all", "API"], "dry-run": true, root: "x" });
+});
+
+test("listRepos: a plain folder inside a git-backed workspace is missing, not the parent repo", () => {
+  const ws = makeRepo(tmp("mr-lib-parent-"));
+  makeRepo(path.join(ws, "api"));
+  fs.mkdirSync(path.join(ws, "child"));
+  fs.writeFileSync(path.join(ws, "repos.json"), JSON.stringify({ repos: ["api", "child"] }));
+  assert.deepEqual(listRepos(ws).map((r) => [r.name, r.exists]), [["api", true], ["child", false]]);
+});
+
+test("readWorkspaceConfig: a worktree without its own workspace.json reads its source workspace's", () => {
+  const ws = tmp("mr-lib-cfg-");
+  fs.mkdirSync(path.join(ws, ".claude", "dashboard"), { recursive: true });
+  fs.writeFileSync(path.join(ws, ".claude", "dashboard", "workspace.json"), JSON.stringify({ issues: { ticketPattern: "[a-z]+#\\d+" } }));
+  const wt = path.join(ws, "worktrees", "w");
+  fs.mkdirSync(wt, { recursive: true });
+  fs.writeFileSync(path.join(wt, ".worktree.json"), JSON.stringify({ name: "w", repos: [], sourceWorkspace: ws }));
+  assert.equal(readWorkspaceConfig(wt).issues.ticketPattern, "[a-z]+#\\d+");
+  // Its own file wins.
+  fs.mkdirSync(path.join(wt, ".claude", "dashboard"), { recursive: true });
+  fs.writeFileSync(path.join(wt, ".claude", "dashboard", "workspace.json"), JSON.stringify({ issues: { kind: "none" } }));
+  assert.deepEqual(readWorkspaceConfig(wt), { issues: { kind: "none" } });
+  assert.deepEqual(readWorkspaceConfig(tmp("mr-lib-none-")), {});
 });
