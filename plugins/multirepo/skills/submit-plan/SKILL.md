@@ -48,13 +48,13 @@ Unless the match was exact (named plan, or the id in its heading), show the user
 
 ## 3. Find an existing plan comment
 
-List the ticket's comments and look for one containing the marker; keep its id.
+List **all** the ticket's comments (follow pagination to the end) and look for one containing the marker; keep its id.
 
 | Tracker | List comments | Create | Update |
 |---|---|---|---|
 | Linear (MCP) | `list_comments` (`issueId`) | `save_comment` (`issueId`, `body`) | `save_comment` (`id`, `body`) |
 | Jira (MCP) | the issue's comments via `getJiraIssue` / comment tools | `addCommentToJiraIssue` | `editJiraComment` (or the server's equivalent) |
-| GitHub Issues | `gh api repos/<o>/<r>/issues/<n>/comments` | `gh issue comment <n> -R <o>/<r> --body-file <file>` | `gh api -X PATCH repos/<o>/<r>/issues/comments/<id> -F body=@<file>` |
+| GitHub Issues | `gh api --paginate repos/<o>/<r>/issues/<n>/comments` (every page: a plan on a later one would otherwise be missed and duplicated) | `gh issue comment <n> -R <o>/<r> --body-file <file>` | `gh api -X PATCH repos/<o>/<r>/issues/comments/<id> -F body=@<file>` |
 
 Tool names vary by server; match on the suffix. For `gh`, write the body to a temp file instead of passing it inline, so quoting can't break it.
 

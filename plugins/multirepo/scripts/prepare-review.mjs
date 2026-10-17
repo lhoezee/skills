@@ -22,7 +22,8 @@
  *
  * Output: JSON to stdout ({ reviewId, reviewDir, inbox, outbox, repos[] }, each
  * repo with its diff commands and its untracked `newFiles`); a
- * human-readable summary to stderr.
+ * human-readable summary to stderr. Exits 1 when a repo's base branch can't be
+ * resolved, rather than reporting its committed work as "no changes".
  *
  * git runs through execFileSync with argument arrays (no shell), so it behaves
  * the same on Windows, macOS and Linux.
@@ -45,17 +46,33 @@ export function parseArgs(argv) {
   return out;
 }
 
-/** Runs git in repoPath; "" on any failure, so callers can branch on emptiness. */
-function git(repoPath, args) {
+/** Runs git in repoPath; untrimmed stdout, or "" on any failure. */
+function gitRaw(repoPath, args) {
   try {
     return execFileSync("git", ["-C", repoPath, ...args], {
       encoding: "utf-8",
       timeout: 15000,
       stdio: ["pipe", "pipe", "pipe"],
-    }).trim();
+    });
   } catch {
     return "";
   }
+}
+
+/** Runs git in repoPath; trimmed stdout, "" on any failure, so callers can branch on emptiness. */
+function git(repoPath, args) {
+  return gitRaw(repoPath, args).trim();
+}
+
+const samePath = (a, b) => {
+  const norm = (p) => path.resolve(p).replace(/[\\/]+$/, "");
+  return process.platform === "win32" ? norm(a).toLowerCase() === norm(b).toLowerCase() : norm(a) === norm(b);
+};
+
+/** dir is the top of its own git checkout (not just somewhere inside one). */
+function isRepoTop(dir) {
+  const top = git(dir, ["rev-parse", "--show-toplevel"]);
+  return !!top && samePath(top, dir);
 }
 
 function isGitRepo(dir) {
@@ -71,46 +88,71 @@ function readJson(file) {
   }
 }
 
+/** repos.json entries as { name, rel, defaultBranch }, or []. */
+function manifestRepos(dir) {
+  const rj = dir ? readJson(path.join(dir, "repos.json")) : null;
+  if (!rj || !Array.isArray(rj.repos)) return [];
+  return rj.repos.map((r) => {
+    if (typeof r === "string") return { name: r, rel: r, defaultBranch: null };
+    const rel = r.relativePath || r.directory || r.path || r.name;
+    return { name: r.name || rel, rel, defaultBranch: r.defaultBranch || null };
+  });
+}
+
 /**
- * Candidate repos under root, in precedence order:
- *   1. .worktree.json `repos` (a worktree: only the repos cloned into it).
- *   2. repos.json `repos`: strings, or objects with relativePath (or the older
- *      directory / path) and name; defaultBranch is kept as the repo's base.
- *   3. root itself, when it's a git repo (a single-repo project).
- *   4. immediate subfolders that are git repos.
- *   5. root, as a last resort.
- * inspectRepo() drops candidates that don't exist or have no changes, so listing
- * too many here is harmless.
+ * Candidate repos under root:
+ *   1. .worktree.json `repos` (a worktree: only the repos cloned into it), each
+ *      inheriting its defaultBranch from repos.json (here, or in the workspace
+ *      the worktree was made from);
+ *   2. else repos.json `repos` (strings, or objects with relativePath, or the
+ *      older directory / path, and name);
+ *   3. else the git repos one level down.
+ * Root itself is a candidate too when it's the top of a git checkout (a single
+ * repo, or a workspace that is its own repo holding scripts and config); its
+ * nested repos are left out of its changes. inspectRepo() drops candidates that
+ * don't exist or have no changes, so listing too many here is harmless.
  */
 export function candidateRepos(root) {
   const norm = (rel) => path.join(root, String(rel).replace(/[\\/]+/g, path.sep));
-  const fromManifest = (r) => {
-    if (typeof r === "string") return { name: r, path: norm(r) };
-    const rel = r.relativePath || r.directory || r.path || r.name;
-    return { name: r.name || rel, path: norm(rel), defaultBranch: r.defaultBranch || null };
-  };
+  const known = (dir) => manifestRepos(dir);
+  let list = [];
 
   const wt = readJson(path.join(root, ".worktree.json"));
-  if (wt && Array.isArray(wt.repos) && wt.repos.length) return wt.repos.map(fromManifest);
-
-  const rj = readJson(path.join(root, "repos.json"));
-  if (rj && Array.isArray(rj.repos) && rj.repos.length) return rj.repos.map(fromManifest);
-
-  if (isGitRepo(root)) return [{ name: path.basename(root), path: root }];
-
-  try {
-    const subs = fs
-      .readdirSync(root, { withFileTypes: true })
-      .filter((d) => d.isDirectory() && !d.name.startsWith(".") && d.name !== "node_modules")
-      .map((d) => ({ name: d.name, path: path.join(root, d.name) }))
-      .filter((r) => isGitRepo(r.path));
-    if (subs.length) return subs;
-  } catch {
-    /* fall through */
+  const declared = known(root);
+  if (wt && Array.isArray(wt.repos) && wt.repos.length) {
+    const lookup = [...declared, ...known(wt.sourceWorkspace)];
+    list = wt.repos.map((r) => {
+      const name = typeof r === "string" ? r : r.name || r.relativePath || r.directory;
+      const rel = typeof r === "string" ? r : r.relativePath || r.directory || r.path || r.name;
+      const match = lookup.find((k) => k.name === name || slashed(k.rel) === slashed(rel));
+      const defaultBranch = (typeof r === "object" && r.defaultBranch) || match?.defaultBranch || null;
+      return { name, path: norm(rel), defaultBranch };
+    });
+  } else if (declared.length) {
+    list = declared.map((r) => ({ name: r.name, path: norm(r.rel), defaultBranch: r.defaultBranch }));
+  } else {
+    try {
+      list = fs
+        .readdirSync(root, { withFileTypes: true })
+        .filter((d) => d.isDirectory() && !d.name.startsWith(".") && d.name !== "node_modules")
+        .map((d) => ({ name: d.name, path: path.join(root, d.name), defaultBranch: null }))
+        .filter((r) => isGitRepo(r.path) && isRepoTop(r.path));
+    } catch {
+      /* none */
+    }
   }
 
-  return [{ name: path.basename(root), path: root }];
+  if (isRepoTop(root) && !list.some((r) => samePath(r.path, root))) {
+    const nested = list.map((r) => slashed(path.relative(root, r.path))).filter((rel) => rel && !rel.startsWith(".."));
+    list.unshift({ name: path.basename(root), path: root, defaultBranch: null, nested });
+  }
+  return list;
 }
+
+const slashed = (p) => String(p).replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/, "");
+
+/** A path (from git, relative to the repo) is one of the nested repos, or inside one. */
+const inNested = (file, nested) => nested.some((rel) => file === rel || file.startsWith(rel + "/"));
 
 /** A repo's default branch: origin/HEAD, then common names. */
 function detectDefaultBase(repoPath) {
@@ -147,32 +189,55 @@ export function buildDiffCommands(resolvedBase, ahead, dirty) {
   return cmds;
 }
 
+/**
+ * What changed in one repo, or null when nothing did. Throws when the base can't
+ * be resolved: guessing "no commits ahead" would silently skip committed work.
+ */
 export function inspectRepo(candidate, requestedBase) {
   const { name, path: repoPath } = candidate;
+  const nested = candidate.nested ?? [];
   if (!fs.existsSync(repoPath) || !isGitRepo(repoPath)) return null;
 
   const branch = git(repoPath, ["rev-parse", "--abbrev-ref", "HEAD"]) || "unknown";
   const base = requestedBase || candidate.defaultBranch || detectDefaultBase(repoPath);
   const resolvedBase = resolveBase(repoPath, base);
+  if (!resolvedBase) {
+    throw new Error(
+      `${name}: can't resolve the base branch "${base}" (tried ${base} and origin/${base}). ` +
+        `Pass --base <branch>, or fetch it (git -C "${slashed(repoPath)}" fetch origin ${base}).`
+    );
+  }
 
   let ahead = 0;
   let mergeBase = null;
-  if (resolvedBase && branch !== base) {
+  if (branch !== base) {
     mergeBase = git(repoPath, ["merge-base", resolvedBase, "HEAD"]) || null;
     ahead = parseInt(git(repoPath, ["rev-list", "--count", `${resolvedBase}..HEAD`]), 10) || 0;
   }
 
-  const porcelain = git(repoPath, ["status", "--porcelain"]);
-  const dirty = porcelain.length > 0;
-  const changedFiles = porcelain ? porcelain.split("\n").filter(Boolean).length : 0;
+  // Changed paths, NUL-separated so names with spaces or non-ASCII characters
+  // come back as real paths (git C-quotes them otherwise). A rename entry is
+  // followed by its old path, which is skipped. Nested repos aren't this repo's changes.
+  const fields = gitRaw(repoPath, ["status", "--porcelain", "-z"]).split("\0");
+  const changed = [];
+  for (let i = 0; i < fields.length; i++) {
+    const entry = fields[i];
+    if (!entry) continue;
+    if (/^[RC]/.test(entry)) i++;
+    const file = entry.slice(3).replace(/\/$/, "");
+    if (!inNested(file, nested)) changed.push(file);
+  }
+  const dirty = changed.length > 0;
+  const changedFiles = changed.length;
 
   if (ahead === 0 && !dirty) return null; // nothing to review here
 
   // Untracked files. `git diff HEAD` doesn't show them, so without a list the
   // reviewer never sees new files, and work left uncommitted until the PR makes
   // brand-new modules, migrations and components the normal case.
-  const untracked = git(repoPath, ["ls-files", "--others", "--exclude-standard"]);
-  const newFiles = untracked ? untracked.split("\n").filter(Boolean) : [];
+  const newFiles = gitRaw(repoPath, ["ls-files", "--others", "--exclude-standard", "-z"])
+    .split("\0")
+    .filter((f) => f && !inNested(f.replace(/\/$/, ""), nested));
 
   // Diff stat for the summary: the committed range when there is one, else the working tree.
   const diffStat =
@@ -220,15 +285,15 @@ export function deriveReviewId(root, repos, now = new Date()) {
   return `adhoc-${now.toISOString().replace(/[:.]/g, "-").slice(0, 19)}`;
 }
 
-/** Adds .copilot/ to the repo's .git/info/exclude, so reviewing never sees review state. */
+/** Adds .copilot/ to the repo's info/exclude, so reviewing never sees review state. */
 function excludeFromGit(repoPath) {
-  // In a git worktree, .git is a file pointing elsewhere; ask git for the real dir.
-  const gitDir = git(repoPath, ["rev-parse", "--git-dir"]);
-  if (!gitDir) return;
-  const excludeDir = path.isAbsolute(gitDir) ? path.join(gitDir, "info") : path.join(repoPath, gitDir, "info");
-  const exclude = path.join(excludeDir, "exclude");
+  // Ask git for the file it actually reads: in a linked worktree that's the shared
+  // repo's info/exclude, not one under the worktree's own admin folder.
+  const rel = git(repoPath, ["rev-parse", "--git-path", "info/exclude"]);
+  if (!rel) return;
+  const exclude = path.resolve(repoPath, rel);
   try {
-    fs.mkdirSync(excludeDir, { recursive: true });
+    fs.mkdirSync(path.dirname(exclude), { recursive: true });
     let body = fs.existsSync(exclude) ? fs.readFileSync(exclude, "utf-8") : "";
     if (!body.split(/\r?\n/).some((l) => l.trim() === ".copilot/")) {
       if (body.length && !body.endsWith("\n")) body += "\n";
@@ -271,7 +336,13 @@ export function prepareReview({ root, id = null, base = null }) {
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const opts = parseArgs(process.argv.slice(2));
-  const manifest = prepareReview(opts);
+  let manifest;
+  try {
+    manifest = prepareReview(opts);
+  } catch (e) {
+    process.stderr.write(`${e.message}\n`);
+    process.exit(1);
+  }
   if (!manifest.reviewId) {
     process.stderr.write(`No changes to review under ${opts.root} (no commits ahead of base, no working-tree changes).\n`);
   } else {

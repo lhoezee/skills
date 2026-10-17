@@ -46,7 +46,7 @@ Copilot is agentic and runs git itself: we point it at the repos and the diff co
 node "${CLAUDE_PLUGIN_ROOT}/scripts/prepare-review.mjs" --root <root> [--base <base>] [--id <id>]
 ```
 
-Use the real root path; inside a worktree, point `--root` at the worktree root, not the main workspace. It prints JSON: `reviewId`, `reviewDir`, `inbox`, `outbox`, and `repos[]` (each with `name`, `path`, `branch`, `base`, `commitsAhead`, `dirty`, `diffCommands`, `diffStat`, `newFiles`). It also creates the inbox/outbox, writes `inbox/manifest.json`, and adds `.copilot/` to `.git/info/exclude` in every touched repo. It handles single repos, `repos.json` workspaces and `.worktree.json` worktrees on its own. The ticket id follows `.claude/dashboard/workspace.json` `issues.ticketPattern` when the workspace has one.
+Use the real root path; inside a worktree, point `--root` at the worktree root, not the main workspace. It prints JSON: `reviewId`, `reviewDir`, `inbox`, `outbox`, and `repos[]` (each with `name`, `path`, `branch`, `base`, `commitsAhead`, `dirty`, `diffCommands`, `diffStat`, `newFiles`). It also creates the inbox/outbox, writes `inbox/manifest.json`, and adds `.copilot/` to `info/exclude` in every touched repo. It handles single repos, `repos.json` workspaces and `.worktree.json` worktrees on its own, and reviews the workspace root too when it's a repo itself (minus its nested repos). If it exits 1 because a base branch can't be resolved, relay the message and fix that (fetch, or pass `--base`) rather than reviewing without that repo. The ticket id follows `.claude/dashboard/workspace.json` `issues.ticketPattern` when the workspace has one.
 
 **`newFiles` is not optional context.** It lists the untracked files, and `git diff HEAD` doesn't show untracked files. Work that stays uncommitted until the PR (the usual flow when implementing a ticket) has its new modules, migrations, handlers and components all untracked. A review that only runs the diff commands can return a confident verdict having seen none of them, next to a plausible-looking diffStat.
 
@@ -68,6 +68,8 @@ Also give the reviewer **the bar to judge against**: a few lines on the stack an
 Keep it tight: a few sentences of goal, the stack note, specific risk areas. Write it to `inbox/summary.md`.
 
 ### 3. Run the Copilot review
+
+**First, clear the outbox of any earlier report**, so an old result can't pass for this run's: move `review.json` and `review.md`, if present, to `review-round<N>.json` / `review-round<N>.md` (the next free N). A reused `--id` otherwise still holds the last round's verdict.
 
 Invoke Copilot **once** for the whole change, with the prompt below (substitute the manifest's `inbox`/`outbox`):
 
@@ -136,7 +138,7 @@ Use verdict "approve" only when there are no critical/high findings. Also write 
 
 ### 4. Read findings and report
 
-Read `<outbox>/review.json` (fall back to `review.md`, then stdout, if the JSON is missing or malformed; tell the user and consider one re-run). Present a table grouped by severity:
+Read `<outbox>/review.json`. Only a report written by **this** run counts (the outbox was cleared in step 3). If Copilot exited non-zero, or there's no fresh `review.json`, the review is **incomplete**: fall back to a fresh `review.md`, then stdout, tell the user, and consider one re-run; never present an archived round's verdict as the current one. Present a table grouped by severity:
 
 ```
 | Sev | Repo | File:Line | Category | Issue |
@@ -152,7 +154,7 @@ Copilot is a second opinion, not an oracle. For each finding:
 - **Fix real ones in the right place**: directly, or, if the workspace's `CLAUDE.md` assigns specialized subagents to areas of the code, delegate to the one that owns it. Keep fixes scoped to the finding.
 - **Never commit or push.** Leave fixes in the working tree: this is a pre-push gate.
 
-Then **re-review**: archive the report (`outbox/review.json` → `outbox/review-round<N>.json`), re-run step 3, read the new findings. Stop at `approve`, at no critical/high findings left, or after **3 rounds**, whichever comes first.
+Then **re-review**: re-run step 1 with the same `--id` (fixes change what's dirty and what's new, so the old manifest's diff commands and `newFiles` would miss them; a repo that was clean may now have changes), keep `summary.md`, then step 3 (which archives the previous report) and step 4. Stop at `approve`, at no critical/high findings left, or after **3 rounds**, whichever comes first.
 
 ### 6. Final report
 

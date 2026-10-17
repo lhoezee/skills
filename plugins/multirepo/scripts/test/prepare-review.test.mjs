@@ -108,8 +108,65 @@ test("review id: workspace.json ticketPattern, folder name, then a timestamp", (
   fs.mkdirSync(named);
   assert.equal(deriveReviewId(named, [{ branch: "feature/no-ticket" }]), "ENG-9");
 
-  const plain = tmp("mr-id3-");
+  const plain = tmp("mrplain_");
   assert.equal(deriveReviewId(plain, [{ branch: "x" }], new Date("2026-01-02T03:04:05Z")), "adhoc-2026-01-02T03-04-05");
+});
+
+test(".worktree.json repos inherit defaultBranch from repos.json (here or the source workspace)", () => {
+  const src = tmp("mr-src-");
+  fs.writeFileSync(path.join(src, "repos.json"), JSON.stringify({ repos: [{ name: "api", relativePath: "svc/api", defaultBranch: "develop" }] }));
+  const root = tmp("mr-wtb-");
+  fs.writeFileSync(path.join(root, ".worktree.json"), JSON.stringify({ repos: ["svc/api"], sourceWorkspace: src }));
+  const [c] = candidateRepos(root);
+  assert.equal(c.defaultBranch, "develop");
+
+  makeRepo(path.join(root, "svc", "api"), { base: "develop", branch: "feature/ENG-8" });
+  const m = prepareReview({ root });
+  assert.equal(m.repos[0].base, "develop");
+});
+
+test("a workspace root that is a repo is reviewed too, without its nested repos as changes", () => {
+  const root = makeRepo(tmp("mr-rootrepo-"));
+  makeRepo(path.join(root, "api"), { branch: "feature/ENG-9" });
+  fs.writeFileSync(path.join(root, "repos.json"), JSON.stringify({ repos: [{ name: "api" }] }));
+  const rootPath = root.replace(/\\/g, "/");
+
+  // The untracked repos.json is a root change; the nested repo isn't.
+  let m = prepareReview({ root });
+  const rootEntry = m.repos.find((r) => r.path === rootPath);
+  assert.deepEqual(rootEntry.newFiles, ["repos.json"]);
+  assert.ok(m.repos.some((r) => r.name === "api"));
+
+  // Root-only changes are found (they used to produce "no changes to review").
+  git(root, "add", "repos.json");
+  git(root, "commit", "-q", "-m", "add repos.json");
+  git(path.join(root, "api"), "switch", "-q", "main");
+  fs.writeFileSync(path.join(root, "a.txt"), "edited\n");
+  m = prepareReview({ root, id: "root-only" });
+  assert.deepEqual(m.repos.map((r) => r.path), [rootPath]);
+  assert.equal(m.repos[0].changedFiles, 1);
+});
+
+test("an unresolvable base is an error, not an empty review", () => {
+  const root = makeRepo(tmp("mr-nobase-"), { branch: "feature/ENG-10" });
+  assert.throws(() => prepareReview({ root, base: "does-not-exist" }), /can't resolve the base branch "does-not-exist"/);
+});
+
+test("newFiles are real paths, even with spaces or non-ASCII characters", () => {
+  const root = makeRepo(tmp("mr-names-"), { branch: "feature/ENG-11" });
+  fs.writeFileSync(path.join(root, "résumé.ts"), "x\n");
+  fs.writeFileSync(path.join(root, " lead space.ts"), "x\n");
+  const [repo] = prepareReview({ root }).repos;
+  assert.deepEqual(repo.newFiles.sort(), [" lead space.ts", "résumé.ts"].sort());
+});
+
+test("in a linked git worktree, .copilot/ is excluded via the shared info/exclude", () => {
+  const main = makeRepo(tmp("mr-linked-"));
+  const linked = path.join(tmp("mr-linked-wt-"), "wt");
+  git(main, "worktree", "add", "-q", "-b", "feature/ENG-12", linked);
+  fs.writeFileSync(path.join(linked, "b.txt"), "new\n");
+  prepareReview({ root: linked });
+  assert.equal(git(linked, "status", "--porcelain").includes(".copilot"), false);
 });
 
 test("diff commands: committed range, working tree, or both", () => {
