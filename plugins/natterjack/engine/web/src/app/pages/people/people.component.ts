@@ -87,6 +87,13 @@ interface RoleDraft { id: string | null; label: string; description: string; acc
         </div>
       }
 
+      <!-- Tabs, so a long roster doesn't push the roles out of sight. -->
+      <div class="page-tabs" role="tablist">
+        <button type="button" role="tab" [class.on]="tab() === 'people'" [attr.aria-selected]="tab() === 'people'" (click)="tab.set('people')">People <span class="n">{{ counts()['set-up'] }}</span></button>
+        <button type="button" role="tab" [class.on]="tab() === 'roles'" [attr.aria-selected]="tab() === 'roles'" (click)="tab.set('roles')">Roles <span class="n">{{ view()!.roles.length }}</span></button>
+      </div>
+
+      @if (tab() === 'people') {
       <div class="bar">
         <div class="seg">
           @for (f of filters; track f.id) {
@@ -168,14 +175,16 @@ interface RoleDraft { id: string | null; label: string; description: string; acc
         </table>
         @if (more() > 0) { <div class="more">and {{ more() }} more: search to find someone.</div> }
       </div>
+      }
 
+      @if (tab() === 'roles') {
       <!-- The team's roles (workspace.json): who someone is and how Claude answers them; access is only their default. -->
       <div class="panel roles">
         <div class="panel-h">
           <h2>Roles <span class="n">{{ view()!.roles.length }}</span></h2>
           <button class="btn sm" (click)="editRole(null)">Add role</button>
         </div>
-        <p class="muted rh">A role sets how Claude answers someone (its output style) and the access they get unless you give them their own above.</p>
+        <p class="muted rh">A role sets how Claude answers someone (its output style) and the access they get unless you give them their own on the People tab.</p>
         @if (view()!.roles.length) {
           <table class="people">
             <thead><tr><th>Role</th><th>Access by default</th><th>Claude answers</th><th>People</th><th></th></tr></thead>
@@ -198,6 +207,7 @@ interface RoleDraft { id: string | null; label: string; description: string; acc
           <div class="empty">No roles yet: everyone gets the built-in Developer and Reader. Add the roles your team has.</div>
         }
       </div>
+      }
 
     }
 
@@ -290,6 +300,7 @@ export class PeopleComponent implements OnInit {
   readonly query = signal('');
   readonly pending = signal<Pending | null>(null);
   readonly committing = signal(false);
+  readonly tab = signal<'people' | 'roles'>('people');
   readonly filters: { id: Filter; label: string }[] = [
     { id: 'set-up', label: 'Have a dashboard' },
     { id: 'attention', label: 'Needs attention' },
