@@ -27,9 +27,14 @@ const ICON: Record<string, string> = { ok: '✓', warn: '!', missing: '✕', inf
       @if (m.hidden; as h) {
         <div class="info-note hidden-note">
           {{ h.count }} {{ h.count === 1 ? 'check' : 'checks' }} for running the apps {{ h.count === 1 ? 'is' : 'are' }} hidden ({{ h.groups.join(', ') }}):
-          @if (h.reason === 'hosted') { this hosted dashboard doesn't run the apps, so it doesn't need their tools. }
-          @else { your access is read-only, so you don't run the apps. }
-          A check whose <code>when</code> in <code>.claude/dashboard/machine.json</code> names <code>hosted</code>, <code>access</code> or <code>profile</code> always shows.
+          <!-- Only a matching condition overrides the hiding (machine.ts resolvedSpecs); its other when conditions still apply. -->
+          @if (h.reason === 'hosted') {
+            this hosted dashboard doesn't run the apps, so it doesn't need their tools.
+            To show one here anyway, give it <code>"when": {{ '{' }} "hosted": true {{ '}' }}</code> in <code>.claude/dashboard/machine.json</code>, or an <code>access</code> or <code>profile</code> that matches yours.
+          } @else {
+            your access is read-only, so you don't run the apps.
+            To show one anyway, give it <code>"when": {{ '{' }} "access": ["full", "read"] {{ '}' }}</code> in <code>.claude/dashboard/machine.json</code>.
+          }
         </div>
       }
       @if (!m.configured) {
