@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import {
-  allocatePorts, copyConfig, createWorktree, decidePrMerged, gatherWorktrees, ghRepoFromUrl, readApps, releasePorts, removeWorktree,
+  allocatePorts, copyConfig, createWorktree, decidePrMerged, gatherWorktrees, ghRepoFromUrl, parseGhAuthHosts, readApps, releasePorts, removeWorktree,
   slotOffsets, syncWorktree, vsMain, writeMeta,
 } from "../worktree.mjs";
 
@@ -452,7 +452,7 @@ test("decidePrMerged: only a merged PR into the default branch whose head is (or
   assert.match(vsMain(row), /^pr-merged #5 \(\+2 since\)/);
   assert.equal(ghRepoFromUrl("git@github.com:acme/widgets.git"), "acme/widgets");
   assert.equal(ghRepoFromUrl("https://github.com/acme/widgets"), "acme/widgets");
-  assert.equal(ghRepoFromUrl("https://git.example.com/acme/widgets.git"), "git.example.com/acme/widgets");
+  assert.equal(ghRepoFromUrl("https://git.example.com/acme/widgets.git", ["git.example.com"]), "git.example.com/acme/widgets");
   assert.equal(ghRepoFromUrl("/tmp/remotes/widgets.git"), null);
 });
 
@@ -481,4 +481,116 @@ test("remove without .worktree.json: finds checkouts (repos.json paths and a sca
   // A clean, pushed checkout without metadata is removable.
   git(path.join(wt, "api"), "reset", "-q", "--hard", "origin/main");
   assert.equal(removeWorktree({ root: ws.root, name: "loose" }).removed, true);
+});
+
+test("worktrees.copy never overwrites a checkout: repo folders, .git paths, paths inside repos, folders holding repos", () => {
+  const ws = makeWorkspace({
+    repos: [{ name: "api", relativePath: "api" }, { name: "web", relativePath: "services/web" }],
+    worktrees: { copy: ["api", "api/.git", ".git", "api/README.md", "services", "docs"] },
+  });
+  const r = createWorktree({ root: ws.root, name: "g1", repos: "api,services/web", branch: "feature/g1", install: false });
+  const wt = path.join(ws.root, "worktrees", "g1");
+  const api = path.join(wt, "api");
+  commit(api, "local.txt", "only here\n", "unpushed work");
+  const head = git(api, "rev-parse", "HEAD");
+  const reasons = Object.fromEntries(r.copySkipped.map((x) => [x.path, x.reason]));
+  assert.deepEqual(Object.keys(reasons).sort(), [".git", "api", "api/.git", "api/README.md", "services"]);
+  assert.match(reasons[".git"], /\.git path/);
+  assert.match(reasons["api/.git"], /\.git path/);
+  assert.match(reasons.api, /repo checkout/);
+  assert.match(reasons["api/README.md"], /inside a repo checkout/);
+  assert.match(reasons.services, /contains a repo checkout/);
+  assert.ok(r.copied.includes("docs"));
+
+  const s = syncWorktree({ path: wt });
+  assert.equal(s.copySkipped.length, 5);
+  assert.equal(git(api, "rev-parse", "HEAD"), head);
+  assert.ok(fs.existsSync(path.join(api, "local.txt")));
+  assert.ok(fs.existsSync(path.join(wt, "services", "web", ".git")));
+
+  // Without metadata or repo paths: a folder holding a checkout is still never replaced.
+  const loose = tmp("mr-wt-loose-");
+  execFileSync("git", ["clone", "-q", ws.remotes.api.bare, path.join(loose, "api")], { stdio: "pipe" });
+  commit(path.join(loose, "api"), "mine.txt", "x\n", "local");
+  const direct = copyConfig(ws.root, loose, ["api", "services"]);
+  assert.ok(!direct.copied.includes("api"));
+  assert.match(direct.skipped.find((x) => x.path === "api").reason, /checkout|tracked/);
+  assert.ok(fs.existsSync(path.join(loose, "api", "mine.txt")));
+});
+
+test("single-repo worktree: worktrees.copy never replaces a folder holding git-tracked files", () => {
+  const base = tmp("mr-wt-tracked-");
+  const { bare, seed } = makeRemote(base, "app");
+  commit(seed, ".claude/references/own.md", "tracked\n", "add refs");
+  git(seed, "push", "-q", "origin", "HEAD:main");
+  const root = path.join(base, "ws");
+  execFileSync("git", ["clone", "-q", bare, root], { stdio: "pipe" });
+  write(path.join(root, "repos.json"), { repos: [{ name: "app", relativePath: "." }] });
+  write(path.join(root, ".claude", "dashboard", "workspace.json"), { worktrees: { copy: [".claude/references", ".git", "notes"] } });
+  write(path.join(root, "notes", "n.md"), "untracked notes\n");
+  const r = createWorktree({ root, name: "T-1", repos: "app", branch: "feature/T-1", install: false });
+  const wt = path.join(root, "worktrees", "T-1");
+  write(path.join(wt, ".claude", "references", "own.md"), "edited in the worktree\n");
+  const s = syncWorktree({ path: wt });
+  for (const out of [r.copySkipped, s.copySkipped]) {
+    assert.match(out.find((x) => x.path === ".claude/references").reason, /git-tracked/);
+    assert.match(out.find((x) => x.path === ".git").reason, /\.git path/);
+  }
+  assert.ok(s.copied.includes("notes"));
+  assert.equal(fs.readFileSync(path.join(wt, ".claude", "references", "own.md"), "utf-8"), "edited in the worktree\n");
+  assert.ok(fs.existsSync(path.join(wt, ".git")));
+});
+
+test("remove: an unreadable checkout (broken gitdir, corrupt repo) or a stash refuses without --force", () => {
+  const ws = makeWorkspace();
+  // No metadata: a clean clone plus a folder whose .git points at a missing gitdir.
+  const wt = path.join(ws.root, "worktrees", "broken");
+  execFileSync("git", ["clone", "-q", ws.remotes.api.bare, path.join(wt, "api")], { stdio: "pipe" });
+  write(path.join(wt, "broken", ".git"), `gitdir: ${path.join(ws.base, "nowhere", ".git")}\n`);
+  write(path.join(wt, "broken", "notes.txt"), "keep me\n");
+  assert.throws(() => removeWorktree({ root: ws.root, name: "broken" }),
+    (e) => e.unsaved?.some((u) => u.repo === "broken" && u.type === "uninspectable"));
+  assert.ok(fs.existsSync(path.join(wt, "broken", "notes.txt")));
+  // Only the broken folder left: nothing inspectable.
+  fs.rmSync(path.join(wt, "api"), { recursive: true, force: true });
+  assert.throws(() => removeWorktree({ root: ws.root, name: "broken" }), /no git checkout could be inspected/);
+  assert.ok(fs.existsSync(path.join(wt, "broken", "notes.txt")));
+  assert.equal(removeWorktree({ root: ws.root, name: "broken", force: true }).removed, true);
+
+  // With metadata: a corrupt repo (HEAD gone) is uninspectable, not clean.
+  createWorktree({ root: ws.root, name: "corrupt", repos: "api", branch: "feature/c", install: false });
+  const cwt = path.join(ws.root, "worktrees", "corrupt");
+  fs.rmSync(path.join(cwt, "api", ".git", "HEAD"));
+  assert.throws(() => removeWorktree({ root: ws.root, name: "corrupt" }),
+    (e) => e.unsaved?.some((u) => u.repo === "api" && u.type === "uninspectable"));
+  assert.ok(fs.existsSync(cwt));
+
+  // A stash goes with the folder: it's unsaved work.
+  createWorktree({ root: ws.root, name: "stashed", repos: "api", install: false });
+  const swt = path.join(ws.root, "worktrees", "stashed", "api");
+  write(path.join(swt, "README.md"), "changed\n");
+  git(swt, "stash", "-q");
+  assert.equal(git(swt, "status", "--porcelain"), "");
+  assert.throws(() => removeWorktree({ root: ws.root, name: "stashed" }), (e) => e.unsaved?.some((u) => u.type === "stashed"));
+  assert.equal(removeWorktree({ root: ws.root, name: "stashed", force: true }).removed, true);
+});
+
+test("ghRepoFromUrl: --repo only for github.com or a logged-in host; SSH aliases and unknown hosts resolve in the repo folder", () => {
+  assert.equal(ghRepoFromUrl("git@github.com:acme/api.git"), "acme/api");
+  assert.equal(ghRepoFromUrl("ssh://git@ssh.github.com:443/acme/api.git"), "acme/api");
+  assert.equal(ghRepoFromUrl("https://GitHub.com/acme/api"), "acme/api");
+  assert.equal(ghRepoFromUrl("git@github-work:acme/api.git"), null);
+  assert.equal(ghRepoFromUrl("git@github-work:acme/api.git", ["github.com"]), null);
+  assert.equal(ghRepoFromUrl("https://ghe.example.com/acme/api.git"), null);
+  assert.equal(ghRepoFromUrl("https://ghe.example.com/acme/api.git", ["github.com", "GHE.example.com"]), "ghe.example.com/acme/api");
+  assert.equal(ghRepoFromUrl("ssh://git@ghe.example.com:2222/acme/api.git", ["ghe.example.com"]), "ghe.example.com/acme/api");
+  assert.equal(ghRepoFromUrl("C:/remotes/acme/api.git"), null);
+  assert.equal(ghRepoFromUrl(""), null);
+  const status = [
+    "github.com", "  ✓ Logged in to github.com account someone (keyring)",
+    "ghe.example.com", "  X Failed to log in to ghe.example.com using token (GH_TOKEN)",
+    "other.example.com", "  ✓ Logged in to other.example.com as someone (oauth_token)",
+  ].join("\n");
+  assert.deepEqual(parseGhAuthHosts(status), ["github.com", "other.example.com"]);
+  assert.deepEqual(parseGhAuthHosts(""), []);
 });

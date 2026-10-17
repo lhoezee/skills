@@ -45,7 +45,12 @@ Open PRs with the GitHub CLI for every repo that has commits on the ticket branc
 2. **Read the ticket** for the PR descriptions, by tracker (`workspace.json` `issues.kind`, else what's connected): a Linear MCP (`…__get_issue`), an Atlassian/Jira MCP (`getJiraIssue`), or `gh issue view`. Match tools by suffix; names vary by server. None connected → carry on without it and say so.
 3. **In dependency order** (repos.json `dependencies`: a repo comes after the ones it consumes; else listed order), for each repo:
    - Read its commits and diff: `git -C <dir> log origin/<default>..HEAD --oneline`, `git -C <dir> diff origin/<default>...HEAD --stat`.
-   - **Push every time**, upstream or not: `git -C <dir> push -u origin <branch>`. An existing upstream can still be behind the local branch, and a PR opened (or reused) from it would leave the latest commits out. If the push fails (rejected, non-fast-forward, hook), stop this repo's PR step and report it.
+   - **Bring the branch level with its remote, then push**, upstream or not:
+     - If `origin/<branch>` exists, `git -C <dir> fetch origin <branch>` and compare. The remote can be ahead of local without anyone else pushing: `gh pr update-branch` (Step 4 of the watch) adds a merge commit there.
+     - Local is an ancestor of the remote → nothing to push; reuse the PR as it is.
+     - Remote is behind or equal → `git -C <dir> push -u origin <branch>`.
+     - They've diverged → `git -C <dir> pull --ff-only` won't do; `git -C <dir> pull --no-rebase origin <branch>` (or rebase if the repo prefers it), resolve, then push.
+     - An existing upstream can be behind the local branch, and a PR opened (or reused) from it would leave the latest commits out, so never skip the comparison. If the push still fails (a hook, permissions), stop this repo's PR step and report it.
    - Create the PR: `gh pr create -R <owner/name> --base <default> --head <branch> --title "<title>" --body-file <file>` (`--draft` if asked). Write the body to a temp file; inline bodies break on quotes. If a PR already exists for the branch, use it instead.
    - Collect `{repo: "owner/name", number, dir}` into the **PR list**: the single source of truth for every later step.
 4. **Cross-link**: once all numbers are known, edit each body's "Related PRs" section to list the others (`gh pr edit <n> -R <repo> --body-file <file>`).
@@ -159,7 +164,7 @@ Step 3 — Act on new review comments (the heart of the cycle):
   Actionable = an inline thread not started by <LOGIN> with no reply from <LOGIN> yet, OR a review whose body asks for something (CHANGES_REQUESTED, or a COMMENTED body with concrete requests) that no inline thread carries and that <LOGIN> hasn't answered in a later PR comment (gh api --paginate repos/<REPO>/issues/<N>/comments). A summary that only describes the PR ("reviewed 12 files, no issues") is not actionable.
   Summary-only feedback has no thread to reply on: after fixing (or deciding not to), answer it with one PR comment quoting the point, e.g. gh pr comment <N> -R <REPO> --body-file <file> ("Claude replying on behalf of <LOGIN>: re <reviewer>'s review: ... Fixed in <sha>." or the reasoning).
   For each, judge it with the ticket and the sibling PRs in mind:
-  - REAL → fix it (delegate to the repo's owning agent if CLAUDE.md names one), commit from <DIR> with `git -C <DIR> commit -F -` and push with `git -C <DIR> push`, then reply on the thread:
+  - REAL → fix it (delegate to the repo's owning agent if CLAUDE.md names one), commit from <DIR> with `git -C <DIR> commit -F -`, bring in anything the remote gained (a branch update from Step 4 of an earlier cycle) with `git -C <DIR> pull --no-rebase origin <HEAD_BRANCH>`, then `git -C <DIR> push`. Then reply on the thread:
       gh api repos/<REPO>/pulls/<N>/comments/<COMMENT_ID>/replies -X POST -f body="Claude replying on behalf of <LOGIN>: Fixed in <sha>. <what changed>"
   - NOT REAL → reply with the reasoning, same prefix. Don't implement every suggestion blindly; don't wave off a valid bug.
   Then RESOLVE the thread, reply first, resolve second. Find its node id:
