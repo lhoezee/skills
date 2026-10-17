@@ -347,14 +347,14 @@ test("People: changing a profile re-applies and keeps them running; a template c
   assert.equal(bo.needsUpdate, false);
 });
 
-const ROLES = [{ id: "finance", label: "Finance" }, { id: "product", label: "Product" }].map((r) => ({ ...r, description: "", profile: "reader" as const, outputStyle: null, hiddenPages: [], hiddenSkills: [] }));
+const ROLES = [{ id: "finance", label: "Finance" }, { id: "product", label: "Product" }].map((r) => ({ ...r, description: "", profile: "reader" as const, outputStyle: null, hiddenPages: [], hiddenSkills: [], ownHiddenPages: [], ownHiddenSkills: [] }));
 
 test("People: a role assigned at set-up goes in the roster and reaches their dashboard as DASHBOARD_ROLE; changing it re-applies", async () => {
   const { root, cfg } = workspace();
   const { run, fetcher, state, roster } = world(cfg);
   const people = new People(root, { run, fetcher, configDir: cfg, roles: () => ROLES });
   const roleEnv = (o: any[]) => o.find((x) => x.kind === "StatefulSet").spec.template.spec.containers[0].env.find((e: any) => e.name === "DASHBOARD_ROLE");
-  assert.deepEqual((await people.view()).roles, [{ id: "finance", label: "Finance" }, { id: "product", label: "Product" }]);
+  assert.deepEqual((await people.view()).roles.map((r) => [r.id, r.label, r.access]), [["finance", "Finance", "read"], ["product", "Product", "read"]]);
 
   const preview = await people.act({ action: "provision", email: "ana@acme.com", role: "finance", dryRun: true });
   assert.deepEqual(roleEnv(preview.objects!), { name: "DASHBOARD_ROLE", value: "finance" });
@@ -624,4 +624,74 @@ test("parseJsonStream: kubectl's one-document-per-object output, braces inside s
   assert.throws(() => parseJsonStream("", "t"), /didn't return JSON/);
   assert.throws(() => parseJsonStream(`{} "unterminated`, "t"), /didn't return JSON/);
   assert.throws(() => parseJsonStream(`"ignored" {}`, "t"), /didn't return JSON/);
+});
+
+test("People: access is assigned apart from the role, reaches their dashboard as DASHBOARD_ACCESS, and changing it re-applies", async () => {
+  const { root, cfg } = workspace();
+  const { run, fetcher, state, roster } = world(cfg);
+  const people = new People(root, { run, fetcher, configDir: cfg, roles: () => ROLES });
+  const env = (name: string) => state.statefulsets.find((s) => s.metadata.name === "dashboard-ana").spec.template.spec.containers[0].env.find((e: any) => e.name === name);
+
+  // A technical ops person: a reader role, with full access.
+  await people.act({ action: "provision", email: "ana@acme.com", role: "product", access: "full" });
+  assert.deepEqual([env("DASHBOARD_ROLE")?.value, env("DASHBOARD_ACCESS")?.value], ["product", "full"]);
+  assert.equal(roster().people["ana@acme.com"].access, "full");
+  assert.equal((await people.view()).rows.find((r) => r.email === "ana@acme.com")!.access, "full");
+
+  await people.act({ action: "access", email: "ana@acme.com", access: "read" });
+  assert.equal(env("DASHBOARD_ACCESS")?.value, "read");
+  assert.equal(env("DASHBOARD_ROLE")?.value, "product", "the role stays");
+  // "" follows the role again: no DASHBOARD_ACCESS, nothing in the roster.
+  await people.act({ action: "access", email: "ana@acme.com", access: "" });
+  assert.equal(env("DASHBOARD_ACCESS"), undefined);
+  assert.equal("access" in roster().people["ana@acme.com"], false);
+  await assert.rejects(people.act({ action: "access", email: "ana@acme.com", access: "admin" }), /access is "full", "read"/);
+});
+
+test("Roles: add, change and remove the team's roles in workspace.json; commit it alone; a role someone has can't go", async () => {
+  const { Roles, describeRoles, roleId } = await import("../src/people/roles.ts");
+  const { runCli } = await import("../src/people/cli.ts");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "nj-roles-"));
+  const cfg = path.join(root, ".claude", "dashboard");
+  fs.mkdirSync(cfg, { recursive: true });
+  const g = (...a: string[]) => runCli("git", ["-C", root, "-c", "user.name=T", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false", ...a]);
+  await g("init", "-q", "-b", "main");
+  fs.writeFileSync(path.join(cfg, "workspace.json"), JSON.stringify({ name: "Acme", roles: { engineering: { label: "Engineering", hiddenSkills: ["x"] } } }, null, 2));
+  fs.writeFileSync(path.join(root, "other.txt"), "staged, not ours\n");
+  await g("add", ".");
+  await g("commit", "-q", "-m", "init");
+  fs.mkdirSync(path.join(root, ".claude", "output-styles"));
+  fs.writeFileSync(path.join(root, ".claude", "output-styles", "business.md"), "---\nname: Business\ndescription: plain\nkeep-coding-instructions: true\n---\nTalk plainly.\n");
+  const roles = new Roles(root, cfg, (n, a, o) => runCli(n, n === "git" ? ["-c", "user.name=T", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false", ...a] : a, o));
+
+  assert.equal(roleId("Customer Success!"), "customer-success");
+  assert.deepEqual(roles.styles(), ["Business", "Explanatory", "Learning"]);
+  assert.equal((await roles.status()).uncommitted, false);
+
+  assert.equal(roles.save(null, { label: "Operations", description: "Runs the business", access: "read", outputStyle: "Business" }), "operations");
+  assert.equal(roles.save(null, { label: "Operations" }), "operations-2", "a second one with the same name gets its own id");
+  roles.remove("operations-2", []);
+  roles.save("engineering", { label: "Engineering", description: "Builds it", access: "full", outputStyle: null });
+  const data = JSON.parse(fs.readFileSync(path.join(cfg, "workspace.json"), "utf-8"));
+  assert.deepEqual(data.roles.operations, { label: "Operations", description: "Runs the business", profile: "reader", outputStyle: "Business" });
+  assert.deepEqual(data.roles.engineering, { label: "Engineering", hiddenSkills: ["x"], description: "Builds it" }, "what the page doesn't edit is kept");
+  assert.equal(data.name, "Acme");
+  assert.deepEqual(roles.list().map((r) => [r.id, r.access, r.outputStyle]), [["engineering", "full", null], ["operations", "read", "Business"]]);
+
+  const st = await roles.status();
+  assert.equal(st.uncommitted, true);
+  assert.deepEqual(st.changes, ["Changed the Engineering role: new description", "Added the Operations role (read-only access, Business style)"], "in the file's order");
+
+  assert.throws(() => roles.remove("operations", ["ana@acme.com"]), /ana@acme\.com has this role: give them another first/);
+  assert.throws(() => roles.save(null, { label: "  " }), /needs a name/);
+  assert.throws(() => roles.save("nope", { label: "X" }), /no role "nope"/);
+
+  fs.writeFileSync(path.join(root, "other.txt"), "changed, staged\n");
+  await g("add", "other.txt");
+  assert.equal((await roles.commit()).uncommitted, false);
+  const log = await g("log", "-1", "--name-only", "--format=%s");
+  assert.match(log.stdout, /^chore\(roles\): update the team's roles \(2 changes\)\s+\.claude\/dashboard\/workspace\.json\s*$/, "only workspace.json goes in");
+  assert.match((await g("diff", "--cached", "--name-only")).stdout, /other\.txt/, "what else was staged stays staged");
+
+  assert.deepEqual(describeRoles({ roles: { a: { label: "A" } }, name: "x" }, { roles: {}, name: "y" }), ["Removed the A role", "Other changes to workspace.json"]);
 });

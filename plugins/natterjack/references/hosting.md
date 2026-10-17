@@ -36,6 +36,7 @@ Hosted mode is set by the container's environment, never by `workspace.json`:
 | `DASHBOARD_CLAUDE_BIN` | `claude` on PATH | The exact CLI to run. The image sets it. |
 | `DASHBOARD_MAX_CONCURRENT_RUNS` | `deck.json` `limits` | 1–10. Caps this person's runs at once, over `deck.json` and their own settings. The People page sets it from their profile. |
 | `DASHBOARD_ROLE` | none | A `workspace.json` role id. That role is theirs from the first start: they're never asked, and Settings shows it without a way to change it. The People page sets it when you assign a role. An id that isn't one of the team's roles is logged and ignored. |
+| `DASHBOARD_ACCESS` | none | `full` or `read`: what they can do with the code, over their role's default (config.md, "Roles"). Locked like the role. The People page sets it when you give someone their own access. |
 
 The dashboard refuses to start when `DASHBOARD_HOSTED` is on and the URL or secret is missing. `GET /healthz` answers `ok` without any of the checks, for liveness probes.
 
@@ -205,6 +206,13 @@ Every change is checked first: the page shows the platform's own preview (`kubec
 **Profiles** are what a person can do, set per person on the page: which knowledge areas they get, their run limit, and their size. On Kubernetes an area is a Secret mounted with `envFrom` and the size is the `dashboard` container's limits; on App Service an area is a Key Vault reference in the app's settings and the size is which plan they're on. Everything else in the template is yours.
 
 **Roles** (`workspace.json` `roles`, [config.md](config.md#workspacejson-who-this-workspace-is)) can be assigned on the page too. The default, **Let them choose**, leaves it to the person as on a local dashboard. An assigned role is stored in `people.json` and passed as `DASHBOARD_ROLE`, and the person can't change it; on App Service it's the template's `role` parameter, so a copy of `app-service-person.bicep` from before roles needs that parameter added.
+
+**Access** is set apart from the role, in its own column.
+- **The choices:** the role's default, **Full stack** (GitHub sign-in, push and pull requests, Implement, Publish), or **Read-only** (their runs only have the read token).
+- **How it arrives:** stored in `people.json` and passed as `DASHBOARD_ACCESS`, through the template's `access` parameter on App Service.
+- **Who can push:** limit the GitHub check to full access with `{ "use": "gh", "when": { "access": "full" } }`, and the server refuses a GitHub sign-in to everyone else.
+
+The **Roles** section under the table edits the team's roles: name, description, default access, and the output style Claude answers in (the team's `.claude/output-styles/*.md`, or Claude Code's own). Like the roster, it shows what isn't committed in `workspace.json` and commits it on its own. A role someone in the roster has can't be removed until they're given another.
 
 ### Setting it up
 

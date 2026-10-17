@@ -130,7 +130,7 @@ export async function hostedChecks(root, o = {}) {
   const machine = readJson(path.join(cfgDir, "machine.json"));
   const ws = readJson(path.join(cfgDir, "workspace.json")) || {};
   const gh = (machine?.checks || []).find((c) => c && c.use === "gh");
-  if (ws.roles && gh && !gh.when) add("warn", "roles", "every role gets the GitHub sign-in (machine.json's gh check has no when)", 'Give it "when": { "role": ["<the roles that push code>"] }; the rest keep only the read token.');
+  if (ws.roles && gh && !gh.when) add("warn", "roles", "everyone gets the GitHub sign-in (machine.json's gh check has no when)", 'Give it "when": { "access": "full" }; read-only people keep only the read token.');
   if (!p.gitTokenSecret && platform.type === "azure-app-service") add("ok", "repos", "no gitTokenSecret: hosted repos are as fresh as the last snapshot publish (set one to pull them on every start)");
 
   // ---- App Service

@@ -235,10 +235,20 @@ export function requiredVersion(spec: any, root: string): string | null {
   return v;
 }
 
-/** machine.json checks merged over their catalog entries, with `when` conditions applied. */
-export function resolvedSpecs(root: string) {
+/** Checks that are only about running the apps: a hosted container or a read-only person has nothing to run. */
+const RUN_KINDS = new Set(["dotnet-sdk", "dotnet-dev-cert", "dotnet-user-secrets", "docker", "docker-container", "port", "npm-global"]);
+
+/**
+ * machine.json checks merged over their catalog entries, with `when` conditions applied:
+ * exists, os, profile / access (full | read), role, hosted (true | false). A check for
+ * running the apps (it names apps, or is one of RUN_KINDS) is left out on a hosted dashboard
+ * and for read-only access, unless its `when` asks for it (hosted, profile or access).
+ */
+export function resolvedSpecs(root: string, opts: { hosted?: boolean } = {}) {
   const { data, error } = readConfigFile("machine.json");
   const list = data && Array.isArray(data.checks) ? data.checks : [];
+  const me = readProfile(LEDGER_DIR);
+  const accessOf = (a: string) => (a === "read" ? "reader" : a === "full" ? "developer" : a);
   const out: any[] = [];
   for (const raw of list) {
     if (!raw || typeof raw !== "object") continue;
@@ -250,13 +260,16 @@ export function resolvedSpecs(root: string) {
     if (!spec.id) continue;
     if (raw.when && raw.when.exists && !fs.existsSync(path.join(root, raw.when.exists))) continue;
     if (raw.when && raw.when.os && ![].concat(raw.when.os).includes(OS_KEY)) continue;
-    // "developer" / "reader": e.g. build tools only for people who build (profile.ts).
-    if (raw.when && (raw.when.profile || raw.when.role)) {
-      const me = readProfile(LEDGER_DIR);
-      if (raw.when.profile && ![].concat(raw.when.profile).includes(me.profile)) continue;
-      // A role id from workspace.json roles: a check only one role needs.
-      if (raw.when.role && ![].concat(raw.when.role).includes(me.current.id)) continue;
-    }
+    const when = raw.when || {};
+    // "developer" / "reader" (or access "full" / "read"): e.g. build tools only for people who build (profile.ts).
+    if (when.profile && ![].concat(when.profile).includes(me.profile)) continue;
+    if (when.access && ![].concat(when.access).map(accessOf).includes(me.profile)) continue;
+    // A role id from workspace.json roles: a check only one role needs.
+    if (when.role && ![].concat(when.role).includes(me.current.id)) continue;
+    if (when.hosted === true && !opts.hosted) continue;
+    if (when.hosted === false && opts.hosted) continue;
+    const forRunning = (Array.isArray(spec.apps) && spec.apps.length > 0) || RUN_KINDS.has(spec.kind);
+    if (forRunning && (opts.hosted || me.profile === "reader") && when.hosted !== true && !when.profile && !when.access) continue;
     out.push(spec);
   }
   return { specs: out, error, configured: !!data };
@@ -323,7 +336,7 @@ class Machine {
   async _check() {
     const hw = hardware(this.root, true);
     await refreshPath();
-    const { specs, error, configured } = resolvedSpecs(this.root);
+    const { specs, error, configured } = resolvedSpecs(this.root, { hosted: this.hosted });
 
     // Each distinct probe runs once, all in parallel.
     const probes = new Map<string, Promise<any>>();

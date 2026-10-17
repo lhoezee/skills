@@ -23,7 +23,7 @@ With `.claude/dashboard/hosting.json` it also checks the hosted dashboards (`scr
   - every secret the template reads is in the vault.
 - **The router:** is its image as new as the dashboards', and does it answer?
 - **The public address:** does it answer?
-- **Roles:** if only some roles should push, does the GitHub check say so?
+- **Access:** with roles, does the GitHub check say only full access gets it?
 
 For setting any of that up, use the `host` skill.
 

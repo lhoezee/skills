@@ -108,9 +108,10 @@ export class Kubernetes implements Platform {
       c.resources ||= {};
       c.resources.limits = { ...(c.resources.limits || {}), ...(p.profile.memory ? { memory: p.profile.memory } : {}), ...(p.profile.cpu ? { cpu: p.profile.cpu } : {}) };
     }
-    c.env = (c.env || []).filter((e: any) => e.name !== "DASHBOARD_MAX_CONCURRENT_RUNS" && e.name !== "DASHBOARD_ROLE");
+    c.env = (c.env || []).filter((e: any) => !["DASHBOARD_MAX_CONCURRENT_RUNS", "DASHBOARD_ROLE", "DASHBOARD_ACCESS"].includes(e.name));
     if (p.profile.maxConcurrentRuns) c.env.push({ name: "DASHBOARD_MAX_CONCURRENT_RUNS", value: String(p.profile.maxConcurrentRuns) });
     if (p.role) c.env.push({ name: "DASHBOARD_ROLE", value: p.role });
+    if (p.access) c.env.push({ name: "DASHBOARD_ACCESS", value: p.access });
     const secrets = p.profile.areas.map((a) => this.cfg.areas[a]?.secret).filter(Boolean);
     const areaSecrets = new Set(Object.values(this.cfg.areas).map((a) => a.secret));
     c.envFrom = [...(c.envFrom || []).filter((e: any) => !areaSecrets.has(e.secretRef?.name)), ...secrets.map((name) => ({ secretRef: { name } }))];

@@ -33,6 +33,8 @@ param applied string = ''
 param maxConcurrentRuns int = 0
 @description('A workspace.json role id assigned to them (DASHBOARD_ROLE, which they can\'t change); empty lets them pick.')
 param role string = ''
+@description('full or read, assigned over their role\'s default (DASHBOARD_ACCESS, which they can\'t change); empty follows the role.')
+param access string = ''
 @description('Their areas: [{ name: "KNOWLEDGE_FINANCE_KEY", secretName: "natterjack-area-finance" }], each a Key Vault secret.')
 param areaSettings array = []
 
@@ -73,7 +75,7 @@ var baseSettings = [
   { name: 'DASHBOARD_PROXY_SECRET', value: '@Microsoft.KeyVault(SecretUri=${kvRef}/dashboard-backend-secret)' }
 ]
 var runSettings = maxConcurrentRuns > 0 ? [{ name: 'DASHBOARD_MAX_CONCURRENT_RUNS', value: string(maxConcurrentRuns) }] : []
-var roleSettings = !empty(role) ? [{ name: 'DASHBOARD_ROLE', value: role }] : []
+var roleSettings = concat(!empty(role) ? [{ name: 'DASHBOARD_ROLE', value: role }] : [], !empty(access) ? [{ name: 'DASHBOARD_ACCESS', value: access }] : [])
 var workspaceSettings = !empty(snapshotConfig)
   ? [
       { name: 'SNAPSHOT_CONFIG', value: snapshotConfig }

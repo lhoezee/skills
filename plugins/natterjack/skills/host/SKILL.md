@@ -105,7 +105,11 @@ The People page's **Ask Claude to set it up** runs this step alone.
 
 ## 8. Roles
 
-In `workspace.json`, add `roles` (config.md, "Roles"). For example, `engineering` (the developer profile) and `operations` (`profile: "reader"`). In `machine.json`, limit the GitHub check to the roles that push code: `{ "use": "gh", "when": { "role": ["engineering"] } }`. The others never get the sign-in, so their runs use only the read token. The People page assigns each person's role, and they can't change it.
+A role is who someone is and how Claude answers them; **access** (full stack or read-only) is what they can do with the code. The role only sets the default access (config.md, "Roles").
+1. **Add the roles** in the People page's **Roles** section: name, default access, output style. Then Commit there.
+2. **Give non-engineering roles a plain-language output style.** If the team has none yet, write `.claude/output-styles/<name>.md`, with `keep-coding-instructions: true` so Claude still reads code properly. Tell it to name the app, screen or report rather than files and methods.
+3. **Limit the GitHub check to full access** in `machine.json`: `{ "use": "gh", "when": { "access": "full" } }`. Read-only people never get the sign-in, so their runs use only the read token.
+4. **On the People page,** each person gets a role, plus their own access when it differs from the role's (a technical ops person: Operations with full stack). They can't change either.
 
 Every local dashboard asks its user for their role once, after this. Tell the team.
 

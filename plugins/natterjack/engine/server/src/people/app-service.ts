@@ -115,8 +115,9 @@ export class AppService implements Platform {
       email: person.email,
       profile: person.profile.id,
       maxConcurrentRuns: person.profile.maxConcurrentRuns || 0,
-      // Only when assigned: a team's older copy of the template has no role parameter.
+      // Only when assigned: a team's older copy of the template has no role (or access) parameter.
       ...(person.role ? { role: person.role } : {}),
+      ...(person.access ? { access: person.access } : {}),
       areaSettings,
     };
     const hash = crypto.createHash("sha256").update(template).update(JSON.stringify(sortKeys(parameters))).digest("hex").slice(0, 12);

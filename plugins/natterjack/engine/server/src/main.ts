@@ -58,7 +58,7 @@ import type { SnapshotFile } from "./snapshot-sources/index.ts";
 import type { Manifest } from "./snapshot-sources/manifest.ts";
 import { SnapshotSources } from "./snapshot-sources/index.ts";
 import type { SnapshotSource } from "./snapshot-sources/index.ts";
-import { lockedRole, readProfile, reapplyProfile, refuseRoleChange, setRole } from "./profile.ts";
+import { accessInfo, lockedAccess, lockedRole, parseAccess, readProfile, reapplyProfile, refuseAccessChange, refuseRoleChange, setAccess, setRole } from "./profile.ts";
 import { DocSites, docAreas, docSources } from "./docs.ts";
 import { Knowledge } from "./knowledge/index.ts";
 import { agentOf, agentStatuses, isAgentId, type AgentStatus } from "./agents/index.ts";
@@ -416,8 +416,10 @@ const docsProviders = new DocsProviders(() => ({ ledgerDir: LEDGER_DIR, issues: 
 const snapshotSources = new SnapshotSources(() => ({ ledgerDir: LEDGER_DIR, issues: workspaceConfig().issues }));
 // The role assigned on the People page (DASHBOARD_ROLE), if any: in effect, and theirs to see but not change.
 const ROLE_LOCK = ((ws) => lockedRole(ws.rolesConfigured ? ws.roles : []))(workspaceConfig());
+// The access assigned there (DASHBOARD_ACCESS: full or read), separate from the role; locked the same way.
+const ACCESS_LOCK = lockedAccess();
 // Someone's hidden skills and output style follow workspace.json roles if they changed while the dashboard was down.
-reapplyProfile(LEDGER_DIR, MAIN_WORKSPACE_PATH, undefined, ROLE_LOCK);
+reapplyProfile(LEDGER_DIR, MAIN_WORKSPACE_PATH, undefined, ROLE_LOCK, ACCESS_LOCK);
 
 const isReader = () => readProfile(LEDGER_DIR).profile === "reader";
 
@@ -434,6 +436,7 @@ function profileInfo(): ProfileInfo {
     // Their own outputStyle in settings.local.json wins over the role's.
     styleApplied: !p.current.outputStyle || p.outputStyle === p.current.outputStyle,
     roles: ws.roles,
+    ...accessInfo(p, ACCESS_LOCK),
   };
 }
 
@@ -446,7 +449,7 @@ function snapshotSource(): SnapshotSource | null {
 
 /** Publish now: a developer, connected to a source that takes uploads; else a 4xx saying which. */
 function publishableSource(): SnapshotSource {
-  if (isReader()) throw httpError(403, "Publishing isn't available in the reader profile.");
+  if (isReader()) throw httpError(403, "Publishing needs full access; yours is read-only.");
   const source = snapshotSource();
   if (!source) throw httpError(400, "repos.json has no snapshot source.");
   if (!source.upload) throw httpError(400, `The ${source.label} source is download-only; publish to it from CI.`);
@@ -567,7 +570,7 @@ function deckView() {
     ...deck.config(),
     stats: runs.stats(),
     // A role's hidden skills are off in Claude too (profile.ts); don't offer them here.
-    skills: ((hidden) => deck.skills().filter((s) => !hidden.includes(s.name)))(readProfile(LEDGER_DIR).current.hiddenSkills),
+    skills: ((hidden) => deck.skills().filter((s) => !hidden.includes(s.name)))(readProfile(LEDGER_DIR).hiddenSkills),
     workspaces: listWorkspaces().map(({ slug, name, ticketId }) => ({ slug, name, ticketId })),
     options: { models: MODELS, efforts: EFFORTS, permissionModes: PERMISSION_MODES },
   };
@@ -963,7 +966,7 @@ function bootInfo(user: string | null): Boot {
     profile: (() => {
       const me = readProfile(LEDGER_DIR, ws.roles);
       // ask: the team has roles and this person hasn't picked one yet (the first-start question).
-      const hiddenPages = HOSTED ? [...new Set([...me.current.hiddenPages, ...HOSTED_HIDDEN_PAGES])] : me.current.hiddenPages;
+      const hiddenPages = HOSTED ? [...new Set([...me.hiddenPages, ...HOSTED_HIDDEN_PAGES])] : me.hiddenPages;
       return { current: me.profile, role: me.current.id, roleLabel: me.current.label, ask: ws.rolesConfigured && !me.roleChosen && !ROLE_LOCK, roleLocked: !!ROLE_LOCK, hiddenPages };
     })(),
     hosted: HOSTED ? { user } : null,
@@ -1372,9 +1375,9 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
   }
   if (p === "/api/github/login") {
     // { action: "start" } → the code to enter on GitHub's device page; "status" is polled until done or failed.
-    // Only for someone whose checks include it: a role whose machine.json `when` leaves out the
-    // GitHub CLI has no sign-in, so its runs use only the workspace's read token (GIT_TOKEN).
-    if (body.action === "start" && !resolvedSpecs(MAIN_WORKSPACE_PATH).specs.some((s) => s.hostedSignIn === "github")) {
+    // Only for someone whose checks include it: an access (or role) whose machine.json `when` leaves
+    // out the GitHub CLI has no sign-in, so their runs use only the workspace's read token (GIT_TOKEN).
+    if (body.action === "start" && !resolvedSpecs(MAIN_WORKSPACE_PATH, { hosted: !!HOSTED }).specs.some((s) => s.hostedSignIn === "github")) {
       return sendError(res, 403, "Your role doesn't sign in to GitHub here.");
     }
     if (body.action === "start") return sendJson(res, await githubLogin.start(user));
@@ -1463,7 +1466,7 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
   if (p === "/api/issues/implement" || p === "/api/linear/implement") {
     const ticket = ticketParam(body.ticket);
     if (!ticket) return sendError(res, 400, "Invalid ticket id");
-    if (isReader()) return sendError(res, 403, `Implement isn't available to the ${readProfile(LEDGER_DIR).current.label} role (Settings → Role).`);
+    if (isReader()) return sendError(res, 403, "Implement needs full access; yours is read-only (Settings → Access).");
     // Only implement-state issues of issues.implementTeams do code work; refuse the rest.
     const known = ((await getIssues(false)).issues || []).find((i) => i.id === ticket);
     if (known && !known.canImplement) {
@@ -1614,6 +1617,16 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
     return sendJson(res, { job: pub }, 202);
   }
   if (p === "/api/profile") {
+    // { access: full | read | default } is their own access, over the role's default.
+    if ("access" in body) {
+      const access = parseAccess(body.access);
+      if (access === undefined) return sendError(res, 400, 'access is "full", "read" or "default".');
+      const refused = refuseAccessChange(ACCESS_LOCK, access);
+      if (refused) return sendError(res, 403, refused);
+      try { setAccess(LEDGER_DIR, MAIN_WORKSPACE_PATH, access); }
+      catch (e) { return sendError(res, 400, e.message); }
+      return sendJson(res, profileInfo());
+    }
     // { role } picks a role; { profile } (older installers) takes the first role on that profile.
     const pick = typeof body.role === "string" ? { role: body.role }
       : body.profile === "reader" || body.profile === "developer" ? { profile: body.profile as "reader" | "developer" } : null;
@@ -1650,7 +1663,9 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
     return sendJson(res, await externalDocsStatus(body.site));
   }
   if (p === "/api/people/action") return sendJson(res, await people.act(body));
-  if (p === "/api/people/commit") return sendJson(res, await people.commitRoster());
+  // { file: "roles" } commits workspace.json (the Roles section); otherwise people.json.
+  if (p === "/api/people/commit") return sendJson(res, body.file === "roles" ? await people.commitRoles() : await people.commitRoster());
+  if (p === "/api/people/roles") return sendJson(res, people.editRoles(body));
   if (p === "/api/links/save") return sendJson(res, saveLink(MAIN_WORKSPACE_PATH, body));
   if (p === "/api/links/delete") return sendJson(res, deleteLink(MAIN_WORKSPACE_PATH, body));
   if (p === "/api/connections/login") {
