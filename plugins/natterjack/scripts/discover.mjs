@@ -560,7 +560,6 @@ const DB_IMAGES = [
   [/mssql|sqlserver/i, "sqlserver", 1433], [/seq/i, "seq", 5341],
 ];
 
-/** docker-compose services (a tiny YAML reader: enough for image/container_name/ports). */
 /**
  * One compose port mapping, short syntax: [HOST_IP:][HOST_PORT:]CONTAINER_PORT[/PROTOCOL]. The host
  * IP may be IPv6 in brackets, ports may be ranges (the first port is taken), and a port may be a
@@ -584,6 +583,7 @@ export function composePortOf(spec) {
   return { host: num(hostRaw), container, ...(hostVar ? { hostVar: vars[hostVar[1]].name } : {}) };
 }
 
+/** docker-compose services (a tiny YAML reader: enough for image, container_name, build and ports). */
 function composeServices(root) {
   const files = find(root, (n) => /^(docker-)?compose([.-][\w.-]+)?\.ya?ml$/i.test(n), 2);
   const out = [];
@@ -601,7 +601,7 @@ function composeServices(root) {
     for (const raw of lines) {
       if (/^\s*#/.test(raw) || !raw.trim()) continue;
       const indent = raw.length - raw.trimStart().length;
-      const line = raw.trim();
+      const line = raw.trim().replace(/\s+#.*$/, ""); // an inline comment isn't part of the value
       if (indent === 0) { inServices = line === "services:"; push(); svc = null; continue; }
       if (!inServices) continue;
       if (svcIndent === -1 || indent === svcIndent) {
@@ -609,7 +609,7 @@ function composeServices(root) {
         if (m) { push(); svcIndent = indent; svc = { file: rel(root, file), service: m[1], image: null, container: null, build: null, ports: [] }; block = null; continue; }
       }
       if (!svc) continue;
-      if (block && indent > blockIndent) {
+      if (block && (indent > blockIndent || (block === "ports" && indent === blockIndent && line.startsWith("-")))) {
         if (block === "ports") {
           // Short syntax ("8080:80", "127.0.0.1:${PORT:-5432}:5432") or long ("- target: 80" + "published: 8080").
           const item = line.startsWith("-") ? line.slice(1).trim() : null;
@@ -628,6 +628,7 @@ function composeServices(root) {
       const kv = /^([\w_]+):\s*(.*)$/.exec(line);
       if (kv && indent > svcIndent) {
         if (kv[1] === "ports" || (kv[1] === "build" && !kv[2])) { block = kv[1]; blockIndent = indent; }
+        if (kv[1] === "build" && !kv[2]) svc.build = "."; // compose's default context, unless the map names one
         if (kv[1] === "build" && kv[2]) svc.build = unquote(kv[2]);
         if (kv[1] === "image") svc.image = kv[2].replace(/["']/g, "");
         if (kv[1] === "container_name") svc.container = kv[2].replace(/["']/g, "");
@@ -766,6 +767,7 @@ async function suggest(root, repos, compose, pins, codeHost) {
   const addUse = (use, extra = {}) => { if (!machine.some((m) => (m.id || m.use) === (extra.id || use))) machine.push({ use, ...extra }); };
   const apps = [];
   const usedPorts = new Set(compose.map((c) => c.hostPort).filter(Boolean));
+  const claimed = new Set(); // ports already given to an app
   const appIds = new Set();
   const idFor = (raw) => { const s = /^[A-Z0-9_-]+$/.test(raw) ? raw.toLowerCase() : raw; let id = s.replace(/[^A-Za-z0-9]+(.)?/g, (_, c) => (c ? c.toUpperCase() : "")).replace(/^[^A-Za-z]+/, "") || "app"; id = id[0].toLowerCase() + id.slice(1); let n = id, i = 2; while (appIds.has(n)) n = `${id}${i++}`; appIds.add(n); return n; };
 
@@ -801,10 +803,11 @@ async function suggest(root, repos, compose, pins, codeHost) {
       }
       if (s.run && s.kind !== "library") {
         let port = s.port;
-        // A compose service built from this app's own folder is this app in a container: its port is the app's, not a clash.
-        const own = new Set(compose.filter((c) => c.hostPort && c.build && (c.build === s.path || c.build === r.dir)).map((c) => c.hostPort));
+        // A compose service built from exactly this app's folder is this app in a container: its port is the app's
+        // (once: a second app wanting it still moves aside).
+        const own = new Set(compose.filter((c) => c.hostPort && c.build === s.path && !claimed.has(c.hostPort)).map((c) => c.hostPort));
         while (port && usedPorts.has(port) && !own.has(port)) port += 1;
-        if (port) usedPorts.add(port);
+        if (port) { usedPorts.add(port); claimed.add(port); }
         const name = s.path === "." ? path.basename(root) : s.path.split("/").pop();
         apps.push({
           id: idFor(name),

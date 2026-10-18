@@ -683,3 +683,41 @@ test("discover: compose ports and build contexts, Expo, build wrappers", async (
   assert.equal(pg.port, undefined, "a host port from a variable can differ per machine: checked by name");
   assert.match(pg.why, /DB_PORT/);
 });
+
+test("discover: compose layouts (unindented lists, inline comments, build maps) and apps sharing a repo's container", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "aos-disc2-"));
+  const w = (rel, text) => { fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true }); fs.writeFileSync(path.join(root, rel), text); };
+  w("svc/Cargo.toml", '[package]\nname = "svc"\n[dependencies]\naxum = "0.7"\n');
+  w("svc/.env.example", "PORT=8080\n");
+  w("svc/compose.yaml", [
+    "services:",
+    "  cache:",
+    "    image: redis:7",
+    "    ports:",
+    "    - 6379:6379", // list items at the key's own indent: valid YAML
+    "  svc:",
+    "    build: . # the service itself",
+    "    ports:",
+    "    - 8080:8080",
+    "  worker:",
+    "    build:",
+    "      dockerfile: Worker.Dockerfile", // no context: compose builds the file's folder
+    "",
+  ].join("\n"));
+  // One repo, two Next.js apps (default 3000), and a compose file building the whole repo on 3000.
+  for (const a of ["site", "admin"]) w(`web/apps/${a}/package.json`, JSON.stringify({ scripts: { dev: "next dev" }, dependencies: { next: "15", react: "19" } }));
+  w("web/package.json", JSON.stringify({ private: true }));
+  w("web/docker-compose.yml", "services:\n  web:\n    build: .\n    ports:\n      - 3000:3000\n");
+  for (const d of ["svc", "web"]) execFileSync("git", ["init", "-q", path.join(root, d)]);
+
+  const inv = await discover(root);
+  const by = (svc) => inv.compose.find((c) => c.service === svc);
+  assert.equal(by("cache").hostPort, 6379, "an unindented ports list is read");
+  assert.equal(by("svc").build, "svc", "an inline comment isn't part of the build context");
+  assert.equal(by("worker").build, "svc", "a build map without context builds the compose file's folder");
+  const apps = inv.suggestions.apps;
+  assert.equal(apps.find((a) => a.dir === "svc").port, 8080);
+  const webPorts = apps.filter((a) => a.dir === "web").map((a) => a.port).sort();
+  assert.equal(new Set(webPorts).size, webPorts.length, "two apps never share a port");
+  assert.ok(!webPorts.includes(3000), "the repo-wide container's port isn't any one app's");
+});
