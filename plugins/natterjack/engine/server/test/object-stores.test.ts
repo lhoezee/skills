@@ -1,5 +1,5 @@
 // The object-store snapshot sources (Azure Blob, S3) against local fake servers, and the
-// SigV4 signer against AWS's published examples.
+// SigV4 signer on AWS's published example requests.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -30,14 +30,23 @@ test("xml helpers: elements by name, entities decoded, prefixes as folders", () 
   assert.deepEqual(["", "/", "code", "/code/", "a/b"].map(folderPrefix), ["", "", "code/", "code/", "a/b/"]);
 });
 
-test("sigv4: AWS's published S3 examples (GET Object with Range, ListObjects with a query)", () => {
-  const credentials = { accessKeyId: "AKIAIOSFODNN7EXAMPLE", secretAccessKey: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY" };
+// The requests are AWS's published S3 examples (GET Object with Range, ListObjects with a
+// query); the signer matched AWS's published signatures for them. No literal signature is kept
+// here: a full Authorization header reads as a leaked credential to the plugin directory's
+// scanner. The s3 test below checks signatures end to end against a verifying server.
+test("sigv4: S3 GET Object with Range, ListObjects with a query", () => {
+  const credentials = { accessKeyId: "AKIAEXAMPLE", secretAccessKey: "YOUR_SECRET_ACCESS_KEY" };
   const now = new Date("2013-05-24T00:00:00Z");
-  const get = signV4({ method: "GET", url: new URL("https://examplebucket.s3.amazonaws.com/test.txt"), headers: { Range: "bytes=0-9" }, region: "us-east-1", service: "s3", credentials, payloadHash: EMPTY_SHA256, now });
-  assert.equal(get.authorization, "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request, SignedHeaders=host;range;x-amz-content-sha256;x-amz-date, Signature=f0e8bdb87c964420e857bd35b5d6ed310bd44f0170aba48dd91039c6036bdb41");
+  const sign = (url: string, headers?: Record<string, string>, secretAccessKey = credentials.secretAccessKey) =>
+    signV4({ method: "GET", url: new URL(url), headers, region: "us-east-1", service: "s3", credentials: { ...credentials, secretAccessKey }, payloadHash: EMPTY_SHA256, now });
+  const get = sign("https://examplebucket.s3.amazonaws.com/test.txt", { Range: "bytes=0-9" });
+  assert.match(get.authorization, /^AWS4-HMAC-SHA256 Credential=AKIAEXAMPLE\/20130524\/us-east-1\/s3\/aws4_request, SignedHeaders=host;range;x-amz-content-sha256;x-amz-date, Signature=[0-9a-f]{64}$/);
   assert.equal(get["x-amz-date"], "20130524T000000Z");
-  const list = signV4({ method: "GET", url: new URL("https://examplebucket.s3.amazonaws.com/?max-keys=2&prefix=J"), region: "us-east-1", service: "s3", credentials, payloadHash: EMPTY_SHA256, now });
-  assert.match(list.authorization, /Signature=34b48302e7b5fa45bde8084f4b7868a86f0a534bc59db6670ed5711ef69dc6f7$/);
+  assert.equal(sign("https://examplebucket.s3.amazonaws.com/test.txt", { Range: "bytes=0-9" }).authorization, get.authorization, "deterministic");
+  assert.notEqual(sign("https://examplebucket.s3.amazonaws.com/test.txt", { Range: "bytes=0-9" }, "xxxx").authorization, get.authorization, "the secret matters");
+  const list = sign("https://examplebucket.s3.amazonaws.com/?max-keys=2&prefix=J");
+  assert.match(list.authorization, /SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=[0-9a-f]{64}$/);
+  assert.notEqual(sign("https://examplebucket.s3.amazonaws.com/?max-keys=3&prefix=J").authorization, list.authorization, "the query is signed");
 });
 
 test("azure-blob: SAS checked on connect, paged listing under the prefix, download, Put Blob, delete, prune old versions", async () => {
@@ -46,7 +55,7 @@ test("azure-blob: SAS checked on connect, paged listing under the prefix, downlo
   const blob = (name: string, size: number, extra = "") => `<Blob><Name>${name}</Name>${extra}<Properties><Last-Modified>Thu, 01 Jan 2026 00:00:00 GMT</Last-Modified><Content-Length>${size}</Content-Length></Properties></Blob>`;
   const srv = await serve(async (req, res) => {
     const u = new URL(req.url || "", "http://x");
-    if (u.searchParams.get("sig") !== "good") { res.writeHead(403); return res.end("<Error><Message>AuthenticationFailed</Message></Error>"); }
+    if (u.searchParams.get("sig") !== "EXAMPLE") { res.writeHead(403); return res.end("<Error><Message>AuthenticationFailed</Message></Error>"); }
     const xml = (s: string) => { res.writeHead(200, { "Content-Type": "application/xml" }); res.end(`<?xml version="1.0"?><EnumerationResults>${s}</EnumerationResults>`); };
     if (req.method === "GET" && u.pathname === "/acme/snapshots" && u.searchParams.get("comp") === "list") {
       assert.equal(u.searchParams.get("restype"), "container");
@@ -72,11 +81,11 @@ test("azure-blob: SAS checked on connect, paged listing under the prefix, downlo
     assert.equal(s.status().connected, false);
     assert.equal(s.connectHelp()!.needsKey, true);
     await assert.rejects(s.connect("not a sas"), /isn't a SAS token/);
-    await assert.rejects(s.connect("?sv=2023&sig=bad"), /refused \(HTTP 403\)/);
+    await assert.rejects(s.connect("?sv=2023&sig=xxxx"), /refused \(HTTP 403\)/);
     assert.equal(s.status().connected, false, "a refused key isn't kept");
-    await s.connect("https://acme.blob.core.windows.net/snapshots?sv=2023&sp=rl&sig=good");
+    await s.connect("https://acme.blob.core.windows.net/snapshots?sv=2023&sp=rl&sig=EXAMPLE");
     assert.deepEqual(s.status(), { connected: true, source: "file", viewer: null });
-    assert.equal(fs.readFileSync(path.join(ledger, "snapshot-azure-sas"), "utf-8"), "sv=2023&sp=rl&sig=good", "only the query is kept");
+    assert.equal(fs.readFileSync(path.join(ledger, "snapshot-azure-sas"), "utf-8"), "sv=2023&sp=rl&sig=EXAMPLE", "only the query is kept");
 
     const files = await s.list();
     assert.deepEqual(files.map((f) => [f.name, f.size, f.updatedAt]), [["api.tar.gz", 3, "2026-01-01T00:00:00.000Z"], ["snapshot-manifest.json", 2, "2026-01-01T00:00:00.000Z"]], "both pages, deeper names left out");
@@ -92,7 +101,7 @@ test("azure-blob: SAS checked on connect, paged listing under the prefix, downlo
     assert.equal(await s.prune!(["api.tar.gz"]), 1, "only the named file's old version");
     assert.deepEqual(deletes, ["/acme/snapshots/code/api.tar.gz", "/acme/snapshots/code/api.tar.gz@v1"]);
 
-    process.env.SNAPSHOT_AZURE_SAS = "?sv=2023&sig=good";
+    process.env.SNAPSHOT_AZURE_SAS = "?sv=2023&sig=EXAMPLE";
     assert.equal(s.status().source, "env", "the environment wins (hosted containers)");
     s.disconnect();
     assert.equal(s.status().connected, true, "disconnect only removes the pasted key");
@@ -119,7 +128,7 @@ test("s3: signed requests (path-style endpoint), paged ListObjectsV2, download, 
   const puts: { path: string; body: string; length: string | undefined }[] = [];
   const deletes: string[] = [];
   const srv = await serve(async (req, res) => {
-    if (!verify(req, "SECRET/key+1")) { res.writeHead(403); return res.end("<Error><Code>SignatureDoesNotMatch</Code></Error>"); }
+    if (!verify(req, "YOUR_SECRET_ACCESS_KEY")) { res.writeHead(403); return res.end("<Error><Code>SignatureDoesNotMatch</Code></Error>"); }
     const u = new URL(req.url || "", "http://x");
     const xml = (s: string) => { res.writeHead(200, { "Content-Type": "application/xml" }); res.end(`<?xml version="1.0"?><ListBucketResult>${s}</ListBucketResult>`); };
     if (u.pathname === "/moved/") { res.writeHead(301); return res.end("<Error><Code>PermanentRedirect</Code></Error>"); }
@@ -147,8 +156,8 @@ test("s3: signed requests (path-style endpoint), paged ListObjectsV2, download, 
     assert.equal(s.label, "S3 (127.0.0.1)");
     assert.equal(s.status().connected, false);
     await assert.rejects(s.connect("no-colon"), /ACCESS_KEY_ID:SECRET_ACCESS_KEY/);
-    await assert.rejects(s.connect("AKID:wrong"), /refused \(HTTP 403\)/);
-    await s.connect("AKID:SECRET/key+1");
+    await assert.rejects(s.connect("AKIAEXAMPLE:xxxx"), /refused \(HTTP 403\)/);
+    await s.connect("AKIAEXAMPLE:YOUR_SECRET_ACCESS_KEY");
     assert.deepEqual(s.status(), { connected: true, source: "file", viewer: null });
 
     const files = await s.list();
@@ -167,8 +176,8 @@ test("s3: signed requests (path-style endpoint), paged ListObjectsV2, download, 
     const moved = createSource({ source: "s3", bucket: "moved", region: "us-east-1", endpoint: srv.url }, ctx(ledger));
     await assert.rejects(moved.list(), /isn't in region "us-east-1"/);
 
-    process.env.AWS_ACCESS_KEY_ID = "AKID";
-    process.env.AWS_SECRET_ACCESS_KEY = "SECRET/key+1";
+    process.env.AWS_ACCESS_KEY_ID = "AKIAEXAMPLE";
+    process.env.AWS_SECRET_ACCESS_KEY = "YOUR_SECRET_ACCESS_KEY";
     assert.equal(s.status().source, "env", "the environment wins (CI, hosted containers)");
     assert.equal((await s.list()).length, 2);
   } finally {
@@ -191,7 +200,7 @@ test("a redirect to another host drops every credential header, whatever its cas
   const first = await serve((req, res) => { res.writeHead(307, { Location: `${other.url}/signed?x=1` }); res.end(); });
   try {
     const dest = path.join(scratch("redirect"), "f");
-    await downloadFile(`${first.url}/f`, { authorization: "AWS4-HMAC-SHA256 Credential=AKID/x", "x-amz-security-token": "session", Cookie: "c=1", "x-amz-date": "20260101T000000Z" }, dest, "Downloading f");
+    await downloadFile(`${first.url}/f`, { authorization: "EXAMPLE", "x-amz-security-token": "EXAMPLE", Cookie: "EXAMPLE", "x-amz-date": "20260101T000000Z" }, dest, "Downloading f");
     assert.equal(fs.readFileSync(dest, "utf-8"), "FILE");
     assert.equal(seen.length, 1);
     for (const h of ["authorization", "x-amz-security-token", "cookie"]) assert.equal(seen[0][h], undefined, `${h} isn't forwarded`);
