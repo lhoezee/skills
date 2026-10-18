@@ -8,7 +8,8 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import {
-  branchHasTicket, branchPrefix, checkFreshness, classifyWorktree, createBranches, resolvePlacement, stagesOf, worktreeName,
+  branchHasTicket, branchPrefix, checkFreshness, classifyWorktree, createBranches, findTicketWorktree, normalizeTicket,
+  resolvePlacement, stagesOf, worktreeName,
 } from "../implement.mjs";
 import { createWorktree } from "../worktree.mjs";
 
@@ -80,6 +81,21 @@ test("worktree names and branch prefixes follow the worktree skill's rules", () 
   assert.ok(!branchHasTicket("feature/ENG-2", "ENG-1"));
 });
 
+test("normalizeTicket: a pasted tracker URL becomes its id; a plain id is kept; a URL with no id is null", () => {
+  assert.equal(normalizeTicket(" ENG-9 "), "ENG-9");
+  assert.equal(normalizeTicket("acme/api#7"), "acme/api#7");
+  assert.equal(normalizeTicket("https://linear.app/acme/issue/ENG-9/add-thing"), "ENG-9");
+  assert.equal(normalizeTicket("https://linear.app/team-2/issue/ENG-9/add-thing"), "ENG-9"); // not the workspace slug
+  assert.equal(normalizeTicket("https://acme.atlassian.net/browse/KEY-12"), "KEY-12");
+  assert.equal(normalizeTicket("https://acme.atlassian.net/jira/software/projects/KEY/boards/3?selectedIssue=KEY-1"), "KEY-1");
+  assert.equal(normalizeTicket("https://github.com/acme/api/issues/42"), "acme/api#42");
+  assert.equal(normalizeTicket("https://github.com/acme/api/pull/43#discussion"), "acme/api#43");
+  assert.equal(normalizeTicket("https://github.com/acme/api"), null);
+  assert.equal(normalizeTicket("https://example.com/nothing/here"), null);
+  assert.equal(normalizeTicket("https://"), null);
+  assert.equal(normalizeTicket("   "), null);
+});
+
 test("stages: a repo comes one stage after the latest repo it consumes; independent repos share a stage", () => {
   const r = (name, dependencies = []) => ({ name, dependencies });
   assert.deepEqual(stagesOf([r("web", ["api"]), r("admin", ["api"]), r("api", ["core"]), r("core"), r("docs")]), [["core", "docs"], ["api"], ["web", "admin"]]);
@@ -137,6 +153,53 @@ test("worktree-exists (complete), in-worktree and in-other-worktree; branch prec
   assert.equal(other.worktree.name, "ENG-1");
   assert.equal(other.worktree.ticketId, "ENG-1");
   assert.equal(other.branch, "feature/ENG-2"); // never the other ticket's branch
+});
+
+test("worktree lookup: found by .worktree.json ticketId (legacy linearId too) whatever the folder is called, else by name case-insensitively", () => {
+  const ws = wsWithWorktrees();
+  const wts = path.join(ws.root, "worktrees");
+  write(path.join(wts, "payments-redo", ".worktree.json"), { ticketId: "ENG-9", branch: "feature/ENG-9", repos: ["api"] });
+  const r = resolvePlacement({ ticket: "eng-9", root: ws.root });
+  assert.equal(r.placement, "worktree-exists");
+  assert.equal(r.worktree.name, "payments-redo");
+  assert.equal(r.worktree.matchedBy, "metadata");
+  assert.equal(r.baseDir, slash(path.join(wts, "payments-redo")));
+  assert.equal(r.branch, "feature/ENG-9");
+  assert.deepEqual(r.worktree.duplicates, []);
+
+  write(path.join(wts, "old-one", ".worktree.json"), { linearId: "ENG-8", repos: ["api"] });
+  assert.equal(findTicketWorktree(wts, "ENG-8").matchedBy, "metadata");
+
+  fs.mkdirSync(path.join(wts, "eng-7")); // created lower-case, looked up upper-case
+  const byName = findTicketWorktree(wts, "ENG-7");
+  assert.equal(path.basename(byName.path), "eng-7");
+  assert.equal(byName.matchedBy, "name");
+
+  write(path.join(wts, "ENG-6", ".worktree.json"), { ticketId: "ENG-5", repos: [] }); // the name is another ticket's metadata
+  assert.equal(path.basename(findTicketWorktree(wts, "ENG-5").path), "ENG-6");
+  assert.equal(findTicketWorktree(wts, "ENG-6"), null);
+
+  fs.mkdirSync(path.join(wts, "ENG-9"));
+  const dup = resolvePlacement({ ticket: "ENG-9", root: ws.root });
+  assert.equal(dup.worktree.name, "payments-redo"); // the metadata match wins
+  assert.deepEqual(dup.worktree.duplicates, [slash(path.join(wts, "ENG-9"))]);
+  assert.equal(findTicketWorktree(path.join(ws.root, "nope"), "ENG-9"), null);
+});
+
+test("--ticket as a pasted URL resolves to its id; a URL with no id exits 2", () => {
+  const ws = wsWithWorktrees();
+  const r = resolvePlacement({ ticket: "https://linear.app/acme/issue/ENG-9/add-thing", root: ws.root });
+  assert.equal(r.ticket, "ENG-9");
+  assert.equal(r.branch, "feature/ENG-9");
+  assert.equal(resolvePlacement({ ticket: "https://github.com/acme/api/issues/42", root: ws.root }).branch, "feature/acme-api-42");
+  assert.throws(() => resolvePlacement({ ticket: "https://example.com/x", root: ws.root }), (e) => e.usage && /Can't find a ticket id/.test(e.message));
+  let status = 0;
+  try { execFileSync(process.execPath, [SCRIPT, "--ticket", "https://example.com/x", "--resolve", "--root", ws.root], { stdio: "pipe" }); } catch (e) { status = e.status; }
+  assert.equal(status, 2);
+  status = 0;
+  try { execFileSync(process.execPath, [SCRIPT, "--branches", "--branch", "feature/x", "--repos", "api", "--ticket", "https://example.com/x", "--root", ws.root], { stdio: "pipe" }); } catch (e) { status = e.status; }
+  assert.equal(status, 2);
+  assert.equal(branchOf(ws.repo("api")), "main");
 });
 
 test("incomplete worktrees: a failed clone with no metadata, or a listed repo missing", () => {
@@ -235,6 +298,12 @@ test("freshness: fetch failures and missing repos; --repos and --layer filters",
   const s = await checkFreshness({ root: ws.root, layer: "backend" });
   assert.deepEqual(s.repos.map((x) => [x.name, x.state]), [["api", "fetch-failed"], ["gone", "missing"]]);
   assert.ok(s.needsDecision.includes("api"));
+  assert.doesNotMatch(s.repos[0].detail, /as of the last fetch/); // there are no counts on a failed fetch
+  assert.equal(s.repos[0].behind, null);
+  git(ws.repo("web"), "remote", "remove", "origin");
+  const local = await checkFreshness({ root: ws.root, repos: ["web"] });
+  assert.equal(local.repos[0].state, "no-origin");
+  assert.deepEqual(local.needsDecision, []); // a local-only repo isn't a decision
   const one = await checkFreshness({ root: ws.root, repos: ["web"] });
   assert.deepEqual(one.repos.map((x) => x.name), ["web"]);
   await assert.rejects(checkFreshness({ root: ws.root, repos: ["nope"] }), /Unknown repo\(s\): nope.*Valid: api, web, gone/);
@@ -304,6 +373,30 @@ test("branches: refused in the main workspace when the ticket's worktree exists;
   assert.equal(r.repos[0].state, "created");
   assert.equal(branchOf(path.join(wt, "api")), "feature/ENG-1");
   assert.equal(branchOf(ws.repo("api")), "main");
+});
+
+test("branches: refused from the main workspace when the ticket's worktree has another folder name", () => {
+  const ws = wsWithWorktrees();
+  createWorktree({ root: ws.root, name: "payments-redo", repos: "api", ticket: "ENG-9", install: false });
+  assert.throws(
+    () => createBranches({ root: ws.root, branch: "feature/ENG-9", repos: ["api"], ticket: "eng-9" }),
+    (e) => e.refused && e.reason === "in the main workspace" && /worktrees\/payments-redo/.test(slash(e.message)),
+  );
+  assert.equal(branchOf(ws.repo("api")), "main");
+});
+
+test("branches: refused in another ticket's worktree (exit 1, refused JSON)", () => {
+  const ws = wsWithWorktrees();
+  createWorktree({ root: ws.root, name: "ENG-2", repos: "api", ticket: "ENG-2", install: false });
+  const wt = path.join(ws.root, "worktrees", "ENG-2");
+  assert.throws(() => createBranches({ root: wt, branch: "feature/ENG-1", repos: ["api"], ticket: "ENG-1" }), (e) => e.refused && e.reason === "in another ticket's worktree");
+  let status = 0;
+  let stdout = "";
+  try { execFileSync(process.execPath, [SCRIPT, "--branches", "--branch", "feature/ENG-1", "--repos", "api", "--root", wt, "--json"], { stdio: "pipe", encoding: "utf-8" }); } catch (e) { status = e.status; stdout = e.stdout; }
+  assert.equal(status, 1);
+  assert.deepEqual([JSON.parse(stdout).refused, JSON.parse(stdout).reason], [true, "in another ticket's worktree"]);
+  assert.equal(branchOf(path.join(wt, "api")), "main");
+  assert.equal(createBranches({ root: wt, branch: "feature/ENG-2", repos: ["api"], ticket: "eng-2" }).repos[0].state, "created"); // its own ticket, any case
 });
 
 test("branches: bad arguments", () => {

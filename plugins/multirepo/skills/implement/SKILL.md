@@ -23,9 +23,10 @@ node "$I" --freshness [--pull] [--root <dir>] [--repos a,b] [--layer <layer>] [-
 node "$I" --branches --branch <b> --repos a,b [--ticket <ID>] [--root <dir>] [--json]
 ```
 
-- `--resolve` makes no changes. It prints `placement`, `baseDir` (where the work lives), `worktree` (`name`, `path`, `state`: absent / complete / incomplete, `missingRepos`, `problems`), `branch` + `branchSource`, `ports` (the worktree's slot, if the workspace allocates them), `stages` (repo names grouped by `repos.json` `dependencies`: each stage after the ones it consumes) and per repo `branch`, `onDefault`, `onBranch`, `dirty`, `ahead`/`behind` vs `origin/<default>`.
-- `--freshness` fetches every repo and returns per repo `state`: `up-to-date`, `fast-forwarded`, `behind`, `dirty`, `other-branch`, `diverged`, `ahead`, `fetch-failed`, `missing`, plus `needsDecision[]`. `--pull` fast-forwards **only** repos on their default branch, clean and strictly behind.
-- `--branches` creates or switches to the branch in each repo under `--root`. It refuses in the main workspace when the ticket's worktree exists, skips (with a reason) a repo on an unrelated branch, on another branch for this ticket, or with uncommitted changes, and never stashes. New branches start from `origin/<default>`.
+- `--ticket` takes the id or a pasted tracker URL: a Linear or Jira URL resolves to its `KEY-123`, a GitHub issue or PR URL to `owner/repo#N`; a URL with no id exits 2. `ticket` in the output is the resolved id.
+- `--resolve` makes no changes. It prints `placement`, `baseDir` (where the work lives), `worktree` (`name`, `path`, `state`: absent / complete / incomplete, `missingRepos`, `problems`, `matchedBy`: `metadata` when a folder's `.worktree.json` names the ticket (whatever the folder is called), `name` when only the folder name matches, and `duplicates[]`: other folders for the same ticket, so ask which one to use), `branch` + `branchSource`, `ports` (the worktree's slot, if the workspace allocates them), `stages` (repo names grouped by `repos.json` `dependencies`: each stage after the ones it consumes) and per repo `branch`, `onDefault`, `onBranch`, `dirty`, `ahead`/`behind` vs `origin/<default>`.
+- `--freshness` fetches every repo and returns per repo `state`: `up-to-date`, `fast-forwarded`, `behind`, `dirty`, `other-branch`, `diverged`, `ahead`, `fetch-failed`, `no-origin` (a local-only repo: nothing to fetch, not a decision), `missing`, plus `needsDecision[]`. `--pull` fast-forwards **only** repos on their default branch, clean and strictly behind.
+- `--branches` creates or switches to the branch in each repo under `--root`. It refuses (exit 1, `{ refused, reason, error }`) in the main workspace when the ticket's worktree exists, and inside another ticket's worktree; it skips (with a reason) a repo on an unrelated branch, on another branch for this ticket, or with uncommitted changes, and never stashes. New branches start from `origin/<default>`.
 
 ## Steps at a glance
 
@@ -202,7 +203,7 @@ Each runs only when available; none blocks the run.
 | Ticket not found / no tracker | Report and stop |
 | `in-other-worktree` | Stop and ask which worktree |
 | Incomplete worktree | Repair / Recreate / Abort (step 0); autonomous stops |
-| `--branches` refused | You passed the main workspace: use `--root <worktree>` |
+| `--branches` refused | `reason` says which: the main workspace (use `--root <worktree>`), or another ticket's worktree (stop and ask: that checkout belongs to a different ticket) |
 | Repo skipped by `--branches` | Report it with the reason; never switch it yourself |
 | Subagent errors or a bad plan | One correction via `SendMessage`; then stop and escalate |
 | Generation blocked | Stop dependent work, report, fix the cause, resume |

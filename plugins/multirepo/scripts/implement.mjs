@@ -11,7 +11,10 @@
  *                     worktree-missing   worktrees are in use here; this ticket has none yet
  *                     flat               no worktrees here (cloud session, bare checkout): work in place
  *                     here               --here: the current checkout, no worktree lookup
- *         worktree    { name, path, state: absent|complete|incomplete, hasMetadata, missingRepos[], problems[] }
+ *         ticket      --ticket normalized: a pasted tracker URL becomes its id
+ *         worktree    { name, path, state: absent|complete|incomplete, hasMetadata, missingRepos[], problems[],
+ *                       matchedBy: metadata|name|null, duplicates[] (other folders for this ticket: ask) }
+ *                     found by .worktree.json ticketId first, else by folder name, case-insensitively
  *         branch      --branch > the worktree's .worktree.json branch > <prefix>/<name>
  *                     (prefix from --type: bug → fix/, chore → chore/, else feature/)
  *         stages      [[names]] from repos.json dependencies: a repo after the ones it consumes;
@@ -20,7 +23,7 @@
  *
  *   --freshness [--pull] [--root <dir>] [--repos a,b] [--layer x] [--json]
  *       Fetch every repo (in parallel), then per repo { name, state, detail }:
- *         up-to-date | fast-forwarded | behind | dirty | other-branch | diverged | ahead | fetch-failed | missing
+ *         up-to-date | fast-forwarded | behind | dirty | other-branch | diverged | ahead | fetch-failed | no-origin | missing
  *       --pull fast-forwards ONLY a repo on its default branch, clean and strictly behind.
  *       Nothing else is ever moved (no checkout, stash, rebase or merge commit).
  *       needsDecision lists the repos a person should decide about.
@@ -28,7 +31,7 @@
  *   --branches --branch <b> --repos a,b [--ticket <ID>] [--root <dir>] [--json]
  *       Create or switch to <b> in each repo under --root (default: the current
  *       folder's workspace or worktree). Refuses in a main workspace when the
- *       ticket's worktree exists. Skips (with a reason) a repo on an unrelated
+ *       ticket's worktree exists, and in another ticket's worktree. Skips (with a reason) a repo on an unrelated
  *       branch, on another branch for this ticket, or with uncommitted changes.
  *       Never stashes. New branches start from origin/<default>, with no upstream.
  *
@@ -56,6 +59,62 @@ export function worktreeName(ticket) {
   if (NAME_RE.test(id) && !/^\.+$/.test(id)) return id;
   const derived = id.replace(/[^A-Za-z0-9_.-]/g, "-").replace(/-+/g, "-").replace(/^-+|-+$/g, "");
   return derived && !/^\.+$/.test(derived) ? derived : null;
+}
+
+/**
+ * A --ticket value as an id. A pasted tracker URL becomes its id: a GitHub
+ * issue/pull URL → "<owner>/<repo>#<n>"; any other URL → the ticket key in it
+ * (Jira ?selectedIssue= first, then the segment after /issue/ or /browse/, then
+ * any segment). Not a URL → trimmed as given. A URL with no id → null.
+ */
+export function normalizeTicket(ticket, config = {}) {
+  const raw = String(ticket ?? "").trim();
+  if (!raw) return null;
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(raw)) return raw;
+  let url;
+  try { url = new URL(raw); } catch { return null; }
+  const segs = url.pathname.split("/").filter(Boolean).map((s) => { try { return decodeURIComponent(s); } catch { return s; } });
+  if (/^(www\.)?github\.com$/i.test(url.hostname)) {
+    const [owner, repo, kind, num] = segs;
+    return owner && repo && /^(issues|pull)$/.test(kind ?? "") && /^\d+$/.test(num ?? "") ? `${owner}/${repo}#${num}` : null;
+  }
+  const after = (key) => { const i = segs.findIndex((s) => s.toLowerCase() === key); return i >= 0 ? segs[i + 1] : null; };
+  const candidates = [url.searchParams.get("selectedIssue"), after("issue"), after("browse"), ...segs].filter(Boolean);
+  return findTicket(candidates, config);
+}
+
+function ticketOrThrow(ticket, config) {
+  const id = normalizeTicket(ticket, config);
+  if (!id) throw Object.assign(new Error(`Can't find a ticket id in '${String(ticket).trim()}': pass the id (e.g. ENG-123 or owner/repo#12)`), { usage: true });
+  return id;
+}
+
+/**
+ * The ticket's worktree under worktreesDir, whatever its folder is called:
+ * a subfolder whose .worktree.json ticketId (legacy linearId too) equals the
+ * ticket case-insensitively wins; else one whose name equals worktreeName(ticket)
+ * case-insensitively (unless its metadata names another ticket). Returns
+ * { path, matchedBy: "metadata"|"name", duplicates: [paths] } or null.
+ */
+export function findTicketWorktree(worktreesDir, ticket) {
+  const id = String(ticket ?? "").toLowerCase();
+  const name = worktreeName(ticket)?.toLowerCase();
+  let entries = [];
+  try { entries = fs.readdirSync(worktreesDir, { withFileTypes: true }).filter((e) => e.isDirectory()); } catch { return null; }
+  const byMeta = [];
+  const byName = [];
+  for (const e of entries) {
+    const dir = path.join(worktreesDir, e.name);
+    const meta = normalizeMeta(readWorktreeMeta(dir));
+    const metaId = meta?.ticketId ? String(meta.ticketId).toLowerCase() : null;
+    const nameHit = !!name && e.name.toLowerCase() === name;
+    if (id && metaId === id) byMeta.push({ dir, nameHit });
+    else if (nameHit && !metaId) byName.push({ dir, nameHit });
+  }
+  byMeta.sort((a, b) => Number(b.nameHit) - Number(a.nameHit));
+  const all = [...byMeta, ...byName];
+  if (!all.length) return null;
+  return { path: all[0].dir, matchedBy: byMeta.length ? "metadata" : "name", duplicates: all.slice(1).map((x) => slash(x.dir)) };
 }
 
 /** Branch prefix for an issue type or label: bug/fix/defect → fix/, chore/maintenance → chore/, else feature/. */
@@ -164,10 +223,7 @@ export function worktreePorts(settings, wtPath, name) {
  * Makes no changes.
  */
 export function resolvePlacement(opts = {}) {
-  const ticket = typeof opts.ticket === "string" && opts.ticket.trim() ? opts.ticket.trim() : null;
-  if (!ticket) throw new Error("--ticket is required");
-  const name = worktreeName(ticket);
-  if (!name) throw new Error(`Can't derive a folder name from '${ticket}'`);
+  if (typeof opts.ticket !== "string" || !opts.ticket.trim()) throw new Error("--ticket is required");
   const start = path.resolve(opts.root || process.cwd());
   const here = findRoot(start);
   const hereMeta = normalizeMeta(readWorktreeMeta(here));
@@ -175,6 +231,9 @@ export function resolvePlacement(opts = {}) {
   const mainRoot = hereMeta && src && fs.existsSync(src) ? path.resolve(src) : here;
   const config = readWorkspaceConfig(mainRoot);
   const settings = worktreeSettings(mainRoot, config);
+  const ticket = ticketOrThrow(opts.ticket, config);
+  const name = worktreeName(ticket);
+  if (!name) throw new Error(`Can't derive a folder name from '${ticket}'`);
 
   const isThisTicket = (meta, dir) =>
     (meta?.ticketId && meta.ticketId.toLowerCase() === ticket.toLowerCase()) || path.basename(dir).toLowerCase() === name.toLowerCase();
@@ -182,6 +241,7 @@ export function resolvePlacement(opts = {}) {
   let placement;
   let wtPath = path.join(settings.dir, name);
   let meta = null;
+  let found = null;
   if (opts.here) {
     placement = "here";
     if (hereMeta) { wtPath = here; meta = hereMeta; }
@@ -189,16 +249,18 @@ export function resolvePlacement(opts = {}) {
     if (isThisTicket(hereMeta, here)) { placement = "in-worktree"; wtPath = here; meta = hereMeta; }
     else { placement = "in-other-worktree"; wtPath = here; meta = hereMeta; }
   } else {
-    const cls = classifyWorktree(wtPath);
-    if (cls.state !== "absent") { placement = "worktree-exists"; meta = normalizeMeta(readWorktreeMeta(wtPath)); }
+    found = findTicketWorktree(settings.dir, ticket);
+    if (found) { placement = "worktree-exists"; wtPath = found.path; meta = normalizeMeta(readWorktreeMeta(wtPath)); }
     else if (fs.existsSync(settings.dir) || (config.worktrees && typeof config.worktrees === "object")) placement = "worktree-missing";
     else placement = "flat";
   }
 
   const worktree = {
-    name: placement === "in-other-worktree" ? path.basename(here) : name,
+    name: placement === "worktree-missing" || placement === "flat" ? name : path.basename(wtPath),
     ticketId: meta?.ticketId ?? null,
     ...classifyWorktree(wtPath),
+    matchedBy: found?.matchedBy ?? null,
+    duplicates: found?.duplicates ?? [],
   };
   if (placement === "here" && !hereMeta) Object.assign(worktree, { name: null, path: null, state: "absent" });
 
@@ -267,7 +329,7 @@ export function pickRepos(root, names = [], layer = null) {
   return picked;
 }
 
-const STATE_MAP = { "would-ff": "behind", "ff-failed": "behind", "no-origin": "fetch-failed", "no-upstream": "fetch-failed" };
+const STATE_MAP = { "would-ff": "behind", "ff-failed": "behind", "no-upstream": "fetch-failed" };
 
 /**
  * Fetch, then classify (and with pull, fast-forward the safe ones). The rule is
@@ -285,7 +347,6 @@ export async function checkFreshness({ root = process.cwd(), pull = false, repos
     const state = STATE_MAP[s.state] || s.state;
     let detail = s.detail;
     if (s.state === "would-ff") detail = `${s.behind} behind origin/${s.defaultBranch}: safe to fast-forward (--pull)`;
-    if (s.state === "fetch-failed") detail = `${detail} (counts are as of the last fetch)`;
     if (state === "other-branch" && s.behind > 0) detail = `${detail}; ${s.behind} behind origin/${s.defaultBranch}`;
     return {
       name: r.name, relativePath: r.relativePath, path: slash(r.path), state, detail,
@@ -317,17 +378,16 @@ export function createBranches({ root = process.cwd(), branch, repos = [], ticke
   if (!repos.length) throw Object.assign(new Error("--repos is required (comma-separated names or relativePaths)"), { usage: true });
   const base = findRoot(root);
   const config = readWorkspaceConfig(base);
-  const id = ticket || findTicket([branch], config);
+  const id = ticket ? ticketOrThrow(ticket, config) : findTicket([branch], config);
   const meta = normalizeMeta(readWorktreeMeta(base));
+  const refuse = (reason, message) => { throw Object.assign(new Error(message), { refused: true, reason }); };
 
   if (!meta && id) {
-    const name = worktreeName(id);
-    const wtPath = name ? path.join(worktreeSettings(base, config).dir, name) : null;
-    if (wtPath && fs.existsSync(wtPath)) {
-      const err = new Error(`${id}'s worktree exists at ${slash(wtPath)}, but --root is the main workspace (${slash(base)}). Re-run with --root "${slash(wtPath)}".`);
-      err.refused = true;
-      throw err;
-    }
+    const found = findTicketWorktree(worktreeSettings(base, config).dir, id);
+    if (found) refuse("in the main workspace", `${id}'s worktree exists at ${slash(found.path)}, but --root is the main workspace (${slash(base)}). Re-run with --root "${slash(found.path)}".`);
+  }
+  if (meta?.ticketId && id && String(meta.ticketId).toLowerCase() !== id.toLowerCase()) {
+    refuse("in another ticket's worktree", `--root (${slash(base)}) is ${meta.ticketId}'s worktree, not ${id}'s. Use ${id}'s own worktree (or create one).`);
   }
 
   const results = [];
@@ -426,7 +486,7 @@ async function main(argv) {
       if (r.repos.some((x) => x.state === "failed")) process.exitCode = 1;
     } catch (e) {
       if (!e.refused) throw e;
-      if (json) print(JSON.stringify({ refused: true, error: e.message }, null, 2));
+      if (json) print(JSON.stringify({ refused: true, reason: e.reason ?? null, error: e.message }, null, 2));
       process.stderr.write(`Refused: ${e.message}\n`);
       process.exitCode = 1;
     }
