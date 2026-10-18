@@ -13,15 +13,11 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
-import { args, engineDirOf, isMain, normalizeRepo, readJson, safeEngineDir } from "./lib.mjs";
+import { args, engineDirOf, gitOut, gitTopOf, isMain, normalizeRepo, readJson, safeEngineDir } from "./lib.mjs";
 
 const read = (f) => { try { return fs.readFileSync(f, "utf-8"); } catch { return null; } };
-/** In a git work tree: the root itself (.git dir or worktree file), or a folder inside a repo. */
-const insideGit = (root) => {
-  if (fs.existsSync(path.join(root, ".git"))) return true;
-  try { return execFileSync("git", ["rev-parse", "--is-inside-work-tree"], { cwd: root, encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"], timeout: 10000 }).trim() === "true"; } catch { return false; }
-};
+/** Does the git repo around `root` ignore this workspace-relative path? (check-ignore exits 0 when it does.) */
+const gitIgnores = (root, rel) => gitOut(root, ["check-ignore", "-q", rel]) !== null;
 
 /** Keys of an object literal `NAME = { key: ..., "key-2": ... }` in a TS file (catalog ids, adapters). */
 function literalKeys(file, name) {
@@ -344,12 +340,14 @@ export function validate(root) {
 
   // ---- repos.json (workspace root; optional)
   const reposFile = path.join(root, "repos.json");
+  const clones = []; // repos.json repos cloned here, for the .gitignore check below
   if (fs.existsSync(reposFile)) {
     const manifest = readJson(reposFile);
     if (!manifest || !Array.isArray(manifest.repos)) err("repos.json", "needs a \"repos\" array");
     else {
       ok.push("repos.json");
       const paths = new Map(), names = new Set();
+      clones.push(...manifest.repos.map(normalizeRepo).filter((r) => r && r.relativePath !== "." && fs.existsSync(path.join(root, r.relativePath, ".git"))));
       manifest.repos.forEach((raw, i) => {
         const r = normalizeRepo(raw);
         const which = raw && raw.name ? `"${raw.name}"` : `entry ${i + 1}`;
@@ -381,8 +379,18 @@ export function validate(root) {
   }
 
   // ---- the workspace itself: shared through git, unless it was installed from a snapshot (no git by design)
-  if (fs.existsSync(cfgDir) && !fs.existsSync(path.join(root, ".snapshot.json")) && !insideGit(root)) {
-    warn("workspace", "the workspace folder isn't a git repo, so its dashboard, config, skills and CLAUDE.md can't be shared with the team. Run git init here and commit them (the product repos stay their own clones, gitignored and listed in repos.json)");
+  // (A repo at the home folder, i.e. dotfiles, doesn't count: gitTopOf skips it.)
+  if (fs.existsSync(cfgDir) && !fs.existsSync(path.join(root, ".snapshot.json"))) {
+    const top = gitTopOf(root);
+    if (!top) warn("workspace", "the workspace folder isn't a git repo, so its dashboard, config, skills and CLAUDE.md can't be shared with the team. Run git init here and commit them (the product repos stay their own clones, gitignored and listed in repos.json)");
+    else if (gitIgnores(root, ".claude/dashboard/")) warn("workspace", `the git repo at ${top} ignores .claude/dashboard/, so the dashboard config isn't shared with the team. Make the workspace its own git repo (git init here), or stop ignoring it there`);
+    else {
+      // Clones inside the workspace repo must be ignored, or git add records them as embedded repos.
+      const wt = (ws && ws.worktrees && ws.worktrees.dir) || "worktrees";
+      const nested = [...clones.map((r) => r.relativePath), ...(fs.existsSync(path.join(root, wt)) ? [wt] : [])];
+      const unignored = nested.filter((p) => !gitIgnores(root, `${p}/`));
+      if (unignored.length) warn("workspace", `${unignored.map((p) => `${p}/`).join(", ")} ${unignored.length === 1 ? "isn't" : "aren't"} gitignored: the folders hold their own clones, so git add in the workspace repo would record them as embedded repos. Add ${unignored.map((p) => `/${p}/`).join(" ")} to .gitignore`);
+    }
   }
 
   return { root, ok, errors, warnings };

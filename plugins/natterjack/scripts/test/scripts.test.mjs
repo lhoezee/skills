@@ -503,23 +503,27 @@ test("workspaceShape: is this folder a good home for a workspace?", () => {
   const repo = (...p) => { const d = dir(...p); gitInit(d); fs.writeFileSync(path.join(d, "package.json"), "{}"); return d; };
   const shape = (d) => workspaceShape(d, listRepos(d));
 
-  // Nothing yet: a fresh folder, or a fresh repo (the agent-os to fill).
+  // Nothing yet: a fresh folder, or a fresh repo (the agent-os to fill), even one called "workspace".
   assert.equal(shape(dir("fresh")).verdict, "empty");
+  assert.equal(shape(dir("workspace")).verdict, "empty");
+  assert.equal(shape(dir("repos")).verdict, "empty", "a general-purpose name alone isn't a catch-all");
   const freshRepo = dir("fresh-repo"); gitInit(freshRepo);
-  assert.deepEqual([shape(freshRepo).verdict, shape(freshRepo).rootIsRepo], ["empty", true]);
+  for (const f of ["README.md", "CLAUDE.md", ".gitignore"]) fs.writeFileSync(path.join(freshRepo, f), "x");
+  assert.deepEqual([shape(freshRepo).verdict, shape(freshRepo).rootIsRepo], ["empty", true], "workspace files don't make it a product repo");
   // ...unless repos.json declares the repos, still to clone.
   fs.writeFileSync(path.join(freshRepo, "repos.json"), JSON.stringify({ repos: [{ name: "api", remote: "https://github.com/acme/api.git" }] }));
   assert.equal(shape(freshRepo).verdict, "ok");
 
-  // One repo on its own: ask; the new workspace goes beside it.
+  // One repo on its own, whatever its stack: ask; the new workspace goes beside it.
   const solo = repo("alone", "web");
   const s = shape(solo);
-  assert.equal(s.verdict, "single-repo");
-  assert.equal(s.suggestedPath, path.join(tmp, "alone", "agent-os"));
-  // A plain folder holding just that one repo: also single-repo, and the folder itself can become the workspace.
+  assert.deepEqual([s.verdict, s.suggested, s.suggestedPath], ["single-repo", "new", path.join(tmp, "alone", "agent-os")]);
+  const dotnet = dir("dotnet-app"); gitInit(dotnet);
+  fs.writeFileSync(path.join(dotnet, "App.sln"), "");
+  assert.equal(shape(dotnet).verdict, "single-repo", "a repo is a product repo by its files, not a short list of manifests");
+  // A plain folder holding just that one repo: the folder itself can become the workspace.
   const holder = shape(path.join(tmp, "alone"));
-  assert.equal(holder.verdict, "single-repo");
-  assert.equal(holder.suggestedPath, undefined);
+  assert.deepEqual([holder.verdict, holder.suggested, holder.suggestedPath], ["single-repo", "here", path.join(tmp, "alone")]);
 
   // The product's repos side by side, root not a repo yet.
   const product = dir("product");
@@ -527,17 +531,17 @@ test("workspaceShape: is this folder a good home for a workspace?", () => {
   repo("product", "web");
   const p = shape(product);
   assert.deepEqual([p.verdict, p.productRepos, p.rootIsRepo], ["root-not-git", 2, false]);
-  // Run inside one of them: single-repo, pointing at the product folder above.
+  // Run inside one of them: single-repo, pointing at the product folder above (not a repo yet).
   const inApi = shape(api);
-  assert.equal(inApi.verdict, "single-repo");
-  assert.equal(inApi.suggestedPath, product);
+  assert.deepEqual([inApi.verdict, inApi.suggested, inApi.suggestedPath, inApi.suggestedIsRepo], ["single-repo", "parent", product, false]);
   // A subfolder of a repo.
   const sub = shape(dir("product", "api", "src"));
   assert.equal(sub.verdict, "inside-repo");
   assert.equal(sub.suggestedPath, path.join(product, "agent-os"));
-  // Once the root is a repo: ok.
+  // Once the root is a repo: ok, and from inside a repo the parent is suggested as a repo already.
   gitInit(product);
   assert.equal(shape(product).verdict, "ok");
+  assert.deepEqual([shape(api).suggested, shape(api).suggestedIsRepo], ["parent", true]);
   // Reached through a symlink (git reports the real path, as for macOS's /var or Windows 8.3 names): still the repo itself.
   const link = path.join(tmp, "product-link");
   fs.symlinkSync(product, link, process.platform === "win32" ? "junction" : "dir");
@@ -545,7 +549,7 @@ test("workspaceShape: is this folder a good home for a workspace?", () => {
   // ...and suggestions keep the user's spelling of the path, not git's real one.
   assert.equal(shape(path.join(link, "api", "src")).suggestedPath, path.join(link, "agent-os"));
 
-  // A general folder of unrelated projects: a generic name, folders holding their own sets of repos.
+  // A general folder of unrelated projects: folders holding their own sets of repos, a general-purpose name.
   const dev = dir("Development");
   repo("Development", "Acme", "api");
   repo("Development", "Acme", "web");
@@ -555,6 +559,11 @@ test("workspaceShape: is this folder a good home for a workspace?", () => {
   assert.equal(c.suggestedPath, path.join(dev, "agent-os"));
   assert.ok(c.reasons.some((r) => /general-purpose name/.test(r)));
   assert.ok(c.reasons.some((r) => /Acme/.test(r)));
+  // Nested layouts repos.json declares, and the worktrees folder, aren't separate projects.
+  const nested = dir("nested");
+  for (const p2 of ["services/api", "services/web", "apps/mobile", "worktrees/ENG-1/api"]) repo("nested", ...p2.split("/"));
+  fs.writeFileSync(path.join(nested, "repos.json"), JSON.stringify({ repos: ["services/api", "services/web", "apps/mobile"].map((r) => ({ name: r.split("/")[1], relativePath: r })) }));
+  assert.equal(shape(nested).verdict, "root-not-git");
   // A product folder with an ordinary name and one weak signal (two owners) stays root-not-git.
   const mixed = dir("mixed");
   for (const [n, owner] of [["api", "acme"], ["fork", "someone"]]) {
@@ -564,16 +573,51 @@ test("workspaceShape: is this folder a good home for a workspace?", () => {
   assert.equal(shape(mixed).verdict, "root-not-git");
 });
 
-test("validate warns when the workspace isn't a git repo, except for snapshot installs", () => {
+test("workspaceShape and validate ignore a git repo at the home folder (dotfiles)", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "aos-home-"));
+  execFileSync("git", ["init", "-q", home]);
+  const ws = path.join(home, "acme");
+  for (const r of ["api", "web"]) { fs.mkdirSync(path.join(ws, r), { recursive: true }); execFileSync("git", ["init", "-q", path.join(ws, r)]); }
+  const saved = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+  process.env.HOME = process.env.USERPROFILE = home;
+  try {
+    const w = workspaceShape(ws, listRepos(ws));
+    assert.deepEqual([w.verdict, w.rootIsRepo], ["root-not-git", false], "not inside-repo: ~/.git doesn't hold workspaces");
+    scaffold(ws, { workspace: { name: "Home test" } });
+    assert.ok(validate(ws).warnings.some((x) => /^workspace: the workspace folder isn't a git repo/.test(x)));
+  } finally {
+    for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k]; else process.env[k] = v;
+  }
+});
+
+test("validate warns when the workspace isn't shared through git, except for snapshot installs", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "aos-git-"));
   scaffold(root, { workspace: { name: "Git test" } });
-  const gitWarning = () => validate(root).warnings.some((w) => /^workspace: the workspace folder isn't a git repo/.test(w));
-  assert.equal(gitWarning(), true);
+  const warning = (re) => validate(root).warnings.some((w) => re.test(w));
+  const notRepo = /^workspace: the workspace folder isn't a git repo/;
+  assert.equal(warning(notRepo), true);
   fs.writeFileSync(path.join(root, ".snapshot.json"), "{}");
-  assert.equal(gitWarning(), false, "installed from a snapshot: no git by design");
+  assert.equal(warning(notRepo), false, "installed from a snapshot: no git by design");
   fs.rmSync(path.join(root, ".snapshot.json"));
   execFileSync("git", ["init", "-q", root]);
-  assert.equal(gitWarning(), false);
+  assert.equal(warning(notRepo), false);
+
+  // A repo cloned later (not in scaffold's .gitignore lines) is flagged until it's ignored.
+  fs.mkdirSync(path.join(root, "mobile"));
+  execFileSync("git", ["init", "-q", path.join(root, "mobile")]);
+  fs.writeFileSync(path.join(root, "repos.json"), JSON.stringify({ repos: [{ name: "mobile", relativePath: "mobile", remote: "https://github.com/acme/mobile.git" }] }));
+  assert.equal(warning(/^workspace: mobile\/ isn't gitignored/), true);
+  fs.appendFileSync(path.join(root, ".gitignore"), "\n/mobile/\n");
+  assert.equal(warning(/gitignored/), false);
+
+  // Inside a bigger repo that ignores the config: not shared either.
+  const outer = fs.mkdtempSync(path.join(os.tmpdir(), "aos-outer-"));
+  execFileSync("git", ["init", "-q", outer]);
+  fs.writeFileSync(path.join(outer, ".gitignore"), "ignored/\n");
+  const inner = path.join(outer, "ignored", "ws");
+  fs.mkdirSync(inner, { recursive: true });
+  scaffold(inner, { workspace: { name: "Inner" } });
+  assert.ok(validate(inner).warnings.some((w) => /^workspace: the git repo at .* ignores \.claude\/dashboard\//.test(w)));
 });
 
 test("scaffold gitignores the product repos' clones and the worktrees folder", () => {

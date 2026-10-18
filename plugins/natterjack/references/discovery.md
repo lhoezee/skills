@@ -9,11 +9,11 @@
   | verdict | means | evidence |
   |---|---|---|
   | `ok` | the root is a git repo holding (or declaring in repos.json) the product's repos | |
-  | `empty` | no repos yet (a fresh `agent-os`): ask for them | no child repos, no code at the root, no repos.json |
-  | `single-repo` | one repo and nothing else: ask whether the product has others | the root is the code, or holds one repo; `suggestedPath` is the folder above when that already holds its siblings, else a new `agent-os` beside it |
+  | `empty` | no repos yet (a fresh `agent-os`): ask for them | no child repos, no repos.json, and nothing at the root but workspace files (README, CLAUDE.md, .gitignore, `.claude/`…) |
+  | `single-repo` | one repo and nothing else: ask whether the product has others | the root is a product repo (any tracked file beyond workspace files) or a code folder, or holds just one repo. `suggested`: `here` for a folder holding one repo, `parent` when the folder above already holds this repo and its siblings (`suggestedIsRepo`), else `new` (`agent-os` beside it) |
   | `root-not-git` | the right repos side by side, but the root isn't a repo, so nothing it holds can be shared | two or more repos, no `.git` at the root |
-  | `catch-all` | a general folder of unrelated projects: pick this product's repos, set up a new folder (`suggestedPath`) | strong: a general-purpose name (`Development`, `code`, `projects`…), the home folder, subfolders holding their own sets of repos; weak (two needed): repos from 2+ owners, 10+ repos |
-  | `inside-repo` | the folder is inside another git repo | `git rev-parse --show-toplevel` is a parent |
+  | `catch-all` | a general folder of unrelated projects: pick this product's repos, set up a new folder (`suggestedPath`) | never an empty folder. Strong: the home folder, subfolders holding their own sets of repos (not ones repos.json declares repos in, nor the worktrees folder). Weak, two needed: a general-purpose name (`Development`, `code`, `projects`…), sitting directly in the home folder, repos from 2+ owners, 10+ repos |
+  | `inside-repo` | the folder is inside another git repo | `git rev-parse --show-toplevel` is a parent (a repo at the home folder, i.e. dotfiles, doesn't count) |
 
   `reasons` explains the verdict in plain words; `rootIsRepo`, `rootRemote` and `productRepos` are the facts behind it. It's a guess like everything else here: the user can say a `single-repo` is a monorepo, or that a `catch-all` folder really is one product.
 - **`repos[]`**: each cloned repo with `stacks[]` (language, frameworks, `kind`: backend / frontend / fullstack / site / library, `run.cmd`, `port`, `install`, pins), `ci`, `deploy`, `readmeUrls`. A repo with only `library` stacks isn't an app. A `site` (plain HTML) is usually a **docs source**, not an app, unless people preview it locally a lot (then both).
