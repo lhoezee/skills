@@ -106,7 +106,15 @@ function hostOf(url) {
 // ------------------------------------------------------------------ workspace shape
 
 const GENERIC_NAMES = /^(dev|devel|development|code|coding|src|source|sources|projects?|repos?|repositories|git|github|gitlab|work|workspace|workspaces|sandbox|playground)$/i;
-const sameDir = (a, b) => !!a && !!b && path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase();
+// git reports real paths: macOS's /var is /private/var, Windows expands 8.3 names (RUNNER~1). Compare
+// real paths, case-insensitively where the filesystem usually is.
+const realDir = (p) => { try { return fs.realpathSync.native(path.resolve(p)); } catch { return path.resolve(p); } };
+const foldCase = process.platform === "win32" || process.platform === "darwin";
+const sameDir = (a, b) => {
+  if (!a || !b) return false;
+  const [x, y] = [realDir(a), realDir(b)];
+  return foldCase ? x.toLowerCase() === y.toLowerCase() : x === y;
+};
 
 /**
  * Is this folder a good home for a workspace? A workspace is its own git repo (the

@@ -538,6 +538,10 @@ test("workspaceShape: is this folder a good home for a workspace?", () => {
   // Once the root is a repo: ok.
   gitInit(product);
   assert.equal(shape(product).verdict, "ok");
+  // Reached through a symlink (git reports the real path, as for macOS's /var or Windows 8.3 names): still the repo itself.
+  const link = path.join(tmp, "product-link");
+  fs.symlinkSync(product, link, process.platform === "win32" ? "junction" : "dir");
+  assert.deepEqual([shape(link).verdict, shape(link).rootIsRepo], ["ok", true]);
 
   // A general folder of unrelated projects: a generic name, folders holding their own sets of repos.
   const dev = dir("Development");
