@@ -49,7 +49,7 @@ import { LiveHub } from "./live.ts";
 import { Trackers } from "./issues/index.ts";
 import { Meetings } from "./meetings/index.ts";
 import { readLinks, saveLink, deleteLink, readRepoReadme } from "./links.ts";
-import { Machine, openTerminal, resolvedSpecs, terminalArg } from "./machine.ts";
+import { Machine, nativeArgSafe, openTerminal, resolvedSpecs, terminalArg } from "./machine.ts";
 import { cloneStep, cloneTargets, readRepos, reposStatus } from "./repos.ts";
 import { buildSnapshot, carryOver, downloadStep, downloadTargets, dropManifestCache, fetchManifest, planSnapshot, publishSnapshot, snapshotStatus, writeManifest } from "./snapshot.ts";
 import type { PublishPlan } from "./snapshot.ts";
@@ -393,6 +393,7 @@ const runs = new RunManager(LEDGER_DIR, {
   attachments,
   // Runs start and stop apps through this dashboard (bin/dashboard.mjs apps), so they outlive the turn.
   appsCli: () => (HOSTED || !appsConfig().configured ? null : APPS_CLI),
+  workspaceRoot: MAIN_WORKSPACE_PATH,
 });
 const deck = new Deck(MAIN_WORKSPACE_PATH, path.join(LEDGER_DIR, "settings.json"));
 
@@ -1483,7 +1484,7 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
     if (body.mode === "terminal") {
       let prompt: string;
       try { prompt = deck.implementPrompt(ticket); } catch (e) { return sendError(res, 400, e.message); }
-      const command = `claude ${terminalArg(prompt)}`;
+      const command = `claude ${terminalArg(nativeArgSafe(prompt))}`;
       const r = await openTerminal(command, MAIN_WORKSPACE_PATH, `Claude · Implement ${ticket}`, "Session ended. You can close this window.");
       return sendJson(res, { opened: r.opened, command });
     }
