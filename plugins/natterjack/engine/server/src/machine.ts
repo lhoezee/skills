@@ -132,6 +132,8 @@ async function refreshPath() {
 function psQuote(s) { return `'${String(s).replace(/'/g, "''")}'`; }
 function shQuote(s) { return `'${String(s).replace(/'/g, `'\\''`)}'`; }
 function asQuote(s) { return `"${String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`; }
+/** One literal argument for a command openTerminal runs: PowerShell on Windows, sh elsewhere. */
+export function terminalArg(s: string, win = IS_WIN) { return win ? psQuote(s) : shQuote(s); }
 
 /**
  * Open a visible terminal running `cmd` in `cwd`. Returns { opened, command }.
