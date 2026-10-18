@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 /**
- * Scan a workspace and print what it's made of, as JSON: repos, stacks, version
+ * Scan a workspace and print what it's made of, as JSON: whether the folder is a good
+ * home for a workspace (`workspace.verdict`), repos, stacks, version
  * pins, how each app runs and on which port, databases and other services from
  * docker-compose, CI and deploy targets, the code host, hints about the issue
  * tracker and docs, design-system candidates, and draft config suggestions.
@@ -15,6 +16,7 @@
 
 import fs from "node:fs";
 import net from "node:net";
+import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -99,6 +101,96 @@ function hostOf(url) {
   const kind = h.includes("github") ? "github" : h.includes("gitlab") ? "gitlab" : h.includes("bitbucket") ? "bitbucket"
     : h.includes("dev.azure.com") || h.includes("visualstudio.com") ? "azure-devops" : "other";
   return { kind, host: h, owner: m[2], repo: m[3], slug: `${m[2]}/${m[3]}` };
+}
+
+// ------------------------------------------------------------------ workspace shape
+
+const GENERIC_NAMES = /^(dev|devel|development|code|coding|src|source|sources|projects?|repos?|repositories|git|github|gitlab|work|workspace|workspaces|sandbox|playground)$/i;
+const sameDir = (a, b) => !!a && !!b && path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase();
+
+/**
+ * Is this folder a good home for a workspace? A workspace is its own git repo (the
+ * dashboard, config, skills and CLAUDE.md are shared through it) with the product's
+ * repos cloned inside it (gitignored, listed in repos.json). Verdicts, for the create
+ * skill's first step:
+ *   ok            the root is a git repo holding (or declaring) the product's repos
+ *   empty         the root is a fresh folder or repo with no repos yet: ask which to add
+ *   single-repo   one repo and nothing else: ask whether the product has other repos
+ *   root-not-git  the product's repos side by side, but the root isn't a git repo yet
+ *   catch-all     looks like a general folder of unrelated projects: pick the product's repos, use a new folder
+ *   inside-repo   the root is a subfolder of another git repo
+ * `reasons` says why, for the skill to show the user.
+ */
+export function workspaceShape(root, repos) {
+  root = path.resolve(root);
+  const top = git(root, ["rev-parse", "--show-toplevel"]);
+  const rootIsRepo = sameDir(top, root);
+  const rootCode = repos.some((r) => r.dir === ".");
+  const children = repos.filter((r) => r.dir !== ".");
+  const declared = readRepos(root).length > 0;
+  const productRepos = children.length + (rootCode ? 1 : 0);
+  const out = { verdict: "ok", rootIsRepo, rootRemote: rootIsRepo ? git(root, ["remote", "get-url", "origin"]) || null : null, productRepos, reasons: [] };
+  const parent = path.dirname(root);
+  // Where a new workspace folder could go: beside a repo, or inside a general folder.
+  const newFolder = (base, name = "agent-os") => {
+    let p = path.join(base, name);
+    for (let i = 2; exists(p); i++) p = path.join(base, `${name}-${i}`);
+    return p;
+  };
+
+  if (top && !rootIsRepo) {
+    out.verdict = "inside-repo";
+    out.reasons.push(`${root} is inside the git repo at ${path.resolve(top)}`);
+    out.suggestedPath = newFolder(path.dirname(path.resolve(top)));
+    return out;
+  }
+
+  if (!rootIsRepo) {
+    // A general-purpose folder (~/Development, ~/code...) full of unrelated projects.
+    const strong = [], weak = [];
+    if (GENERIC_NAMES.test(path.basename(root))) strong.push(`the folder is called "${path.basename(root)}", a general-purpose name`);
+    if (sameDir(root, os.homedir()) || (sameDir(parent, os.homedir()) && GENERIC_NAMES.test(path.basename(root)))) strong.push("it's your home folder or a general folder directly in it");
+    let groups = [];
+    try {
+      groups = fs.readdirSync(root, { withFileTypes: true })
+        .filter((e) => e.isDirectory() && !SKIP_DIRS.has(e.name) && !e.name.startsWith(".") && !exists(path.join(root, e.name, ".git")) && !isEngineFolder(path.join(root, e.name)))
+        .filter((e) => { try { return fs.readdirSync(path.join(root, e.name), { withFileTypes: true }).some((c) => c.isDirectory() && exists(path.join(root, e.name, c.name, ".git"))); } catch { return false; } })
+        .map((e) => e.name);
+    } catch {}
+    if (groups.length) strong.push(`it has folders that hold their own sets of repos (${groups.slice(0, 5).join(", ")}${groups.length > 5 ? "…" : ""}), like separate projects`);
+    const owners = [...new Set(children.map((r) => r.host && r.host.owner).filter(Boolean))];
+    if (owners.length >= 2) weak.push(`its repos belong to ${owners.length} different owners (${owners.slice(0, 5).join(", ")})`);
+    if (children.length >= 10) weak.push(`it holds ${children.length} repos`);
+    if (strong.length || weak.length >= 2) {
+      out.verdict = "catch-all";
+      out.reasons.push(...strong, ...weak);
+      out.suggestedPath = newFolder(root);
+      return out;
+    }
+  }
+
+  if (productRepos === 0 && !declared) {
+    out.verdict = "empty";
+    out.reasons.push(rootIsRepo ? "the root is a git repo with no product repos in it yet" : "the folder has no repos in it yet");
+  } else if (productRepos <= 1 && !declared) {
+    out.verdict = "single-repo";
+    out.reasons.push(rootCode
+      ? `the root is ${rootIsRepo ? "itself the product repo" : "a code folder"}, with no other repos in it`
+      : `the folder holds a single repo (${children[0].dir}) and nothing else`);
+    // Inside a repo: the workspace goes beside it. A plain folder holding one repo can become the workspace itself.
+    if (rootCode) {
+      // The folder above may already be the product's folder (this repo plus its siblings): suggest it.
+      const up = parent !== root ? workspaceShape(parent, listRepos(parent)) : null;
+      if (up && (up.verdict === "ok" || up.verdict === "root-not-git")) {
+        out.suggestedPath = parent;
+        out.reasons.push(`the folder above (${parent}) holds ${up.productRepos} repos including this one, and could be the workspace${up.rootIsRepo ? "" : " once it's a git repo"}`);
+      } else out.suggestedPath = newFolder(parent);
+    }
+  } else if (!rootIsRepo) {
+    out.verdict = "root-not-git";
+    out.reasons.push(`the root holds ${productRepos} repos but isn't a git repo itself, so the dashboard config, skills and CLAUDE.md have nowhere to be shared from`);
+  }
+  return out;
 }
 
 // ------------------------------------------------------------------ stacks
@@ -667,6 +759,7 @@ export async function discover(root) {
   return {
     root,
     name: path.basename(root),
+    workspace: workspaceShape(root, repos),
     existing: {
       dashboard: !!installedEngine,
       engineDir: installedEngine,

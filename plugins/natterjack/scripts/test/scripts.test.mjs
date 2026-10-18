@@ -7,8 +7,8 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { brandCandidates, contrast, isHashedBuild, mapToContract, parseColor, themeCss, tokensOnly, withoutVendorVars } from "../extract-brand.mjs";
 import { ENGINE_DIR, compareVersions, engineVersion, fetchEngine, latestRelease, normalizeRepo, pluginVersion, readRepos, releaseCheck } from "../lib.mjs";
-import { listRepos } from "../discover.mjs";
-import { scaffold } from "../scaffold.mjs";
+import { listRepos, workspaceShape } from "../discover.mjs";
+import { gitignoreLines, scaffold } from "../scaffold.mjs";
 import { bootFiles, imageChanges, upgrade } from "../upgrade.mjs";
 import { validate } from "../validate.mjs";
 
@@ -494,4 +494,89 @@ test("the plugin installs in Claude Code, Copilot CLI and Codex CLI from the sam
     const text = fs.readFileSync(path.join(repo, "plugins/natterjack/skills", d, "SKILL.md"), "utf-8");
     if (text.includes("${CLAUDE_PLUGIN_ROOT}")) assert.match(text, /\*\*Plugin folder\.\*\*/, `${d}/SKILL.md uses \${CLAUDE_PLUGIN_ROOT} without the Plugin folder note`);
   }
+});
+
+test("workspaceShape: is this folder a good home for a workspace?", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "aos-shape-"));
+  const dir = (...p) => { const d = path.join(tmp, ...p); fs.mkdirSync(d, { recursive: true }); return d; };
+  const gitInit = (d) => execFileSync("git", ["init", "-q", d]);
+  const repo = (...p) => { const d = dir(...p); gitInit(d); fs.writeFileSync(path.join(d, "package.json"), "{}"); return d; };
+  const shape = (d) => workspaceShape(d, listRepos(d));
+
+  // Nothing yet: a fresh folder, or a fresh repo (the agent-os to fill).
+  assert.equal(shape(dir("fresh")).verdict, "empty");
+  const freshRepo = dir("fresh-repo"); gitInit(freshRepo);
+  assert.deepEqual([shape(freshRepo).verdict, shape(freshRepo).rootIsRepo], ["empty", true]);
+  // ...unless repos.json declares the repos, still to clone.
+  fs.writeFileSync(path.join(freshRepo, "repos.json"), JSON.stringify({ repos: [{ name: "api", remote: "https://github.com/acme/api.git" }] }));
+  assert.equal(shape(freshRepo).verdict, "ok");
+
+  // One repo on its own: ask; the new workspace goes beside it.
+  const solo = repo("alone", "web");
+  const s = shape(solo);
+  assert.equal(s.verdict, "single-repo");
+  assert.equal(s.suggestedPath, path.join(tmp, "alone", "agent-os"));
+  // A plain folder holding just that one repo: also single-repo, and the folder itself can become the workspace.
+  const holder = shape(path.join(tmp, "alone"));
+  assert.equal(holder.verdict, "single-repo");
+  assert.equal(holder.suggestedPath, undefined);
+
+  // The product's repos side by side, root not a repo yet.
+  const product = dir("product");
+  const api = repo("product", "api");
+  repo("product", "web");
+  const p = shape(product);
+  assert.deepEqual([p.verdict, p.productRepos, p.rootIsRepo], ["root-not-git", 2, false]);
+  // Run inside one of them: single-repo, pointing at the product folder above.
+  const inApi = shape(api);
+  assert.equal(inApi.verdict, "single-repo");
+  assert.equal(inApi.suggestedPath, product);
+  // A subfolder of a repo.
+  const sub = shape(dir("product", "api", "src"));
+  assert.equal(sub.verdict, "inside-repo");
+  assert.equal(sub.suggestedPath, path.join(product, "agent-os"));
+  // Once the root is a repo: ok.
+  gitInit(product);
+  assert.equal(shape(product).verdict, "ok");
+
+  // A general folder of unrelated projects: a generic name, folders holding their own sets of repos.
+  const dev = dir("Development");
+  repo("Development", "Acme", "api");
+  repo("Development", "Acme", "web");
+  repo("Development", "side-project");
+  const c = shape(dev);
+  assert.equal(c.verdict, "catch-all");
+  assert.equal(c.suggestedPath, path.join(dev, "agent-os"));
+  assert.ok(c.reasons.some((r) => /general-purpose name/.test(r)));
+  assert.ok(c.reasons.some((r) => /Acme/.test(r)));
+  // A product folder with an ordinary name and one weak signal (two owners) stays root-not-git.
+  const mixed = dir("mixed");
+  for (const [n, owner] of [["api", "acme"], ["fork", "someone"]]) {
+    const d = repo("mixed", n);
+    execFileSync("git", ["-C", d, "remote", "add", "origin", `https://github.com/${owner}/${n}.git`]);
+  }
+  assert.equal(shape(mixed).verdict, "root-not-git");
+});
+
+test("validate warns when the workspace isn't a git repo, except for snapshot installs", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "aos-git-"));
+  scaffold(root, { workspace: { name: "Git test" } });
+  const gitWarning = () => validate(root).warnings.some((w) => /^workspace: the workspace folder isn't a git repo/.test(w));
+  assert.equal(gitWarning(), true);
+  fs.writeFileSync(path.join(root, ".snapshot.json"), "{}");
+  assert.equal(gitWarning(), false, "installed from a snapshot: no git by design");
+  fs.rmSync(path.join(root, ".snapshot.json"));
+  execFileSync("git", ["init", "-q", root]);
+  assert.equal(gitWarning(), false);
+});
+
+test("scaffold gitignores the product repos' clones and the worktrees folder", () => {
+  const { deny } = gitignoreLines("natterjack", [{ relativePath: "api" }, { relativePath: "services/web" }, { relativePath: "." }, { relativePath: "api" }]);
+  assert.deepEqual(deny.filter((l) => !l.includes("natterjack") && !l.includes("ledger")), ["/api/", "/services/web/", "/worktrees/"]);
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "aos-gi-"));
+  scaffold(root, { workspace: { name: "GI", worktrees: { dir: "trees" } }, repos: [{ name: "api", relativePath: "api", remote: "https://github.com/acme/api.git" }] });
+  const gi = fs.readFileSync(path.join(root, ".gitignore"), "utf-8");
+  assert.match(gi, /^\/api\/$/m);
+  assert.match(gi, /^\/trees\/$/m, "worktrees.dir is followed");
+  assert.doesNotMatch(gi, /^\/worktrees\/$/m);
 });

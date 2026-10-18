@@ -2,7 +2,8 @@
 /**
  * Check a workspace's dashboard config: each .claude/dashboard/*.json (and repos.json) against what
  * the engine understands, and against the workspace itself (folders exist, ports
- * don't clash, machine checks name real catalog entries, brand files are there).
+ * don't clash, machine checks name real catalog entries, brand files are there), and
+ * that the workspace is a git repo its team can share.
  *
  *   node validate.mjs <workspace> [--json]
  *
@@ -12,9 +13,15 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import { args, engineDirOf, isMain, normalizeRepo, readJson, safeEngineDir } from "./lib.mjs";
 
 const read = (f) => { try { return fs.readFileSync(f, "utf-8"); } catch { return null; } };
+/** In a git work tree: the root itself (.git dir or worktree file), or a folder inside a repo. */
+const insideGit = (root) => {
+  if (fs.existsSync(path.join(root, ".git"))) return true;
+  try { return execFileSync("git", ["rev-parse", "--is-inside-work-tree"], { cwd: root, encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"], timeout: 10000 }).trim() === "true"; } catch { return false; }
+};
 
 /** Keys of an object literal `NAME = { key: ..., "key-2": ... }` in a TS file (catalog ids, adapters). */
 function literalKeys(file, name) {
@@ -371,6 +378,11 @@ export function validate(root) {
         }
       }
     }
+  }
+
+  // ---- the workspace itself: shared through git, unless it was installed from a snapshot (no git by design)
+  if (fs.existsSync(cfgDir) && !fs.existsSync(path.join(root, ".snapshot.json")) && !insideGit(root)) {
+    warn("workspace", "the workspace folder isn't a git repo, so its dashboard, config, skills and CLAUDE.md can't be shared with the team. Run git init here and commit them (the product repos stay their own clones, gitignored and listed in repos.json)");
   }
 
   return { root, ok, errors, warnings };
