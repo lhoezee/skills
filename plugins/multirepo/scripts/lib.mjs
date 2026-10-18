@@ -213,7 +213,12 @@ export function defaultBranch(repoPath, configured = null) {
   return "main";
 }
 
-/** The ticket pattern (unanchored, case-insensitive) from workspace.json, else a typical KEY-123. */
+const isGithub = (config) => config?.issues?.kind === "github";
+
+/**
+ * The ticket pattern (unanchored, case-insensitive) from workspace.json, else the tracker's usual
+ * shape: GitHub Issues `repo#12` / `owner/repo#12` when `issues.kind` is "github", else KEY-123.
+ */
 export function ticketRegex(config = {}) {
   const pattern = config?.issues?.ticketPattern;
   if (typeof pattern === "string" && pattern) {
@@ -223,15 +228,65 @@ export function ticketRegex(config = {}) {
       /* fall through */
     }
   }
+  if (isGithub(config)) return /([\w.-]+(?:\/[\w.-]+)?#\d+)/;
   return /([A-Z][A-Z0-9]+-\d+)/i;
 }
 
-/** The first ticket id in any of the strings (branch names, folder names), upper-cased; or null. */
+/** A ticket id in its canonical case: KEY-123 keys upper-cased; GitHub `owner/repo#12` ids as written (repo names keep their case). */
+export function ticketCase(id) {
+  const s = String(id ?? "").trim();
+  return s.includes("#") ? s : s.toUpperCase();
+}
+
+/**
+ * A GitHub id from the folder-safe form worktree folders and branches use (`#` and `/` become
+ * "-": `api-12`, `acme-api-12`), for the repos workspace.json `issues.repos` / `issues.repo` lists
+ * (`owner/name`). Returned in the form the team writes ids: `name#12`, or `owner/name#12` when the
+ * name carries the owner. Unknown repos give null: a guess would name the wrong issue.
+ */
+function githubIdFromSafeName(s, config) {
+  const repos = [].concat(config?.issues?.repos ?? config?.issues?.repo ?? []).filter((r) => typeof r === "string" && r.includes("/"));
+  if (!repos.length) return null;
+  for (const seg of String(s ?? "").split("/").reverse()) {
+    const m = /^(.+)-(\d+)$/.exec(seg);
+    if (!m) continue;
+    const name = m[1].toLowerCase();
+    for (const r of repos) {
+      const [owner, repo] = r.split("/");
+      if (name === `${owner}-${repo}`.toLowerCase()) return `${owner}/${repo}#${m[2]}`;
+      if (name === repo.toLowerCase()) return `${repo}#${m[2]}`;
+    }
+  }
+  return null;
+}
+
+const BRANCH_PREFIXES = /^(feature|feat|fix|bugfix|hotfix|chore|release|docs|refactor|test|ci|perf|build|style)$/i;
+
+/**
+ * In a branch name, `feature/api#12` reads like `owner/repo#12`. Keep an `owner/` part only when
+ * it's real: a configured `owner/name` repo, or (with none configured) not a usual branch prefix.
+ */
+function githubOwnerPart(id, config) {
+  const m = /^([\w.-]+)\/([\w.-]+#\d+)$/.exec(id);
+  if (!m) return id;
+  const repos = [].concat(config?.issues?.repos ?? config?.issues?.repo ?? []).filter((r) => typeof r === "string" && r.includes("/"));
+  const repoName = m[2].split("#")[0];
+  const configured = repos.some((r) => r.toLowerCase() === `${m[1]}/${repoName}`.toLowerCase());
+  return configured || (!repos.length && !BRANCH_PREFIXES.test(m[1])) ? id : m[2];
+}
+
+/** The first ticket id in any of the strings (branch names, folder names), in its canonical case (ticketCase); or null. */
 export function findTicket(strings, config = {}) {
   const re = ticketRegex(config);
   for (const s of strings) {
     const m = String(s ?? "").match(re);
-    if (m) return m[1].toUpperCase();
+    if (m) return ticketCase(m[1].includes("#") ? githubOwnerPart(m[1], config) : m[1]);
+  }
+  if (isGithub(config)) {
+    for (const s of strings) {
+      const id = githubIdFromSafeName(s, config);
+      if (id) return id;
+    }
   }
   return null;
 }

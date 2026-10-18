@@ -29,6 +29,7 @@ import {
   defaultBranch,
   findRoot,
   findTicket,
+  ticketCase,
   git,
   gitRun,
   isMain,
@@ -153,10 +154,10 @@ export function inspectRepo(repo, { config = {}, otherRepoPaths = [] } = {}) {
 
 /** The ticket being committed for: explicit, the worktree's, else the single one the changed branches share. */
 export function resolveTicket(root, repos, explicit = null, config = {}) {
-  if (explicit) return String(explicit).toUpperCase();
+  if (explicit) return ticketCase(explicit);
   const meta = readWorktreeMeta(root);
   const fromMeta = meta && (meta.ticketId || findTicket([meta.branch, meta.name, path.basename(root)], config));
-  if (fromMeta) return String(fromMeta).toUpperCase();
+  if (fromMeta) return ticketCase(fromMeta);
   const tickets = [...new Set(repos.filter((r) => r.hasChanges && r.ticket && !r.onDefault).map((r) => r.ticket))];
   return tickets.length === 1 ? tickets[0] : null;
 }

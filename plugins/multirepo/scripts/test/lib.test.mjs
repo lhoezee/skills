@@ -41,6 +41,23 @@ test("ticket ids: workspace pattern, else KEY-123, case-insensitive, upper-cased
   assert.ok(ticketRegex(cfg).test("fix/acme#7"));
 });
 
+test("ticket ids for GitHub Issues: a default pattern, ids keep their case, folder-safe names map back", () => {
+  const gh = { issues: { kind: "github", repos: ["acme/api", "acme/Web.App"] } };
+  // No ticketPattern: the GitHub shape, not KEY-123 (which would read "api-12" as "API-12").
+  assert.equal(findTicket(["fix/acme/api#7"], gh), "acme/api#7");
+  assert.equal(findTicket(["feature/Web.App#3"], gh), "Web.App#3");
+  // worktreeName and branches turn "#" and "/" into "-": map back, for the configured repos only.
+  assert.equal(findTicket(["feature/api-12"], gh), "api#12");
+  assert.equal(findTicket(["worktrees/acme-api-12"], gh), "acme/api#12");
+  assert.equal(findTicket(["feature/web.app-4"], gh), "Web.App#4");
+  assert.equal(findTicket(["feature/other-9"], gh), null, "an unknown repo isn't guessed");
+  assert.equal(findTicket(["feature/api-12"], { issues: { kind: "github" } }), null, "no repos listed: no guess");
+  // An explicit pattern still wins, and Jira-style keys are still upper-cased.
+  assert.equal(findTicket(["feature/api#12"], { issues: { kind: "github", ticketPattern: "^[\\w.-]+#\\d+$" } }), "api#12");
+  assert.equal(findTicket(["feature/api-12"], { issues: { kind: "github", repos: ["acme/api"], ticketPattern: "^[\\w.-]+#\\d+$" } }), "api#12");
+  assert.equal(findTicket(["feature/eng-12"], { issues: { kind: "jira" } }), "ENG-12");
+});
+
 test("listRepos: repos.json, .worktree.json (with source workspace info), single repo, subfolders", () => {
   const ws = tmp("mr-lib-ws-");
   makeRepo(path.join(ws, "api"), "develop");

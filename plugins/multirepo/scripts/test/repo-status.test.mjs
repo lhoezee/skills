@@ -152,7 +152,7 @@ test("in a worktree, the ticket pattern comes from the source workspace's worksp
   fs.writeFileSync(path.join(wt, "api", "a.txt"), "dirty\n");
   fs.writeFileSync(path.join(wt, ".worktree.json"), JSON.stringify({ name: "w", repos: ["api"], sourceWorkspace: ws }));
   const s = collectStatus({ root: wt });
-  assert.equal(s.repos[0].ticket, "ACME#7");
-  assert.equal(s.ticket, "ACME#7");
+  assert.equal(s.repos[0].ticket, "acme#7", "GitHub-style ids keep their case");
+  assert.equal(s.ticket, "acme#7");
   assert.equal(s.repos[0].eligible, true);
 });
