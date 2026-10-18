@@ -147,9 +147,13 @@ export function workspaceShape(root, repos) {
   };
 
   if (top && !rootIsRepo) {
+    // The repo's top in the user's own spelling of the path (git's is the real path).
+    let repoTop = root;
+    while (!sameDir(repoTop, top) && path.dirname(repoTop) !== repoTop) repoTop = path.dirname(repoTop);
+    if (!sameDir(repoTop, top)) repoTop = path.resolve(top);
     out.verdict = "inside-repo";
-    out.reasons.push(`${root} is inside the git repo at ${path.resolve(top)}`);
-    out.suggestedPath = newFolder(path.dirname(path.resolve(top)));
+    out.reasons.push(`${root} is inside the git repo at ${repoTop}`);
+    out.suggestedPath = newFolder(path.dirname(repoTop));
     return out;
   }
 

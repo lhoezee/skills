@@ -542,6 +542,8 @@ test("workspaceShape: is this folder a good home for a workspace?", () => {
   const link = path.join(tmp, "product-link");
   fs.symlinkSync(product, link, process.platform === "win32" ? "junction" : "dir");
   assert.deepEqual([shape(link).verdict, shape(link).rootIsRepo], ["ok", true]);
+  // ...and suggestions keep the user's spelling of the path, not git's real one.
+  assert.equal(shape(path.join(link, "api", "src")).suggestedPath, path.join(link, "agent-os"));
 
   // A general folder of unrelated projects: a generic name, folders holding their own sets of repos.
   const dev = dir("Development");
