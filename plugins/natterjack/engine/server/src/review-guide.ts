@@ -298,9 +298,9 @@ export function readGuideComment(body: string): { sha: string; data: string } | 
 }
 
 /**
- * The guides posted for `sha`, newest first, each checked like a written one (unknown hunks
- * dropped, every hunk tagged); `at` is when the comment was last edited. Whether its poster is
- * trusted is the caller's to check.
+ * The guides posted for `sha`, most recently edited first, each checked like a written one
+ * (unknown hunks dropped, every hunk tagged); `at` is when the comment was last edited. Whether
+ * its poster is trusted is the caller's to check.
  */
 export function postedGuides(comments: { body: string; url: string; by: string; updatedAt: string }[], sha: string, ids: Set<string>): Omit<ReviewGuide, "ticket">[] {
   const out: Omit<ReviewGuide, "ticket">[] = [];
@@ -309,7 +309,8 @@ export function postedGuides(comments: { body: string; url: string; by: string; 
     if (!g || !sha.toLowerCase().startsWith(g.sha.toLowerCase())) continue;
     try { out.push({ ...parseGuide(g.data, ids), sha, at: String(c.updatedAt || ""), posted: { by: c.by, url: c.url } }); } catch {}
   }
-  return out;
+  // An older comment edited later is the fresher guide (the sort keeps comment order for ties).
+  return out.sort((a, b) => (Date.parse(b.at) || 0) - (Date.parse(a.at) || 0));
 }
 
 // ------------------------------------------------------------------ saved per commit

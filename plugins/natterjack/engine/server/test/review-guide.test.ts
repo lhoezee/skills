@@ -206,8 +206,9 @@ test("posted guides for a commit are read newest first, and checked", () => {
   // Another commit's, or data that won't read: none.
   assert.deepEqual(postedGuides([c(guideBody("0000000", g))], "abc1234ffff", ids), []);
   assert.deepEqual(postedGuides([c("<!-- natterjack:review-guide sha=abc1234 -->\n<!-- natterjack:review-guide-data bm90IGpzb24= -->")], "abc1234ffff", ids), []);
-  // Newest first.
+  // Newest first; an older comment edited since is the newest.
   assert.deepEqual(postedGuides([c(guideBody("abc1234", g), "old"), c(guideBody("abc1234", { ...g, intent: "Newer." }), "new")], "abc1234ffff", ids).map((x) => x.posted!.by), ["new", "old"]);
+  assert.deepEqual(postedGuides([c(guideBody("abc1234", g), "edited", "2026-10-27T12:00:00Z"), c(guideBody("abc1234", g), "later", "2026-10-27T11:00:00Z")], "abc1234ffff", ids).map((x) => x.posted!.by), ["edited", "later"]);
 });
 
 test("Reviews shows a guide posted by someone with write access, the newer of it and one written here", async () => {
@@ -239,7 +240,9 @@ test("Reviews shows a guide posted by someone with write access, the newer of it
   assert.equal((await r.guide("acme/api", 1)).intent, "Posted.");
   assert.equal(asked, 0);
   assert.equal(state.comments, 1, "kept for a minute");
-  // Written again here: it's newer, so it shows.
+  // Written again here, even within the same second as the comment's edit (GitHub's times are to the second): it shows.
+  state.updatedAt = new Date().toISOString().replace(/\.\d+Z$/, "Z");
+  r.postedCache.clear();
   assert.equal((await r.guide("acme/api", 1, true)).intent, "Written.");
   assert.equal((await r.savedGuide("acme/api", 1))!.intent, "Written.");
   // The skill updates its comment later: that's newer, and shows once the minute is up.

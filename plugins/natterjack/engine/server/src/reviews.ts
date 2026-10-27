@@ -361,7 +361,8 @@ export class Reviews {
     const local = this.store.get<ReviewGuide>(repo, number, d.headRefOid, "guide");
     const posted = await this.posted(repo, number, d.headRefOid);
     if (!local || !posted) return local || posted;
-    return posted.at >= local.at ? posted : local;
+    // Compared as times: GitHub's are to the second, ours to the millisecond.
+    return (Date.parse(posted.at) || 0) > (Date.parse(local.at) || 0) ? posted : local;
   }
 
   /**

@@ -170,20 +170,24 @@ export function normalizeGuide(raw, ids, textMax = 2000) {
   return { guide: g, dropped: [...dropped] };
 }
 
-/** GitHub's link to a line of a PR's diff (the Files tab anchors a file by its path's sha256). */
-function lineLink(repo, number, file, line) {
+/** GitHub's link to a line of a PR's diff (the Files tab anchors a file by its path's sha256; R new side, L old). */
+function lineLink(repo, number, file, { side, line }) {
   const anchor = crypto.createHash("sha256").update(file).digest("hex");
-  return `https://github.com/${repo}/pull/${number}/files#diff-${anchor}R${line}`;
+  return `https://github.com/${repo}/pull/${number}/files#diff-${anchor}${side}${line}`;
 }
 
-/** Where a hunk starts in the new file: its first added line, else where it starts. */
-function hunkLine(h) {
+/** Where a hunk's change starts: its first added line (new side), else its first removed line (old side). */
+export function hunkLine(h) {
+  let o = h.oldStart;
   let n = h.newStart;
+  let removed = null;
   for (const l of h.lines) {
-    if (l[0] === "+") return n;
-    if (l[0] !== "-") n++;
+    if (l[0] === "+") return { side: "R", line: n };
+    if (l[0] === "-") { removed ??= o; o++; continue; }
+    o++;
+    n++;
   }
-  return h.newStart;
+  return removed != null ? { side: "L", line: removed } : { side: "R", line: h.newStart };
 }
 
 /** The guide as the comment shows it, with each hunk linked to its lines (when the diff is known). */
@@ -193,7 +197,7 @@ export function renderGuide(g, { repo = null, number = null, sha = null, files =
   const ref = (id) => {
     const w = where.get(id);
     if (!w) return `\`${id}\``;
-    const label = `${w.path}:${w.line}`;
+    const label = `${w.path}:${w.line.line}${w.line.side === "L" ? " (removed)" : ""}`;
     return repo && number ? `[\`${label}\`](${lineLink(repo, number, w.path, w.line)})` : `\`${label}\``;
   };
   const point = (p, i) => {
@@ -313,6 +317,13 @@ async function main(argv) {
     const login = gh(["api", "user", "--jq", ".login"]).trim();
     const comments = JSON.parse(gh(["api", `repos/${repo}/issues/${number}/comments?per_page=100`, "--paginate", "--slurp"])).flat();
     const mine = findOwnGuide(comments, login);
+    // A push while the diff and comments were read would make the hunk ids mean other changes.
+    const now = prInfo(repo, number).headRefOid;
+    if (now !== pr.headRefOid) {
+      process.stderr.write(`The PR moved on to ${now.slice(0, 7)} while the guide was being posted: run diff again and write the guide for the new commits.\n`);
+      process.exitCode = 3;
+      return;
+    }
     const res = JSON.parse(mine
       ? gh(["api", `repos/${repo}/issues/comments/${mine.id}`, "--method", "PATCH", "--input", "-"], JSON.stringify({ body }))
       : gh(["api", `repos/${repo}/issues/${number}/comments`, "--method", "POST", "--input", "-"], JSON.stringify({ body })));

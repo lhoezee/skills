@@ -1,7 +1,7 @@
 // review-guide.mjs: numbering a PR's hunks, checking the agent's guide, and the comment it posts.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { MARKER, findOwnGuide, fittingComment, guideComment, normalizeGuide, numberedDiff, parseDiff, readGuideComment, renderGuide } from "../review-guide.mjs";
+import { MARKER, findOwnGuide, fittingComment, guideComment, hunkLine, normalizeGuide, numberedDiff, parseDiff, readGuideComment, renderGuide } from "../review-guide.mjs";
 
 const DIFF = [
   "diff --git a/src/api.ts b/src/api.ts",
@@ -83,6 +83,15 @@ test("the comment links each hunk to its first changed line and round-trips its 
   assert.deepEqual(readGuideComment(body), { sha: "abcdef1234567890", guide });
   assert.equal(readGuideComment("<!-- natterjack:review-guide sha=abc1234 -->\nno data"), null);
   assert.equal(readGuideComment("hello"), null);
+});
+
+test("a hunk links to its first added line, or its first removed line when it only removes", () => {
+  const [api, , gone] = parseDiff(DIFF);
+  assert.deepEqual(hunkLine(api.hunks[0]), { side: "R", line: 2 });
+  assert.deepEqual(hunkLine(api.hunks[1]), { side: "R", line: 11 }, "the removed line comes first, but the added one is linked");
+  assert.deepEqual(hunkLine(gone.hunks[0]), { side: "L", line: 1 });
+  const { guide } = normalizeGuide({ intent: "x", core: [{ title: "Gone", text: "", hunks: ["h4"] }] }, new Set(["h1", "h2", "h3", "h4"]));
+  assert.match(renderGuide(guide, { repo: "acme/api", number: 7, files: parseDiff(DIFF) }), /\[`café\.ts:1 \(removed\)`\]\(https:\/\/github\.com\/acme\/api\/pull\/7\/files#diff-[0-9a-f]{64}L1\)/);
 });
 
 test("a guide that's too long is shortened to fit a comment", () => {
