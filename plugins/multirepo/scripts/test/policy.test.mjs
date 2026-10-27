@@ -6,8 +6,8 @@ import os from "node:os";
 import path from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { decide, stageOn, wip } from "../factory.mjs";
-import { changedFiles, runScanner, securityScan } from "../security-scan.mjs";
+import { decide, normalizePolicy, stageOn, wip } from "../factory.mjs";
+import { changedFiles, runScanner, scanSecrets, securityScan } from "../security-scan.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const tmp = (p) => fs.mkdtempSync(path.join(os.tmpdir(), p));
@@ -41,15 +41,21 @@ test("decide: automatic gates pass on their checks", () => {
   assert.match(decide(p, {}, "spec").reason, /no spec score yet/);
   assert.equal(decide(p, null, "plan").action, "pass");
   const rows = (...r) => ({ stages: r.map(([id, repo, status]) => ({ id, repo, status })) });
-  assert.match(decide(p, rows(), "prePr").reason, /no review is recorded/);
-  assert.match(decide(p, rows(["review", "api", "done"], ["review", "web", "failed"]), "prePr").reason, /didn't pass for web/);
-  assert.match(decide(p, rows(["review", "api", "done"]), "prePr").reason, /security stage hasn't run/);
-  assert.match(decide(p, rows(["review", "api", "done"], ["security", "api", "failed"]), "prePr").reason, /security stage failed for api/);
+  const built = [["build", "api", "done"], ["build", "web", "done"]];
+  assert.match(decide(p, rows(), "prePr").reason, /no repo's build is recorded/);
+  // Every repo that was built needs a passed review: one missing, one failed.
+  assert.match(decide(p, rows(...built, ["review", "api", "done"]), "prePr").reason, /review hasn't passed for web \(not run\)/);
+  assert.match(decide(p, rows(...built, ["review", "api", "done"], ["review", "web", "failed"]), "prePr").reason, /web \(failed\)/);
+  const reviewed = [...built, ["review", "api", "done"], ["review", "web", "done"]];
+  assert.match(decide(p, rows(...reviewed, ["security", "api", "done"]), "prePr").reason, /security stage hasn't passed for web \(not run\)/);
+  assert.match(decide(p, rows(...reviewed, ["security", "api", "done"], ["security", "web", "running"]), "prePr").reason, /web \(running\)/);
   // The latest row per repo counts: failed, then done.
-  assert.equal(decide(p, rows(["review", "api", "failed"], ["review", "api", "done"], ["security", "api", "done"]), "prePr").action, "pass");
+  assert.equal(decide(p, rows(...reviewed, ["security", "api", "failed"], ["security", "api", "done"], ["security", "web", "done"]), "prePr").action, "pass");
+  // Without build rows, the manifest's repos are the ones that need it.
+  assert.match(decide(p, { repos: ["api"], stages: [] }, "prePr").reason, /review hasn't passed for api/);
   const noSec = { ...p, stages: [{ id: "security", on: false }] };
   assert.equal(stageOn(noSec, "security"), false);
-  assert.equal(decide(noSec, rows(["review", "api", "done"]), "prePr").action, "pass");
+  assert.equal(decide(noSec, rows(...reviewed), "prePr").action, "pass");
 });
 
 test("decide: an unattended run below the team's minimum spec score stops whatever the spec gate is", () => {
@@ -124,4 +130,48 @@ test("the security stage runs the scanners that apply per repo, fails at the pol
   assert.match(cli.stdout, /api: FAILED/);
   const m = JSON.parse(fs.readFileSync(path.join(ws, ".claude", "ledger", "factory", "ENG-5.json"), "utf-8"));
   assert.deepEqual(m.stages.map((s) => [s.id, s.repo, s.status]), [["security", "api", "failed"], ["security", "web", "done"]]);
+});
+
+test("the policy is read by the dashboard's rules: clamped WIP, default scanners, unknown modes", () => {
+  const p = normalizePolicy({ enabled: true, limits: { wip: 0 }, gates: { plan: "sometimes" }, security: { failOn: "urgent" } });
+  assert.deepEqual([p.limits.wip, p.gates.plan, p.security.failOn], [1, "human", "high"]);
+  assert.deepEqual(normalizePolicy(null).security.scanners.map((s) => s.when), ["package-lock.json", "requirements.txt", "go.mod"]);
+  assert.equal(normalizePolicy({ limits: { wip: 2.5 } }).limits.wip, 3);
+});
+
+test("a scanner that can't finish fails closed; output mentioning 'not found' is still a finding", () => {
+  const dir = repo(tmp("scan2-"));
+  const timedOut = runScanner({ name: "slow", command: "x", failOn: "high" }, dir, () => ({ error: Object.assign(new Error("t"), { code: "ETIMEDOUT" }), status: null, stdout: "", stderr: "" }));
+  assert.deepEqual([timedOut.status, timedOut.severity], ["error", "high"]);
+  const notFoundText = runScanner({ name: "x", command: `node -e "console.log('package not found: foo'); process.exit(1)"`, failOn: "high" }, dir);
+  assert.equal(notFoundText.status, "found");
+  // A scan that errors fails the repo's stage.
+  const ws = tmp("secws2-");
+  fs.writeFileSync(path.join(ws, "repos.json"), JSON.stringify({ repos: [{ name: "api", relativePath: "api" }] }));
+  repo(path.join(ws, "api"));
+  const r = securityScan({ root: ws, policy: { security: { secretScan: false, scanners: [{ name: "slow", command: "x" }] } },
+    run: () => ({ error: Object.assign(new Error("t"), { code: "ETIMEDOUT" }), status: null, stdout: "", stderr: "" }) });
+  assert.deepEqual(r.failed, ["api"]);
+  assert.match(r.repos[0].note, /slow \(couldn't finish\)/);
+});
+
+test("secret scanning: one gitleaks run over the changed files; older gitleaks is reported, not trusted", () => {
+  const dir = repo(tmp("leaks-"), { "clé config.env": "KEY=x\n", "b.ts": "1" });
+  assert.deepEqual(changedFiles(dir, "main").sort(), ["b.ts", "clé config.env"]);
+  const calls = [];
+  const fake = (version, dirOk, scanStatus) => (cmd, args, opts) => {
+    calls.push(args);
+    if (args[0] === "version") return { status: 0, stdout: version };
+    if (args[1] === "--help") return { status: dirOk ? 0 : 1, stdout: "" };
+    const report = args[args.indexOf("--report-path") + 1];
+    fs.writeFileSync(report, JSON.stringify(scanStatus === 3 ? [{ File: path.join(args[1], "clé config.env") }] : []));
+    return { status: scanStatus, stdout: "", stderr: scanStatus === 1 ? "boom" : "" };
+  };
+  assert.match(scanSecrets(dir, ["b.ts"], fake("8.18.0", false, 0)).detail, /older than 8\.19/);
+  calls.length = 0;
+  const found = scanSecrets(dir, ["b.ts", "clé config.env"], fake("8.21.0", true, 3));
+  assert.deepEqual([found.status, found.detail], ["found", "Possible secrets in clé config.env."]);
+  assert.equal(calls.filter((a) => a[0] === "dir" && a[1] !== "--help").length, 1, "one gitleaks run for all the files");
+  assert.equal(scanSecrets(dir, ["b.ts"], fake("8.21.0", true, 0)).status, "passed");
+  assert.equal(scanSecrets(dir, ["b.ts"], fake("8.21.0", true, 1)).status, "error");
 });

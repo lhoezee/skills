@@ -501,10 +501,10 @@ The team's rules for agent work, from ticket to merged PR (the **Factory** page,
   - `auto`: passes on its checks. The spec gate needs the spec to be Ready; the pre-PR gate needs every repo's review and the security stage to pass.
   - `off`: skipped.
   - `implement` never merges: the merge gate is left to whoever the policy names.
-- **Security stage:** `security-scan.mjs` runs `security.scanners` in each repo they apply to, plus gitleaks over the changed files when it's installed. An agent security review runs alongside, unless `agentReview` is false. Anything at `failOn` or worse fails the stage.
+- **Security stage:** `security-scan.mjs` runs `security.scanners` in each repo they apply to, plus gitleaks (8.19 or later) over the changed files when it's installed. A scanner that times out or can't run fails the stage; one that isn't installed is skipped. An agent security review runs alongside, unless `agentReview` is false. Anything at `failOn` or worse fails the stage.
 - **Limits:**
   - **Budgets:** the dashboard won't start an implement run for a ticket past `itemBudgetUsd` or `itemHours` (summed over its runs), or once the factory's runs today have spent `dayBudgetUsd`.
-  - **WIP:** it won't start a new ticket while `wip` others are in flight. Carrying on with a ticket already in flight is fine.
+  - **WIP:** it won't start a new ticket while `wip` others are in flight (started and not done, or an implement run going). Carrying on with a ticket already in flight is fine.
   - `implement` checks WIP itself too, for runs started outside the dashboard.
 - **Not yet:** nothing picks tickets up on its own (`intake` is for the orchestrator to come), and the Approver's settings are saved for when it runs, advisory first.
 

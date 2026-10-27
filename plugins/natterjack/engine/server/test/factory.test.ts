@@ -271,3 +271,36 @@ test("the factory refuses a launch over the ticket's budget or hours, the day's 
   assert.match(factoryLaunchBlocker(cfg, true, "ENG-1", [started("ENG-2")], [], now)!, /1 ticket is already in the factory \(WIP limit 1\): ENG-2/);
   assert.equal(factoryLaunchBlocker(cfg, true, "ENG-2", [started("ENG-2"), started("ENG-3")], [], now), null);
 });
+
+test("WIP counts implement runs that are going but haven't reported yet", () => {
+  const cfg = { ...defaultFactoryConfig(), enabled: true, limits: { ...defaultFactoryConfig().limits, wip: 1 } };
+  const going = (ticket: string, implement = true, status: "running" | "succeeded" = "running") =>
+    ({ id: ticket, ticket, status, costUsd: 0, startedAt: at, agent: "claude", model: null, implement });
+  assert.match(factoryLaunchBlocker(cfg, true, "ENG-2", [], [going("ENG-1")])!, /WIP limit 1\): ENG-1/);
+  assert.equal(factoryLaunchBlocker(cfg, true, "ENG-2", [], [going("ENG-1", false)]), null, "an Explain run isn't in flight");
+  assert.equal(factoryLaunchBlocker(cfg, true, "ENG-2", [], [going("ENG-1", true, "succeeded")]), null);
+  assert.equal(factoryLaunchBlocker(cfg, true, "ENG-1", [], [going("ENG-1")]), null, "carrying on with its own ticket");
+});
+
+// factory.mjs reads factory.json for the pipeline: it must read it as the dashboard does.
+test("the multirepo scripts read the policy as the dashboard does", async (t) => {
+  const scripts = path.join(import.meta.dirname, "..", "..", "..", "..", "multirepo", "scripts");
+  if (!fs.existsSync(path.join(scripts, "factory.mjs"))) return t.skip("no multirepo plugin next to this engine");
+  const { normalizePolicy } = await import(pathToFileURL(path.join(scripts, "factory.mjs")).href);
+  const inputs = [
+    null, {}, { enabled: true },
+    { enabled: true, limits: { wip: 0 }, gates: { plan: "sometimes", merge: "auto" }, stages: [{ id: "security", on: false }, { id: "qa" }] },
+    { limits: { wip: "7.6" }, security: { failOn: "medium", secretScan: false, agentReview: false, scanners: [{ command: "  osv-scanner -r .  ", when: " go.mod ", failOn: "x" }, { name: "n" }] } },
+    { security: { scanners: [] } },
+  ];
+  for (const raw of inputs) {
+    const d = normalizeFactoryConfig(raw);
+    const cli = normalizePolicy(raw);
+    assert.deepEqual(cli, {
+      enabled: d.enabled, gates: d.gates,
+      stages: STAGE_IDS.map((id) => ({ id, on: d.stages.find((s) => s.id === id)!.on })),
+      limits: { wip: d.limits.wip },
+      security: { agentReview: d.security.agentReview, secretScan: d.security.secretScan, failOn: d.security.failOn, scanners: d.security.scanners },
+    }, JSON.stringify(raw));
+  }
+});

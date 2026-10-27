@@ -7,9 +7,10 @@
  *
  * A scanner runs in a repo when its `when` file is at the repo's root (null: every repo). Its
  * command is the team's, from their committed policy, run through the shell in the repo. Exit 0
- * passes; any other exit is a finding at the scanner's `failOn` severity; a command that isn't
- * installed is skipped and said so. A secret is critical. A repo fails the stage when a finding
- * is at the policy's `security.failOn` or worse.
+ * passes; any other exit is a finding at the scanner's `failOn` severity. A command that isn't
+ * installed is skipped and said so; one that times out or can't run fails closed (a finding),
+ * so a broken scan never passes the gate. A secret is critical. A repo fails the stage when a
+ * finding is at the policy's `security.failOn` or worse.
  *
  * Usage:
  *   node security-scan.mjs --root <WORKROOT> [--repos a,b] [--ticket <id>] [--json]
@@ -19,88 +20,106 @@
  */
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { defaultBranch, git, isMain, listRepos, parseArgs } from "./lib.mjs";
-import { readPolicy, sourceWorkspace, update } from "./factory.mjs";
+import { normalizePolicy, readPolicy, sourceWorkspace, update } from "./factory.mjs";
 
 const SEVERITIES = ["critical", "high", "medium", "low"];
 const OUTPUT_TAIL = 1500;
 const SCAN_TIMEOUT_MS = 5 * 60 * 1000;
-
-/** The scanners the dashboard suggests when the policy has none (the same list as Factory → Policy). */
-export const DEFAULT_SCANNERS = [
-  { name: "npm audit", command: "npm audit --audit-level=high", when: "package-lock.json", failOn: "high" },
-  { name: "pip-audit", command: "pip-audit -r requirements.txt", when: "requirements.txt", failOn: "high" },
-  { name: "govulncheck", command: "govulncheck ./...", when: "go.mod", failOn: "high" },
-];
+/** gitleaks's exit code for leaks found (its own errors exit 1). */
+const LEAKS_EXIT = 3;
 
 const worse = (a, b) => SEVERITIES.indexOf(a) <= SEVERITIES.indexOf(b);
 const tail = (s) => { const t = String(s || "").trim(); return t.length > OUTPUT_TAIL ? "…" + t.slice(-OUTPUT_TAIL) : t; };
 
-/** Whether a failed run means the command isn't installed (not a finding). */
+/** Whether a failed run means the command isn't installed (not a finding): only the shell's own signs. */
 function notInstalled(r) {
   if (r.error && r.error.code === "ENOENT") return true;
-  const err = String(r.stderr || "") + String(r.stdout || "");
-  return r.status === 127 || r.status === 9009 || /is not recognized as an internal or external command|command not found|not found: /i.test(err);
+  if (r.status === 127 || r.status === 9009) return true;
+  // cmd.exe: exit 1 and only its own message.
+  return r.status === 1 && !String(r.stdout || "").trim() && /is not recognized as an internal or external command/i.test(String(r.stderr || ""));
 }
 
-/** Runs one scanner in a repo: { name, command, status: passed|found|skipped|error, severity, detail }. */
+/** Runs one scanner in a repo: { name, command, status: passed|found|error|skipped, severity, detail }. */
 export function runScanner(s, repoPath, run = spawnSync) {
   const r = run(s.command, { cwd: repoPath, shell: true, encoding: "utf-8", timeout: SCAN_TIMEOUT_MS, windowsHide: true, maxBuffer: 32 * 1024 * 1024 });
   const base = { name: s.name, command: s.command };
-  if (r.error && r.error.code === "ETIMEDOUT") return { ...base, status: "error", severity: null, detail: "Timed out after 5 minutes." };
   if (notInstalled(r)) return { ...base, status: "skipped", severity: null, detail: `Not installed here (${s.command.split(/\s+/)[0]}).` };
+  // A scan that couldn't finish isn't a pass: it counts as a finding at its severity.
+  if (r.error) return { ...base, status: "error", severity: s.failOn, detail: r.error.code === "ETIMEDOUT" ? "Timed out after 5 minutes." : `Couldn't run: ${r.error.message}` };
   if (r.status === 0) return { ...base, status: "passed", severity: null, detail: "" };
   return { ...base, status: "found", severity: s.failOn, detail: tail(r.stdout || r.stderr) };
 }
 
-/** Files the branch changed in a repo (committed since the default branch, plus uncommitted and untracked). */
+/** Files the branch changed in a repo (committed since the default branch, plus uncommitted and untracked), unquoted. */
 export function changedFiles(repoPath, base) {
   const out = new Set();
   const add = (text) => String(text || "").split(/\r?\n/).map((l) => l.trim()).filter(Boolean).forEach((f) => out.add(f));
-  const mergeBase = git(repoPath, ["merge-base", "HEAD", `origin/${base}`]) || git(repoPath, ["merge-base", "HEAD", base]);
-  if (mergeBase) add(git(repoPath, ["diff", "--name-only", "--diff-filter=ACMR", mergeBase, "HEAD"]));
-  add(git(repoPath, ["diff", "--name-only", "--diff-filter=ACMR", "HEAD"]));
-  add(git(repoPath, ["ls-files", "--others", "--exclude-standard"]));
+  // core.quotePath=false: names with spaces or non-ASCII come back as they are, not C-quoted.
+  const g = (args) => git(repoPath, ["-c", "core.quotePath=false", ...args]);
+  const mergeBase = g(["merge-base", "HEAD", `origin/${base}`]) || g(["merge-base", "HEAD", base]);
+  if (mergeBase) add(g(["diff", "--name-only", "--diff-filter=ACMR", mergeBase, "HEAD"]));
+  add(g(["diff", "--name-only", "--diff-filter=ACMR", "HEAD"]));
+  add(g(["ls-files", "--others", "--exclude-standard"]));
   return [...out].filter((f) => fs.existsSync(path.join(repoPath, f)));
 }
 
-/** gitleaks over the changed files: { status: passed|found|skipped, detail }. */
+/**
+ * gitleaks over the changed files, in one run: they're copied (paths kept) to a temp folder that
+ * `gitleaks dir` scans. Needs gitleaks 8.19+ (`dir`); older ones are reported, not trusted.
+ * { status: passed|found|error|skipped, detail }.
+ */
 export function scanSecrets(repoPath, files, run = spawnSync) {
   const probe = run("gitleaks", ["version"], { encoding: "utf-8", windowsHide: true });
   if (probe.error || probe.status !== 0) return { status: "skipped", detail: "gitleaks isn't installed, so secrets weren't scanned." };
+  const hasDir = run("gitleaks", ["dir", "--help"], { encoding: "utf-8", windowsHide: true });
+  if (hasDir.error || hasDir.status !== 0) return { status: "skipped", detail: `gitleaks ${String(probe.stdout || "").trim()} is older than 8.19 (no "dir"), so secrets weren't scanned.` };
   if (!files.length) return { status: "passed", detail: "No changed files." };
-  const hits = [];
-  for (const f of files) {
-    const r = run("gitleaks", ["dir", f, "--no-banner", "--redact", "--exit-code", "1"], { cwd: repoPath, encoding: "utf-8", windowsHide: true, timeout: 60_000 });
-    if (r.status === 1) hits.push(f);
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "secscan-"));
+  try {
+    for (const f of files) {
+      const to = path.join(tmp, "files", f);
+      fs.mkdirSync(path.dirname(to), { recursive: true });
+      fs.copyFileSync(path.join(repoPath, f), to);
+    }
+    const report = path.join(tmp, "report.json");
+    const r = run("gitleaks", ["dir", path.join(tmp, "files"), "--no-banner", "--redact", "--exit-code", String(LEAKS_EXIT), "--report-format", "json", "--report-path", report],
+      { encoding: "utf-8", windowsHide: true, timeout: SCAN_TIMEOUT_MS });
+    if (r.status === 0) return { status: "passed", detail: `${files.length} changed files clean.` };
+    if (r.status === LEAKS_EXIT) {
+      let hits = [];
+      try { hits = JSON.parse(fs.readFileSync(report, "utf-8")).map((x) => path.relative(path.join(tmp, "files"), x.File || x.file || "").replace(/\\/g, "/")); } catch {}
+      return { status: "found", detail: `Possible secrets in ${[...new Set(hits.filter(Boolean))].join(", ") || "the changed files"}.` };
+    }
+    return { status: "error", detail: `gitleaks failed: ${tail(r.stderr || r.stdout || (r.error && r.error.message))}` };
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
   }
-  return hits.length ? { status: "found", detail: `Possible secrets in ${hits.join(", ")}.` } : { status: "passed", detail: `${files.length} changed files clean.` };
 }
 
 /** The security stage for each repo under root. */
 export function securityScan({ root, repos = null, policy = null, run = spawnSync } = {}) {
-  const sec = (policy && policy.security) || {};
-  const scanners = Array.isArray(sec.scanners) ? sec.scanners.filter((s) => s && typeof s.command === "string" && s.command.trim()) : DEFAULT_SCANNERS;
-  const failOn = SEVERITIES.includes(sec.failOn) ? sec.failOn : "high";
-  const secrets = sec.secretScan !== false;
+  const sec = normalizePolicy(policy).security;
   const targets = listRepos(root).filter((r) => r.exists && (!repos || repos.includes(r.name)));
   const results = targets.map((r) => {
-    const ran = scanners
+    const ran = sec.scanners
       .filter((s) => !s.when || fs.existsSync(path.join(r.path, s.when)))
-      .map((s) => runScanner({ name: s.name || s.command, command: s.command.trim(), failOn: SEVERITIES.includes(s.failOn) ? s.failOn : "high" }, r.path, run));
-    const secret = secrets ? scanSecrets(r.path, changedFiles(r.path, defaultBranch(r.path, r.defaultBranch)), run) : { status: "skipped", detail: "Secret scanning is off." };
-    const findings = [...ran.filter((x) => x.status === "found").map((x) => ({ severity: x.severity, what: x.name })), ...(secret.status === "found" ? [{ severity: "critical", what: "secrets" }] : [])];
-    const blocking = findings.filter((f) => worse(f.severity, failOn));
-    const status = blocking.length ? "failed" : "done";
-    const parts = [
-      ran.length ? ran.map((x) => `${x.name} ${x.status}`).join(", ") : "no scanner applies",
-      `secrets ${secret.status}`,
+      .map((s) => runScanner(s, r.path, run));
+    const secret = sec.secretScan ? scanSecrets(r.path, changedFiles(r.path, defaultBranch(r.path, r.defaultBranch)), run) : { status: "skipped", detail: "Secret scanning is off." };
+    const findings = [
+      ...ran.filter((x) => x.status === "found" || x.status === "error").map((x) => ({ severity: x.severity, what: x.status === "error" ? `${x.name} (couldn't finish)` : x.name })),
+      ...(secret.status === "found" ? [{ severity: "critical", what: "secrets" }] : []),
+      ...(secret.status === "error" ? [{ severity: "critical", what: "secret scan (couldn't finish)" }] : []),
     ];
-    const note = `${blocking.length ? `Fails at ${failOn}: ${blocking.map((f) => `${f.what} (${f.severity})`).join(", ")}. ` : ""}${parts.join("; ")}.`;
+    const blocking = findings.filter((f) => worse(f.severity, sec.failOn));
+    const status = blocking.length ? "failed" : "done";
+    const parts = [ran.length ? ran.map((x) => `${x.name} ${x.status}`).join(", ") : "no scanner applies", `secrets ${secret.status}`];
+    const note = `${blocking.length ? `Fails at ${sec.failOn}: ${blocking.map((f) => `${f.what} (${f.severity})`).join(", ")}. ` : ""}${parts.join("; ")}.`;
     return { repo: r.name, path: r.path, status, note, scanners: ran, secrets: secret };
   });
-  return { failOn, repos: results, failed: results.filter((r) => r.status === "failed").map((r) => r.repo) };
+  return { failOn: sec.failOn, repos: results, failed: results.filter((r) => r.status === "failed").map((r) => r.repo) };
 }
 
 async function main(argv) {

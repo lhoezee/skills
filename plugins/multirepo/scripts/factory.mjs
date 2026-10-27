@@ -170,6 +170,48 @@ function apply(command, args, m, policy, now) {
 // ------------------------------------------------------------------ the policy's decisions
 
 const GATE_NAMES = { spec: "spec", plan: "plan", prePr: "pre-PR", merge: "merge" };
+const ALL_GATE_MODES = ["human", "approver", "auto", "off"];
+const SEVERITIES = ["critical", "high", "medium", "low"];
+/** Stages the dashboard has off by default. */
+const DEFAULT_OFF = ["align", "qa", "approve"];
+/** The scanners the dashboard suggests (Factory → Policy) when the policy names none. */
+export const DEFAULT_SCANNERS = [
+  { name: "npm audit", command: "npm audit --audit-level=high", when: "package-lock.json", failOn: "high" },
+  { name: "pip-audit", command: "pip-audit -r requirements.txt", when: "requirements.txt", failOn: "high" },
+  { name: "govulncheck", command: "govulncheck ./...", when: "go.mod", failOn: "high" },
+];
+
+/**
+ * factory.json as the dashboard reads it (engine factory.ts normalizeFactoryConfig), for the
+ * parts the pipeline acts on: enabled, gates, stages, the WIP limit and the security stage.
+ * The engine's tests check the two agree.
+ */
+export function normalizePolicy(raw) {
+  const r = raw && typeof raw === "object" ? raw : {};
+  const num = (v, d, min, max) => { const n = Number(v); return v != null && v !== "" && Number.isFinite(n) ? Math.min(Math.max(n, min), max) : d; };
+  const opt = (v) => (typeof v === "string" && v.trim() ? v.trim().slice(0, 200) : null);
+  const sec = r.security && typeof r.security === "object" ? r.security : {};
+  const listed = Array.isArray(r.stages) ? r.stages : [];
+  return {
+    enabled: r.enabled === true,
+    gates: Object.fromEntries(GATES.map((g) => [g, ALL_GATE_MODES.includes(r.gates && r.gates[g]) ? r.gates[g] : "human"])),
+    stages: STAGES.map((id) => { const s = listed.find((x) => x && x.id === id); return { id, on: s ? s.on !== false : !DEFAULT_OFF.includes(id) }; }),
+    limits: { wip: Math.round(num(r.limits && r.limits.wip, 3, 1, 50)) },
+    security: {
+      agentReview: sec.agentReview !== false,
+      secretScan: sec.secretScan !== false,
+      failOn: SEVERITIES.includes(sec.failOn) ? sec.failOn : "high",
+      scanners: Array.isArray(sec.scanners)
+        ? sec.scanners.filter((s) => s && typeof s.command === "string" && s.command.trim()).slice(0, 30).map((s) => ({
+          name: opt(s.name) || s.command.trim().split(/\s+/).slice(0, 2).join(" "),
+          command: s.command.trim().slice(0, 500),
+          when: opt(s.when),
+          failOn: SEVERITIES.includes(s.failOn) ? s.failOn : "high",
+        }))
+        : DEFAULT_SCANNERS.map((s) => ({ ...s })),
+    },
+  };
+}
 
 /** The newest row per repo of one stage. */
 function latestRows(m, stage) {
@@ -180,9 +222,8 @@ function latestRows(m, stage) {
 
 /** Whether the policy turns a stage on (stages it doesn't list keep the dashboard's defaults). */
 export function stageOn(policy, id) {
-  const s = Array.isArray(policy && policy.stages) ? policy.stages.find((x) => x && x.id === id) : null;
-  if (s) return s.on !== false;
-  return !["align", "qa", "approve"].includes(id);
+  const s = normalizePolicy(policy).stages.find((x) => x.id === id);
+  return !!(s && s.on);
 }
 
 /**
@@ -198,8 +239,9 @@ export function stageOn(policy, id) {
 export function decide(policy, manifest, gate, { run = "interactive", canAsk = run === "interactive" } = {}) {
   if (!GATES.includes(gate)) throw usage(`--gate must be one of ${GATES.join(", ")}`);
   const name = GATE_NAMES[gate];
-  if (!policy || policy.enabled !== true) return { gate, mode: null, action: "own-rules", reason: "No factory policy is on: follow this skill's own rules." };
-  const mode = ["human", "approver", "auto", "off"].includes(policy.gates && policy.gates[gate]) ? policy.gates[gate] : "human";
+  const p = normalizePolicy(policy);
+  if (!p.enabled) return { gate, mode: null, action: "own-rules", reason: "No factory policy is on: follow this skill's own rules." };
+  const mode = p.gates[gate];
   const out = (action, reason) => ({ gate, mode, action, reason });
   const askOrStop = (why) => (canAsk ? out("ask", why) : out("stop", `${why} This run can't ask anyone: stop, and say on the ticket that it's waiting at the ${name} gate.`));
   const spec = manifest && manifest.spec;
@@ -221,18 +263,21 @@ export function decide(policy, manifest, gate, { run = "interactive", canAsk = r
     return askOrStop(`Spec readiness ${spec.score} is below Ready (${spec.readyAt}).`);
   }
   if (gate === "plan") return out("pass", "The plan gate is automatic.");
-  // prePr: every repo's review passed, and the security stage when it's on.
-  const reviews = latestRows(manifest, "review");
-  if (!reviews.length) return askOrStop("The pre-PR gate is automatic, but no review is recorded.");
-  const failed = reviews.filter((r) => r.status !== "done").map((r) => r.repo || "review");
-  if (failed.length) return askOrStop(`The review didn't pass for ${failed.join(", ")}.`);
-  if (stageOn(policy, "security")) {
-    const sec = latestRows(manifest, "security");
-    if (!sec.length) return askOrStop("The pre-PR gate is automatic, but the security stage hasn't run.");
-    const bad = sec.filter((r) => r.status === "failed").map((r) => r.repo || "security");
-    if (bad.length) return askOrStop(`The security stage failed for ${bad.join(", ")}.`);
+  // prePr: every repo that was built has a passed review, and a passed security stage when it's on.
+  const built = latestRows(manifest, "build").filter((r) => r.status === "done").map((r) => r.repo || "");
+  const changed = built.length ? built : ((manifest && manifest.repos) || []);
+  if (!changed.length) return askOrStop("The pre-PR gate is automatic, but no repo's build is recorded.");
+  const missing = (stage) => {
+    const rows = new Map(latestRows(manifest, stage).map((r) => [r.repo || "", r.status]));
+    return changed.filter((repo) => rows.get(repo) !== "done").map((repo) => `${repo || stage} (${rows.get(repo) || "not run"})`);
+  };
+  const unreviewed = missing("review");
+  if (unreviewed.length) return askOrStop(`The review hasn't passed for ${unreviewed.join(", ")}.`);
+  if (p.stages.find((s) => s.id === "security").on) {
+    const unscanned = missing("security");
+    if (unscanned.length) return askOrStop(`The security stage hasn't passed for ${unscanned.join(", ")}.`);
   }
-  return out("pass", "Reviews and the security stage passed.");
+  return out("pass", "Every changed repo's review and security stage passed.");
 }
 
 /** Tickets in flight (started, not done) other than this one, against the policy's WIP limit. */
@@ -245,8 +290,8 @@ export function wip(ws, ticket, policy) {
       .filter((m) => m && m.ticket && !m.done && String(m.ticket).toLowerCase() !== String(ticket).toLowerCase() && ((m.stages || []).length || (m.gates || []).length))
       .map((m) => m.ticket);
   } catch {}
-  const limit = Number.isInteger(policy && policy.limits && policy.limits.wip) ? policy.limits.wip : 3;
-  return { inFlight, limit, ok: !(policy && policy.enabled === true) || inFlight.length < limit };
+  const p = normalizePolicy(policy);
+  return { inFlight, limit: p.limits.wip, ok: !p.enabled || inFlight.length < p.limits.wip };
 }
 
 async function main(argv) {
@@ -262,7 +307,7 @@ async function main(argv) {
   if (command === "stage-on") {
     if (!STAGES.includes(args.stage)) throw usage(`--stage must be one of ${STAGES.join(", ")}`);
     const policy = readPolicy(sourceWorkspace(start));
-    const enabled = !!(policy && policy.enabled === true);
+    const enabled = normalizePolicy(policy).enabled;
     process.stdout.write(JSON.stringify({ stage: args.stage, policy: enabled, on: enabled ? stageOn(policy, args.stage) : null }, null, 2) + "\n");
     return;
   }

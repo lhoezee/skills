@@ -367,6 +367,7 @@ function factoryRuns(): FactoryRun[] {
   return runs.list().slice(0, 500).map((r) => ({
     id: r.id, ticket: runTicket(r, wsTicket.get(r.workspace))?.id ?? null, status: r.status,
     costUsd: r.costUsd || 0, startedAt: r.startedAt, agent: r.agent || "claude", model: r.model, durationMs: r.durationMs || 0,
+    implement: IMPLEMENT_PROMPT.test(String(r.prompt || "").trim()),
   }));
 }
 
@@ -378,12 +379,17 @@ function factoryBoard() {
   return buildBoard(state.config, state.exists && !state.error, manifests, factoryRuns(), errors);
 }
 
+/** `/implement X` or a plugin's `/multirepo:implement X` (not Explain: that only reads). */
+const IMPLEMENT_PROMPT = /^\/(?:[\w.-]+:)?implement\s+\S/;
+
 /** Why the factory's policy won't start an implement run for this prompt's ticket, or null. */
 function factoryBlocker(prompt: string): string | null {
-  const ticket = implementTicket(prompt);
+  const text = String(prompt || "").trim();
+  if (!IMPLEMENT_PROMPT.test(text)) return null;
+  const ticket = implementTicket(text);
   if (!ticket) return null;
   const state = factoryConfigState(true);
-  if (!state.exists || state.error) return null;
+  if (!state.exists || state.error || !state.config.enabled) return null;
   return factoryLaunchBlocker(state.config, true, ticket, readManifests().manifests, factoryRuns());
 }
 

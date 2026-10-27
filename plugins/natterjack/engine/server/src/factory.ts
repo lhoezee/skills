@@ -353,7 +353,12 @@ export function boardColumns(c: FactoryConfig): FactoryColumn[] {
 }
 
 /** A run of the item's ticket, as the board needs it. */
-export interface FactoryRun { id: string; ticket: string | null; status: RunStatus; costUsd: number; startedAt: string; agent: string | null; model: string | null; durationMs?: number }
+export interface FactoryRun {
+  id: string; ticket: string | null; status: RunStatus; costUsd: number; startedAt: string; agent: string | null; model: string | null;
+  durationMs?: number;
+  /** An implement run (counts toward WIP while it's going, before it has reported anything). */
+  implement?: boolean;
+}
 
 const WHO: Record<FactoryGateMode, string> = { human: "you", approver: "the Approver", auto: "its checks", off: "" };
 
@@ -408,7 +413,8 @@ const money = (n: number) => `$${n.toFixed(2)}`;
  * Why the factory won't start another run for a ticket, or null. Only with the factory on:
  * the ticket's budget or agent hours are used up, the day's factory budget is spent (runs of
  * tickets on the board, started today), or the WIP limit is full and this ticket isn't already
- * in flight (carrying on with one in flight is fine).
+ * in flight (carrying on with one in flight is fine). In flight: a manifest that has started and
+ * isn't done, or an implement run that's going (it may not have reported yet).
  */
 export function factoryLaunchBlocker(cfg: FactoryConfig, configured: boolean, ticket: string, manifests: FactoryManifest[], runs: FactoryRun[], now = Date.now()): string | null {
   if (!configured || !cfg.enabled) return null;
@@ -425,11 +431,14 @@ export function factoryLaunchBlocker(cfg: FactoryConfig, configured: boolean, ti
     const today = runs.filter((r) => Date.parse(r.startedAt) >= day.getTime() && onBoard(r.ticket)).reduce((s, r) => s + (r.costUsd || 0), 0);
     if (today >= dayBudgetUsd) return `The factory has spent ${money(today)} of its ${money(dayBudgetUsd)} budget today (Factory policy).`;
   }
-  const inFlight = (m: FactoryManifest) => !m.done && (m.stages.length > 0 || m.gates.length > 0);
-  const self = manifests.find((m) => sameTicket(m.ticket, ticket));
-  if (!(self && inFlight(self))) {
-    const others = manifests.filter((m) => inFlight(m) && !sameTicket(m.ticket, ticket));
-    if (others.length >= wip) return `${others.length} ${others.length === 1 ? "ticket is" : "tickets are"} already in the factory (WIP limit ${wip}): ${others.slice(0, 5).map((m) => m.ticket).join(", ")}. Finish one first, or raise the limit on Factory → Policy.`;
+  const started = (m: FactoryManifest) => !m.done && (m.stages.length > 0 || m.gates.length > 0);
+  const going = (r: FactoryRun) => !!r.implement && !!r.ticket && (r.status === "running" || r.status === "waiting");
+  const inFlight = new Map<string, string>();
+  for (const m of manifests) if (started(m)) inFlight.set(m.ticket.toLowerCase(), m.ticket);
+  for (const r of runs) if (going(r)) inFlight.set(r.ticket!.toLowerCase(), r.ticket!);
+  if (!inFlight.has(ticket.toLowerCase())) {
+    const others = [...inFlight.values()];
+    if (others.length >= wip) return `${others.length} ${others.length === 1 ? "ticket is" : "tickets are"} already in the factory (WIP limit ${wip}): ${others.slice(0, 5).join(", ")}. Finish one first, or raise the limit on Factory → Policy.`;
   }
   return null;
 }
