@@ -64,7 +64,7 @@ import type { SnapshotSource } from "./snapshot-sources/index.ts";
 import { ACCESS_LOCKED, accessInfo, lockedAccess, lockedRole, parseAccess, readProfile, reapplyProfile, refuseAccessChange, refuseRoleChange, setAccess, setRole } from "./profile.ts";
 import { DocSites, docAreas, docSources } from "./docs.ts";
 import { Knowledge } from "./knowledge/index.ts";
-import { agentOf, agentStatuses, isAgentId, type AgentStatus } from "./agents/index.ts";
+import { agentOf, agentStatuses, isAgentId, type AgentId, type AgentStatus } from "./agents/index.ts";
 import { addAgentServer, addArgs, agentServerName, claudeServersToCopy, listAgentServers, needsTerminal, removeAgentServer, signInSupport, terminalCommand, type OtherAgent } from "./agents/mcp.ts";
 import { checkConfig } from "./connections.ts";
 import { KNOWLEDGE_TOOLS, addStoreSource, chosenTools, saveTools } from "./knowledge/tools.ts";
@@ -1595,7 +1595,7 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
       const number = numberParam(q("number"));
       if (!repo || !number) return sendError(res, 400, "Invalid pull request");
       if (p === "/api/reviews/diff") return sendJson(res, await reviews.diff(repo, number));
-      if (p === "/api/reviews/agent") return sendJson(res, await reviews.savedAgentReview(repo, number));
+      if (p === "/api/reviews/agent") return sendJson(res, await reviews.savedAgentReview(repo, number, isAgentId(q("agent")) ? (q("agent") as AgentId) : null));
       return sendJson(res, p === "/api/reviews/guide" ? await reviews.savedGuide(repo, number) : await reviews.savedSecurity(repo, number));
     }
     if (p === "/api/usage") return sendJson(res, await usage.get(force));
@@ -2087,7 +2087,7 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
     const repo = repoParam(body.repo);
     const number = numberParam(body.number);
     if (!repo || !number) return sendError(res, 400, "Invalid pull request");
-    return sendJson(res, await reviews.submit({ repo, number, event: body.event, body: String(body.body ?? ""), comments: Array.isArray(body.comments) ? body.comments : [] }));
+    return sendJson(res, await reviews.submit({ repo, number, event: body.event, body: String(body.body ?? ""), sha: String(body.sha ?? ""), comments: Array.isArray(body.comments) ? body.comments : [] }));
   }
   if (p.startsWith("/api/meetings/")) {
     const what = p.slice("/api/meetings/".length);

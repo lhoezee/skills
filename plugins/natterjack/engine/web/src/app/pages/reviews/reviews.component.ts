@@ -8,7 +8,7 @@ import { relTime } from '../../core/util';
 import { PageHeaderComponent } from '../../shared/page-header.component';
 import { ReviewDetailComponent } from './review-detail.component';
 import { ReviewGuideComponent } from './review-guide.component';
-import { type ReviewFilter, authorsOf, filterPrs, needsSummary, prKey } from './reviews.util';
+import { type ReviewFilter, authorsOf, filterPrs, needsSummary, newerSummary, prKey } from './reviews.util';
 
 /** Summaries asked for at once from the list (the server makes two at a time anyway). */
 const SUMMARY_PARALLEL = 2;
@@ -153,7 +153,7 @@ export class ReviewsComponent implements OnInit {
   readonly failed = signal<Record<string, string>>({});
   private pending: ReviewPr[] = [];
   private inFlight = 0;
-  /** Asked once per page visit, so a failure isn't retried in a loop. */
+  /** Asked once per PR activity (key@updatedAt) per page visit: a failure isn't retried in a loop, but a refreshed PR with new activity is asked again. */
   private asked = new Set<string>();
 
   readonly key = prKey;
@@ -188,9 +188,9 @@ export class ReviewsComponent implements OnInit {
   constructor() {
     // Ask for the summaries the visible rows don't have (or that may be for an older commit).
     effect(() => {
-      const want = this.rows().slice(0, SUMMARY_ROWS).filter((p) => !this.asked.has(prKey(p)) && needsSummary(p, this.summaries()[prKey(p)]));
+      const want = this.rows().slice(0, SUMMARY_ROWS).filter((p) => !this.asked.has(`${prKey(p)}@${p.updatedAt}`) && needsSummary(p, this.summaryOf(p)));
       if (!want.length) return;
-      for (const p of want) this.asked.add(prKey(p));
+      for (const p of want) this.asked.add(`${prKey(p)}@${p.updatedAt}`);
       this.pending.push(...want);
       this.pump();
     });
@@ -210,7 +210,8 @@ export class ReviewsComponent implements OnInit {
     finally { this.loading.set(false); }
   }
 
-  summaryOf(p: ReviewPr): ReviewSummary | null { return this.summaries()[prKey(p)] || p.summary; }
+  /** The newer of the summary made on this page and the one the (maybe refreshed) list has. */
+  summaryOf(p: ReviewPr): ReviewSummary | null { return newerSummary(this.summaries()[prKey(p)], p.summary); }
   rel(t: string): string { return relTime(t); }
 
   onSummary(key: string, s: ReviewSummary): void {

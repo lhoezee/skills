@@ -24,7 +24,6 @@ function fakeGh(opts: { orgs?: string[]; sha?: string } = {}) {
   const gh = async (args: string[]) => {
     calls.push(args);
     if (args[0] === "api" && args[1] === "user") return { login: "me" };
-    if (args[0] === "api" && args[1] === "user/orgs") return opts.orgs || ["acme"];
     if (args[0] === "api" && args[1] === "repos/acme/api") return { squash: true, merge: false, rebase: true, del: true };
     if (args[0] === "search" && args.includes("--review-requested=@me")) return [{ number: 1, repository: { nameWithOwner: "acme/api" } }];
     if (args[0] === "search") return SEARCH;
@@ -38,8 +37,9 @@ function fakeGh(opts: { orgs?: string[]; sha?: string } = {}) {
   };
   const ghText = async (args: string[]) => {
     calls.push(args);
+    // --paginate --jq: one login per line, across pages.
+    if (args[0] === "api" && args[1] === "user/orgs") return (opts.orgs || ["acme"]).join("\n") + "\n";
     if (args[0] === "api") return "kim\nkim\r\nsam\n";
-    if (args[0] === "pr" && args[1] === "merge") return "";
     return "diff --git a/src/http.ts b/src/http.ts\n+retry()";
   };
   return { gh, ghText, calls, state };
@@ -168,9 +168,15 @@ test("params accept owner/name and positive numbers only", () => {
 
 test("merge uses an allowed method and only merges the reviewed commit", async () => {
   const f = fakeGh();
-  const r = new Reviews({ ledgerDir: ledger(), gh: f.gh, ghText: f.ghText, ask: async () => "x", codeHost: () => ({ kind: "github", orgs: ["acme"] }) });
+  const posts: { args: string[]; input: any }[] = [];
+  let answer: any = { merged: true, message: "Pull Request successfully merged" };
+  const ghPost = async (args: string[], input: string) => { posts.push({ args, input: JSON.parse(input) }); return answer; };
+  const r = new Reviews({ ledgerDir: ledger(), gh: f.gh, ghText: f.ghText, ghPost, ask: async () => "x", codeHost: () => ({ kind: "github", orgs: ["acme"] }) });
   assert.deepEqual(await r.merge("acme/api", 1, "squash", "abc1234"), { merged: true });
-  assert.deepEqual(f.calls.find((c) => c[1] === "merge"), ["pr", "merge", "1", "--repo", "acme/api", "--squash", "--match-head-commit", "abc1234"]);
+  assert.deepEqual(posts[0], { args: ["api", "repos/acme/api/pulls/1/merge", "--method", "PUT", "--input", "-"], input: { sha: "abc1234", merge_method: "squash" } });
+  // Anything short of merged now (a queue, auto-merge) is an error, not a merge.
+  answer = { merged: false, message: "Merge queued" };
+  await assert.rejects(r.merge("acme/api", 1, "squash", "abc1234"), (e: any) => e.status === 409 && /Merge queued/.test(e.message));
   await assert.rejects(r.merge("acme/api", 1, "merge", "abc1234"), /doesn't allow merge commits/);
   await assert.rejects(r.merge("acme/api", 1, "squash", "; rm -rf"), /Which commit/);
 });

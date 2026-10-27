@@ -1,7 +1,7 @@
 import { ChangeDetectionStrategy, Component, computed, effect, inject, input, output, signal } from '@angular/core';
 import type { GuidePoint, ReviewDiff, ReviewGuide, ReviewPrDetail, SecurityReview } from '../../../../../shared/api';
 import { ApiService } from '../../core/api.service';
-import { type HunkGroup, groupHunks, hunkLabel, progressKey } from './review-guide.util';
+import { type HunkGroup, groupHunks, hunkLabel, noHunkLabel, progressKey } from './review-guide.util';
 
 /** The guide's chapters, in reading order; each can be ticked off as read. */
 const CHAPTERS = ['intent', 'core', 'consequences', 'supporting', 'risk', 'security', 'questions'] as const;
@@ -117,7 +117,9 @@ type Chapter = typeof CHAPTERS[number];
               }
             </details>
           }
-          @for (f of binaryFiles(); track f.path) { <div class="panel pad faint">{{ f.path }}: binary file, not shown.</div> }
+          @for (f of noHunkFiles(); track f.path) {
+            <div class="panel pad faint"><span class="mono">{{ f.oldPath ? f.oldPath + ' → ' + f.path : f.path }}</span>: {{ noHunkLabel(f) }}</div>
+          }
         }
       </section>
     </div>
@@ -196,7 +198,8 @@ export class ReviewGuideComponent {
   private gen = 0;
 
   readonly groups = computed<HunkGroup[]>(() => groupHunks(this.diff()?.files || [], this.guide()));
-  readonly binaryFiles = computed(() => (this.diff()?.files || []).filter((f) => f.binary));
+  /** Files with no lines to show: binary ones, pure renames, and empty files added or deleted. */
+  readonly noHunkFiles = computed(() => (this.diff()?.files || []).filter((f) => f.binary || !f.hunks.length));
   readonly doneCount = computed(() => CHAPTERS.filter((c) => this.done()[c]).length);
 
   constructor() {
@@ -205,6 +208,7 @@ export class ReviewGuideComponent {
 
   pointsOf(id: keyof ReviewGuide): GuidePoint[] { return (this.guide()?.[id] as GuidePoint[]) || []; }
   label(id: string): string { return hunkLabel(this.diff()?.files || [], id); }
+  noHunkLabel = noHunkLabel;
 
   private async load(repo: string, n: number): Promise<void> {
     const gen = ++this.gen;

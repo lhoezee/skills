@@ -58,6 +58,12 @@ export function mergeNote(state: string): string | null {
   }
 }
 
+/** The newer of two summaries (by when each was made); either may be missing. */
+export function newerSummary(a: ReviewSummary | null | undefined, b: ReviewSummary | null | undefined): ReviewSummary | null {
+  if (!a || !b) return a || b || null;
+  return Date.parse(a.at) >= Date.parse(b.at) ? a : b;
+}
+
 /**
  * Whether to ask for a PR's summary: it has none, or the one it has is older than the PR's
  * last activity (maybe a push; the server answers from its saved one when the commit is the same).

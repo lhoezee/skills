@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ReviewPr } from '../../../../../shared/api';
-import { authorsOf, filterPrs, mergeBlock, mergeNote, needsSummary, prKey, shownReviews } from './reviews.util';
+import { authorsOf, filterPrs, mergeBlock, mergeNote, needsSummary, newerSummary, prKey, shownReviews } from './reviews.util';
 
 function pr(over: Partial<ReviewPr> = {}): ReviewPr {
   return {
@@ -75,5 +75,16 @@ describe('needsSummary', () => {
 
   it('keys a PR by repo and number', () => {
     expect(prKey({ repo: 'acme/api', number: 4 })).toBe('acme/api#4');
+  });
+});
+
+describe('newerSummary', () => {
+  it('picks the one made last, or whichever exists', () => {
+    const a = { text: 'old', sha: 'a', at: '2026-10-01T00:00:00Z' };
+    const b = { text: 'new', sha: 'b', at: '2026-10-02T00:00:00Z' };
+    expect(newerSummary(a, b)).toBe(b);
+    expect(newerSummary(b, a)).toBe(b);
+    expect(newerSummary(null, a)).toBe(a);
+    expect(newerSummary(undefined, null)).toBe(null);
   });
 });

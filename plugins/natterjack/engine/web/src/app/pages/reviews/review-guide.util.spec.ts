@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { DiffFile, ReviewGuide } from '../../../../../shared/api';
-import { groupHunks, hunkLabel, progressKey } from './review-guide.util';
+import { groupHunks, hunkLabel, noHunkLabel, progressKey } from './review-guide.util';
 
 const hunk = (id: string, newStart = 1) => ({ id, header: '@@', oldStart: newStart, newStart, lines: [] });
 const files: DiffFile[] = [
@@ -43,5 +43,14 @@ describe('hunkLabel and progressKey', () => {
   });
   it('keys progress by PR and commit', () => {
     expect(progressKey('acme/api', 3, 'abc')).toBe('natterjack.review.acme/api#3@abc');
+  });
+});
+
+describe('noHunkLabel', () => {
+  it('says why a file has no lines to show', () => {
+    expect(noHunkLabel({ binary: true, status: 'modified' })).toMatch(/binary/);
+    expect(noHunkLabel({ binary: false, status: 'renamed' })).toMatch(/renamed/);
+    expect(noHunkLabel({ binary: false, status: 'added' })).toMatch(/empty/);
+    expect(noHunkLabel({ binary: false, status: 'deleted' })).toMatch(/deleted/);
   });
 });

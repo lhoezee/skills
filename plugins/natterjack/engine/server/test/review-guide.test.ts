@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { jsonIn, numberedDiff, parseDiff, parseGuide, parseSecurity } from "../src/review-guide.ts";
+import { gitPath, jsonIn, numberedDiff, parseDiff, parseGuide, parseSecurity } from "../src/review-guide.ts";
 import { Reviews } from "../src/reviews.ts";
 
 const DIFF = [
@@ -53,6 +53,36 @@ test("parseDiff reads files, statuses and numbered hunks with line numbers", () 
   assert.equal(d.files[0].deletions, 2);
   assert.deepEqual(d.files[1].hunks[0].lines.map((l) => l.text), ["-- not a header", "x"]);
   assert.equal(d.truncated, false);
+});
+
+test("parseDiff decodes git's quoted paths (tabs, quotes, octal UTF-8 bytes), renames and paths with spaces", () => {
+  const d = parseDiff([
+    'diff --git "a/caf\\303\\251\\tmenu.ts" "b/caf\\303\\251\\tmenu.ts"',
+    'index 1..2 100644',
+    '--- "a/caf\\303\\251\\tmenu.ts"',
+    '+++ "b/caf\\303\\251\\tmenu.ts"',
+    "@@ -1 +1 @@",
+    "-a",
+    "+b",
+    'diff --git a/old "q".ts b/new "q".ts',
+    "similarity index 100%",
+    'rename from "old \\"q\\".ts"',
+    'rename to "new \\"q\\".ts"',
+    "diff --git a/my docs/read me.md b/my docs/read me.md",
+    "new file mode 100644",
+    "--- /dev/null",
+    "+++ b/my docs/read me.md",
+    "@@ -0,0 +1 @@",
+    "+hi",
+    "",
+  ].join("\n"));
+  assert.deepEqual(d.files.map((f) => [f.path, f.oldPath, f.status]), [
+    ["café\tmenu.ts", null, "modified"],
+    ['new "q".ts', 'old "q".ts', "renamed"],
+    ["my docs/read me.md", null, "added"],
+  ]);
+  assert.equal(gitPath('"a\\\\b\\"c" rest').path, 'a\\b"c');
+  assert.equal(gitPath('"a\\\\b\\"c" rest').rest, "rest");
 });
 
 test("parseDiff stops sending lines past the cap but still counts them", () => {

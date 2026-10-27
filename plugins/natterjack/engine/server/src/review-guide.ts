@@ -29,6 +29,51 @@ const SEVERITIES: Severity[] = ["critical", "high", "medium", "low"];
 
 // ------------------------------------------------------------------ the diff
 
+/**
+ * A path as git prints it: plain, or C-quoted ("a/caf\303\251 x.ts", with \t \n \" \\ and octal
+ * bytes) when it has a tab, a newline, a quote, a backslash or non-ASCII bytes. Returns the path
+ * and the rest of the text after it.
+ */
+export function gitPath(s: string): { path: string; rest: string } {
+  if (!s.startsWith('"')) {
+    const sp = s.indexOf(" ");
+    return sp < 0 ? { path: s, rest: "" } : { path: s.slice(0, sp), rest: s.slice(sp + 1) };
+  }
+  const bytes: number[] = [];
+  const ESC: Record<string, number> = { a: 7, b: 8, t: 9, n: 10, v: 11, f: 12, r: 13, '"': 34, "\\": 92 };
+  let i = 1;
+  for (; i < s.length && s[i] !== '"'; i++) {
+    if (s[i] !== "\\") { bytes.push(...Buffer.from(s[i], "utf-8")); continue; }
+    const oct = /^[0-7]{3}/.exec(s.slice(i + 1));
+    if (oct) { bytes.push(parseInt(oct[0], 8)); i += 3; continue; }
+    const c = s[++i];
+    bytes.push(c in ESC ? ESC[c] : c.charCodeAt(0));
+  }
+  return { path: Buffer.from(bytes).toString("utf-8"), rest: s.slice(i + 2) };
+}
+
+/** A whole path that may be C-quoted (rename from/to, ---/+++): unquoted ones keep their spaces. */
+function unquote(s: string): string {
+  return s.startsWith('"') ? gitPath(s).path : s;
+}
+
+/** A `diff --git` header's new path ("b/..."), quoted or not. Unquoted paths with spaces are split where " b/" starts. */
+function headerPath(rest: string): string {
+  if (rest.startsWith('"')) {
+    const a = gitPath(rest);
+    return gitPath(a.rest).path.replace(/^b\//, "");
+  }
+  const m = rest.match(/^a\/(.*) ("?)b\/(.*)$/);
+  if (!m) return rest;
+  return m[2] ? gitPath(`"b/${m[3]}`).path.replace(/^b\//, "") : m[3];
+}
+
+/** A `---`/`+++` line's path without its a/ or b/ prefix, or null for /dev/null. */
+function sidePath(s: string): string | null {
+  const p = unquote(s);
+  return p === "/dev/null" ? null : p.replace(/^[ab]\//, "");
+}
+
 /** A unified diff (git's, as `gh pr diff` prints it) as files and hunks, hunks numbered h1, h2... in order. */
 export function parseDiff(text: string, maxLines = MAX_DIFF_LINES): ReviewDiff {
   const files: DiffFile[] = [];
@@ -42,8 +87,7 @@ export function parseDiff(text: string, maxLines = MAX_DIFF_LINES): ReviewDiff {
   for (const raw of String(text || "").split("\n")) {
     const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
     if (line.startsWith("diff --git ")) {
-      const m = line.match(/^diff --git a\/(.*) b\/(.*)$/);
-      file = { path: m ? m[2] : line.slice(11), oldPath: null, status: "modified", binary: false, additions: 0, deletions: 0, hunks: [] };
+      file = { path: headerPath(line.slice(11)), oldPath: null, status: "modified", binary: false, additions: 0, deletions: 0, hunks: [] };
       files.push(file);
       hunk = null;
       continue;
@@ -52,11 +96,13 @@ export function parseDiff(text: string, maxLines = MAX_DIFF_LINES): ReviewDiff {
     if (!hunk || !/^[ +\-\\]/.test(line)) {
       if (line.startsWith("new file mode")) { file.status = "added"; continue; }
       if (line.startsWith("deleted file mode")) { file.status = "deleted"; continue; }
-      if (line.startsWith("rename from ")) { file.status = "renamed"; file.oldPath = line.slice(12); continue; }
-      if (line.startsWith("rename to ")) { file.path = line.slice(10); continue; }
+      if (line.startsWith("rename from ")) { file.status = "renamed"; file.oldPath = unquote(line.slice(12)); continue; }
+      if (line.startsWith("rename to ")) { file.path = unquote(line.slice(10)); continue; }
       if (line.startsWith("Binary files ") || line === "GIT binary patch") { file.binary = true; continue; }
     }
-    if (!hunk && (line.startsWith("--- ") || line.startsWith("+++ "))) continue;
+    // The +++ line names the new path exactly (the header can't always be split).
+    if (!hunk && line.startsWith("+++ ")) { const p = sidePath(line.slice(4)); if (p) file.path = p; continue; }
+    if (!hunk && line.startsWith("--- ")) continue;
     const h = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)$/);
     if (h) {
       oldN = Number(h[1]);

@@ -155,6 +155,7 @@ export class AgentReviewComponent {
     const gen = ++this.gen;
     this.stopTimer();
     this.running.set(false);
+    this.posting.set(false);
     this.err.set(null);
     this.show(null);
     try {
@@ -194,7 +195,7 @@ export class AgentReviewComponent {
     try {
       const comments = picks.map((f) => ({ path: f.onDiff ? f.file! : (f.file || ''), line: f.onDiff ? f.line! : (f.line || 0), body: commentBody(f, this.textOf(f), r.agentLabel) }));
       const body = event === 'REQUEST_CHANGES' ? `Requesting changes after an agent review (${r.agentLabel}).` : '';
-      const done = await this.api.post<ReviewSubmitted>('/api/reviews/submit', { repo: this.repo(), number: this.number(), event, body, comments });
+      const done = await this.api.post<ReviewSubmitted>('/api/reviews/submit', { repo: this.repo(), number: this.number(), event, body, sha: r.sha, comments });
       if (gen !== this.gen) return;
       this.done.set(done);
       this.posted.update((s) => new Set([...s, ...picks.map((f) => f.id)]));

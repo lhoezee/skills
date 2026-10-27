@@ -220,7 +220,8 @@ export class ReviewDetailComponent {
   readonly agentPick = signal<AgentId | null>(null);
   readonly agent = computed<AgentId>(() => { const p = this.agentPick(); return p && this.agents().some((a) => a.id === p) ? p : this.launch.agent(); });
   readonly agentBusy = computed(() => !!this.agentReview()?.running());
-  readonly agentDone = computed(() => !!this.agentReview()?.review());
+  /** The review showing is the picked agent's: asking again makes a new one. */
+  readonly agentDone = computed(() => this.agentReview()?.review()?.agent === this.agent());
   readonly verdict = signal<ReviewEvent | null>(null);
   readonly verdictText = signal('');
   readonly sending = signal(false);
@@ -267,6 +268,9 @@ export class ReviewDetailComponent {
     this.verdictDone.set(null);
     this.merging.set(false);
     this.merged.set(false);
+    // A request for the previous PR may still be out; its finally won't clear these for this one.
+    this.sending.set(false);
+    this.summarizing.set(false);
     try {
       const d = await this.api.get<ReviewPrDetail>(`/api/reviews/pr?repo=${encodeURIComponent(repo)}&number=${n}`);
       if (gen !== this.gen) return;
@@ -277,7 +281,7 @@ export class ReviewDetailComponent {
     }
   }
 
-  /** Asks the picked agent for a review (a new one, once this PR has one). */
+  /** Asks the picked agent for a review: a new one when its review is the one showing, else its saved one if it has one. */
   askAgent(): void {
     const id = this.agent();
     const label = this.agents().find((a) => a.id === id)?.label || id;
@@ -324,7 +328,7 @@ export class ReviewDetailComponent {
     this.sending.set(true);
     this.verdictErr.set(null);
     try {
-      const done = await this.api.post<ReviewSubmitted>('/api/reviews/submit', { repo: this.repo(), number: this.number(), event, body: this.verdictText(), comments: [] });
+      const done = await this.api.post<ReviewSubmitted>('/api/reviews/submit', { repo: this.repo(), number: this.number(), event, body: this.verdictText(), sha: this.d()?.sha, comments: [] });
       if (gen !== this.gen) return;
       this.verdictDone.set(done);
       this.verdict.set(null);
@@ -353,8 +357,11 @@ export class ReviewDetailComponent {
     try {
       const s = await this.api.post<ReviewSummary>('/api/reviews/summary', { repo: this.repo(), number: this.number(), force });
       if (gen !== this.gen) return;
-      this.d.update((d) => (d ? { ...d, summary: s, sha: s.sha } : d));
       this.summarized.emit(s);
+      // A summary for a newer commit means the PR moved: reload all of it (files, checks, the sha
+      // that approve and merge are bound to) rather than pairing new text with the old commit.
+      if (s.sha === this.d()?.sha) this.d.update((d) => (d ? { ...d, summary: s } : d));
+      else this.refresh();
     } catch (e) {
       if (gen === this.gen) this.sumErr.set((e as Error).message);
     } finally {

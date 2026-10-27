@@ -112,11 +112,21 @@ export interface AgentReviewRun {
   timeoutMs?: number;
 }
 
-/** The command line for one review turn, by agent (exported for tests). */
-export function agentReviewArgs(agent: AgentId, repo: string, number: number, lastFile: string): string[] {
+/**
+ * The command line for one review turn, by agent (exported for tests). None of the person's own
+ * permissions, settings or MCP servers come along: an allow rule they gave their agent (say
+ * `Bash(gh:*)`) or a write-capable integration would let the PR's text act through it.
+ * `mcpServers`: Copilot's configured servers, each denied by name (deny beats any allow).
+ * `windowsSandbox`: Codex's own windows.sandbox setting, the one part of its config kept (without
+ * it Codex on Windows can't read the PR files at all).
+ */
+export function agentReviewArgs(agent: AgentId, repo: string, number: number, lastFile: string,
+  { mcpServers = [], windowsSandbox = null }: { mcpServers?: string[]; windowsSandbox?: string | null } = {}): string[] {
   if (agent === "claude") {
     return [
       "-p", "--output-format", "json", "--no-session-persistence",
+      // No user, project or local settings (their allow rules and hooks), and no MCP servers; sign-in is kept.
+      "--restricted", "--strict-mcp-config",
       "--tools", "Bash",
       "--allowedTools", `Bash(gh pr view ${number} --repo ${repo}:*)`, `Bash(gh pr diff ${number} --repo ${repo}:*)`,
       // Anything not allowed above is refused instead of asked.
@@ -126,20 +136,49 @@ export function agentReviewArgs(agent: AgentId, repo: string, number: number, la
   if (agent === "copilot") {
     return [
       "-s", "--no-custom-instructions", "--no-ask-user", "--no-auto-update", "--no-color",
+      "--disable-builtin-mcps",
+      ...mcpServers.flatMap((s) => ["--disable-mcp-server", s, "--deny-tool", s]),
       "--allow-tool", `shell(gh pr view ${number} --repo ${repo})`,
       "--allow-tool", `shell(gh pr diff ${number} --repo ${repo})`,
       "--deny-tool", "write",
     ];
   }
-  return ["exec", "--skip-git-repo-check", "-s", "read-only", "--ephemeral", "--color", "never", "-o", lastFile, "-"];
+  // --ignore-user-config: none of the person's MCP servers or settings; sign-in still comes from CODEX_HOME.
+  return ["exec", "--skip-git-repo-check", "--ignore-user-config", ...(windowsSandbox ? ["-c", `windows.sandbox="${windowsSandbox}"`] : []), "-s", "read-only", "--ephemeral", "--color", "never", "-o", lastFile, "-"];
+}
+
+/** Copilot's configured MCP servers (user and plugin; the review's empty folder has no workspace ones). */
+export function copilotMcpServers(cwd: string): Promise<string[]> {
+  return new Promise((resolve) => {
+    let out = "";
+    const child = spawnCli("copilot", ["mcp", "list", "--json"], { cwd, windowsHide: true, stdio: ["ignore", "pipe", "ignore"] as any });
+    const timer = setTimeout(() => child.kill(), 20_000);
+    child.stdout!.on("data", (d) => (out += d));
+    child.on("error", () => { clearTimeout(timer); resolve([]); });
+    child.on("close", () => {
+      clearTimeout(timer);
+      try { resolve(Object.keys(JSON.parse(out.slice(out.indexOf("{"))).mcpServers || {}).filter((s) => /^[\w.-]+$/.test(s))); } catch { resolve([]); }
+    });
+  });
+}
+
+/** Codex's windows.sandbox setting ($CODEX_HOME/config.toml), on Windows; else null. */
+export function codexWindowsSandbox(): string | null {
+  if (process.platform !== "win32") return null;
+  try {
+    const toml = fs.readFileSync(path.join(process.env.CODEX_HOME || path.join(os.homedir(), ".codex"), "config.toml"), "utf-8");
+    const m = /^\[windows\][^\[]*?^\s*sandbox\s*=\s*"([\w-]+)"/m.exec(toml);
+    return m ? m[1] : null;
+  } catch { return null; }
 }
 
 /** One review turn of the agent, in a temp folder; resolves with its final answer's text. */
-export function runAgentReview(run: AgentReviewRun & { repo: string; number: number }): Promise<string> {
+export async function runAgentReview(run: AgentReviewRun & { repo: string; number: number }): Promise<string> {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "natterjack-review-"));
   const lastFile = path.join(dir, ".answer.txt");
   for (const [name, text] of Object.entries(run.files || {})) fs.writeFileSync(path.join(dir, name), text);
-  const args = agentReviewArgs(run.agent, run.repo, run.number, lastFile);
+  const servers = run.agent === "copilot" ? await copilotMcpServers(dir) : [];
+  const args = agentReviewArgs(run.agent, run.repo, run.number, lastFile, { mcpServers: servers, windowsSandbox: run.agent === "codex" ? codexWindowsSandbox() : null });
   const opts = { cwd: dir, env: run.agent === "claude" ? claudeEnv() : process.env, windowsHide: true, stdio: ["pipe", "pipe", "pipe"] as any };
   const child = run.agent === "claude" ? spawnClaude(args, opts) : spawnCli(run.agent, args, opts);
   const name = run.agent === "claude" ? "Claude" : run.agent === "copilot" ? "Copilot" : "Codex";

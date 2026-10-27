@@ -749,6 +749,8 @@ export interface AgentReview { sha: string; at: string; agent: AgentId; agentLab
 export type ReviewEvent = 'COMMENT' | 'APPROVE' | 'REQUEST_CHANGES';
 export interface ReviewSubmit {
   repo: string; number: number; event: ReviewEvent; body: string;
+  /** The head commit the person reviewed: a PR that has moved on since is refused. */
+  sha: string;
   comments: { path: string; line: number; body: string }[];
 }
 export interface ReviewSubmitted { url: string | null; state: string; comments: number; movedToBody: number }

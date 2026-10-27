@@ -45,3 +45,12 @@ export function hunkLabel(files: DiffFile[], id: string): string {
 export function progressKey(repo: string, number: number, sha: string): string {
   return `natterjack.review.${repo}#${number}@${sha}`;
 }
+
+/** What a file with no lines to show is: binary, a pure rename, an empty file added or deleted, or a mode change. */
+export function noHunkLabel(f: Pick<DiffFile, 'binary' | 'status'>): string {
+  if (f.binary) return 'binary file, not shown.';
+  if (f.status === 'renamed') return 'renamed, contents unchanged.';
+  if (f.status === 'added') return 'new empty file.';
+  if (f.status === 'deleted') return 'deleted (it was empty).';
+  return 'no line changes (mode or metadata only).';
+}

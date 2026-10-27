@@ -38,6 +38,8 @@ const SUMMARY_MODEL = "haiku";
 /** The guide and the security review need more judgement than a summary. */
 const GUIDE_MODEL = "sonnet";
 const GUIDE_TIMEOUT_MS = 5 * 60 * 1000;
+/** Agents whose reviews are kept, each separately. */
+const REVIEW_AGENTS: AgentId[] = ["claude", "copilot", "codex"];
 /** How long a repository's merge settings are kept. */
 const REPO_TTL_MS = 10 * 60 * 1000;
 /** Diffs kept in memory (by head commit), so the page and a guide don't fetch one twice. */
@@ -169,9 +171,10 @@ export class Reviews {
     const viewer = await this.deps.gh(["api", "user", "--jq", "{login: .login}"]).then((u) => (u && u.login) || null).catch((e) => { errors.push(`who you are: ${e.message}`); return null; });
     const set = this.deps.codeHost().orgs;
     if (set.length) return { viewer, orgs: set };
-    const orgs = await this.deps.gh(["api", "user/orgs", "--paginate", "--jq", "[.[].login]"])
-      .then((o) => (Array.isArray(o) ? o.filter((x) => typeof x === "string") : []))
-      .catch((e) => { errors.push(`your organizations: ${e.message}`); return []; });
+    // --paginate --jq prints one result per page, so one login per line rather than one JSON array.
+    const orgs = await this.deps.ghText(["api", "user/orgs", "--paginate", "--jq", ".[].login"])
+      .then((out) => out.split(/\r?\n/).map((l) => l.trim()).filter(Boolean))
+      .catch((e) => { errors.push(`your organizations: ${e.message}`); return [] as string[]; });
     return { viewer, orgs: viewer ? [...orgs, viewer] : orgs };
   }
 
@@ -230,6 +233,16 @@ export class Reviews {
       return s ? { ...p, summary: { text: s.text, sha: s.sha, at: s.at } } : p;
     });
     return { ...this.cache!, prs };
+  }
+
+  /**
+   * Throws (409) when the PR's head is no longer `sha`. `gh pr diff` and the agents read the live
+   * PR, not a commit, so anything made from them is checked against the head it was made for
+   * before it's kept: a push in between would otherwise label B's diff as A's.
+   */
+  private async sameHead(repo: string, number: number, sha: string): Promise<void> {
+    const d = await this.view(repo, number, "headRefOid");
+    if (d.headRefOid !== sha) throw Object.assign(new Error("The PR got new commits while this was being made. Try again."), { status: 409 });
   }
 
   private async view(repo: string, number: number, fields: string): Promise<any> {
@@ -311,6 +324,7 @@ export class Reviews {
     const files = (d.files || []).map((f: any) => ({ path: f.path, additions: f.additions || 0, deletions: f.deletions || 0 }));
     const text = cleanSummary(await this.turn(() => this.deps.ask(summaryPrompt({ repo, title: d.title, body: d.body || "", files }, diff))));
     if (!text) throw new Error("Claude gave an empty summary.");
+    await this.sameHead(repo, number, d.headRefOid);
     const entry: SummaryEntry = { key, text, sha: d.headRefOid, at: new Date().toISOString() };
     this.summaries.set(key, entry);
     this.save();
@@ -328,6 +342,7 @@ export class Reviews {
     const hit = this.diffs.get(key);
     if (hit) return hit;
     const diff = { ...parseDiff(await this.deps.ghText(["pr", "diff", String(number), "--repo", repo])), sha };
+    await this.sameHead(repo, number, sha);
     this.diffs.set(key, diff);
     if (this.diffs.size > DIFF_CACHE) this.diffs.delete(this.diffs.keys().next().value!);
     return diff;
@@ -359,42 +374,49 @@ export class Reviews {
       parseSecurity(await this.deps.askDeep(securityPrompt(input)), ids)));
   }
 
-  /** The saved agent review for the PR's current commit, or null. */
-  async savedAgentReview(repo: string, number: number): Promise<AgentReview | null> {
+  /** The saved review by `agent` for the PR's current commit; without one, the newest by any agent. Null when there's none. */
+  async savedAgentReview(repo: string, number: number, agent?: AgentId | null): Promise<AgentReview | null> {
     const d = await this.view(repo, number, "headRefOid");
-    return this.store.get<AgentReview>(repo, number, d.headRefOid, "agent");
+    if (agent) return this.store.get<AgentReview>(repo, number, d.headRefOid, `agent-${agent}`);
+    const all = REVIEW_AGENTS.map((a) => this.store.get<AgentReview>(repo, number, d.headRefOid, `agent-${a}`)).filter((r): r is AgentReview => !!r);
+    return all.sort((a, b) => b.at.localeCompare(a.at))[0] || null;
   }
 
   /**
    * A coding agent's review of the PR (bugs, performance, security, nitpicks) for its current
-   * commit: the saved one when the same agent made it, or a new one (force: a new one anyway).
+   * commit: this agent's saved one, or a new one (force: a new one anyway). Each agent's is kept separately.
    */
   agentReview(repo: string, number: number, agent: AgentId, agentLabel: string, force = false): Promise<AgentReview> {
-    return this.once(`agent:${repo}#${number}`, async () => {
+    return this.once(`agent:${agent}:${repo}#${number}`, async () => {
       const d = await this.view(repo, number, "title,body,headRefOid");
-      const saved = this.store.get<AgentReview>(repo, number, d.headRefOid, "agent");
-      if (saved && saved.agent === agent && !force) return saved;
+      const kind = `agent-${agent}`;
+      const saved = this.store.get<AgentReview>(repo, number, d.headRefOid, kind);
+      if (saved && !force) return saved;
       const diff = await this.diffAt(repo, number, d.headRefOid);
       const source = sourceFor(agent);
       const files = source === "files"
         ? { "pr.md": `# ${d.title}\n\n${d.body || "(no description)"}\n`, "pr.diff": await this.deps.ghText(["pr", "diff", String(number), "--repo", repo]) }
         : undefined;
       const text = await this.deps.review({ agent, repo, number, prompt: agentReviewPrompt({ repo, number, title: d.title }, source), files });
+      await this.sameHead(repo, number, d.headRefOid);
       const made: AgentReview = { ...parseAgentReview(text, diff.files), sha: d.headRefOid, at: new Date().toISOString(), agent, agentLabel };
-      this.store.put(repo, number, d.headRefOid, "agent", made);
+      this.store.put(repo, number, d.headRefOid, kind, made);
       return made;
     });
   }
 
   /**
    * Posts a review to the PR as the person: a comment (with line comments), an approval or a
-   * request for changes, on the PR's current commit. A line comment on a line that isn't in the
-   * diff would make GitHub refuse the whole review, so those go in the review's text instead.
+   * request for changes, on the commit they reviewed (`sha`): when the PR has moved on since, it's
+   * refused rather than approving (or commenting on) code they haven't seen. A line comment on a
+   * line that isn't in the diff would make GitHub refuse the whole review, so those go in the text.
    */
   async submit(r: ReviewSubmit): Promise<ReviewSubmitted> {
     const events: ReviewEvent[] = ["COMMENT", "APPROVE", "REQUEST_CHANGES"];
     if (!events.includes(r.event)) throw Object.assign(new Error("Unknown review event."), { status: 400 });
+    if (typeof r.sha !== "string" || !/^[0-9a-f]{7,40}$/i.test(r.sha)) throw Object.assign(new Error("Which commit you reviewed is missing."), { status: 400 });
     const d = await this.view(r.repo, r.number, "headRefOid");
+    if (d.headRefOid !== r.sha) throw Object.assign(new Error("The PR changed since you reviewed it (new commits). Reload to review the new changes."), { status: 409 });
     const diff = await this.diffAt(r.repo, r.number, d.headRefOid);
     const comments: { path: string; line: number; side: "RIGHT"; body: string }[] = [];
     const moved: string[] = [];
@@ -424,7 +446,9 @@ export class Reviews {
     const { methods } = await this.repoSettings(repo);
     if (!methods.includes(method)) throw Object.assign(new Error(`This repository doesn't allow ${{ squash: "squash merging", merge: "merge commits", rebase: "rebase merging" }[method]}.`), { status: 400 });
     if (!/^[0-9a-f]{7,40}$/i.test(sha)) throw Object.assign(new Error("Which commit to merge is missing."), { status: 400 });
-    await this.deps.ghText(["pr", "merge", String(number), "--repo", repo, `--${method}`, "--match-head-commit", sha]);
+    // The REST merge merges now or not at all (gh pr merge may queue it or turn on auto-merge instead).
+    const res = await this.deps.ghPost(["api", `repos/${repo}/pulls/${number}/merge`, "--method", "PUT", "--input", "-"], JSON.stringify({ sha, merge_method: method }));
+    if (!res || res.merged !== true) throw Object.assign(new Error((res && res.message) || "GitHub didn't merge it."), { status: 409 });
     this.cache = null;
     return { merged: true };
   }
@@ -450,7 +474,9 @@ export class Reviews {
       base: d.baseRefName, head: d.headRefName, ticket, files: diff.files,
     };
     const ids = new Set(diff.files.flatMap((f) => f.hunks.map((h) => h.id)));
-    const made = { ...(await make(input, ids)), sha: d.headRefOid, at: new Date().toISOString() };
+    const result = await make(input, ids);
+    await this.sameHead(repo, number, d.headRefOid);
+    const made = { ...result, sha: d.headRefOid, at: new Date().toISOString() };
     this.store.put(repo, number, d.headRefOid, kind, made);
     return made;
   }
