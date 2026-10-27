@@ -331,6 +331,83 @@ export function readManifests(dir = manifestDir(), limit = MAX_MANIFESTS): { man
   return { manifests: manifests.slice(0, MAX_MANIFESTS), errors };
 }
 
+// ------------------------------------------------------------------ decisions from the dashboard
+
+const LOCK_STALE_MS = 10_000;
+const LOCK_WAIT_MS = 5_000;
+
+/** Runs fn holding `<file>.lock` (factory.mjs takes the same lock): created exclusively, broken when stale. */
+function withLock<T>(file: string, fn: () => T): T {
+  const lock = `${file}.lock`;
+  const deadline = Date.now() + LOCK_WAIT_MS;
+  let fd: number | null = null;
+  while (fd === null) {
+    try { fd = fs.openSync(lock, "wx"); } catch (e: any) {
+      if (e.code !== "EEXIST") throw e;
+      try { if (Date.now() - fs.statSync(lock).mtimeMs > LOCK_STALE_MS) { fs.unlinkSync(lock); continue; } } catch { continue; }
+      if (Date.now() > deadline) throw Object.assign(new Error("The ticket's progress file is busy; try again."), { status: 409 });
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+    }
+  }
+  try { return fn(); } finally {
+    try { fs.closeSync(fd); } catch {}
+    try { fs.unlinkSync(lock); } catch {}
+  }
+}
+
+/** The manifest file for a ticket (by the ticket inside it, case-insensitively), or null. */
+export function manifestFile(ticket: string, dir = manifestDir()): string | null {
+  let files: string[] = [];
+  try { files = fs.readdirSync(dir).filter((f) => f.endsWith(".json")); } catch { return null; }
+  const want = ticket.trim().toLowerCase();
+  for (const f of files) {
+    try { if (String(JSON.parse(fs.readFileSync(path.join(dir, f), "utf-8")).ticket || "").toLowerCase() === want) return path.join(dir, f); } catch {}
+  }
+  return null;
+}
+
+/**
+ * Records a person's decision at the gate a ticket is waiting at: appended to its gates (the audit
+ * trail). A rejection ends the item (done, with why). Refused when the ticket isn't waiting there.
+ */
+export function recordGateDecision(ticket: string, gate: FactoryGateId, decision: "approved" | "rejected", by: string, note: string | null, dir = manifestDir(), now = new Date().toISOString()): FactoryManifest {
+  const bad = (status: number, message: string) => Object.assign(new Error(message), { status });
+  if (!GATE_IDS.includes(gate)) throw bad(400, "Unknown gate.");
+  if (decision !== "approved" && decision !== "rejected") throw bad(400, "Decide approved or rejected.");
+  const file = manifestFile(ticket, dir);
+  if (!file) throw bad(404, `${ticket} isn't in the factory.`);
+  return withLock(file, () => {
+    const raw = JSON.parse(fs.readFileSync(file, "utf-8"));
+    const gates = Array.isArray(raw.gates) ? raw.gates : [];
+    const last = [...gates].reverse().find((g: any) => g && g.id === gate);
+    if (raw.done) throw bad(409, `${ticket} is finished.`);
+    if (!last || last.decision !== "pending") throw bad(409, `${ticket} isn't waiting at the ${GATE_LABELS[gate].toLowerCase()}.`);
+    const why = note && note.trim() ? note.trim().slice(0, 2000) : null;
+    gates.push({ id: gate, mode: last.mode ?? null, decision, by, risk: null, rationale: why, sha: null, at: now });
+    raw.gates = gates;
+    if (decision === "rejected") { raw.done = true; raw.error = `${GATE_LABELS[gate]} rejected by ${by}${why ? `: ${why}` : ""}`; }
+    raw.updatedAt = now;
+    const tmp = `${file}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(raw, null, 2) + "\n");
+    try { fs.renameSync(tmp, file); } catch { fs.copyFileSync(tmp, file); fs.unlinkSync(tmp); }
+    return normalizeManifest(raw)!;
+  });
+}
+
+/** The plan file a ticket's manifest names, when it's a plan (under ~/.claude/plans or the work folder): { path, text }. */
+export function readPlan(m: FactoryManifest, home: string, maxBytes = 300_000): { path: string; text: string } {
+  const bad = (status: number, message: string) => Object.assign(new Error(message), { status });
+  if (!m.plan) throw bad(404, `${m.ticket} has no plan file recorded.`);
+  const p = path.resolve(m.plan.replace(/^~(?=$|[\\/])/, home));
+  const inside = (root: string) => { const r = path.relative(path.resolve(root), p); return !!r && !r.startsWith("..") && !path.isAbsolute(r); };
+  if (!inside(path.join(home, ".claude", "plans")) && !(m.workroot && inside(m.workroot))) throw bad(403, "The plan isn't in ~/.claude/plans or the ticket's work folder.");
+  let st: fs.Stats;
+  try { st = fs.statSync(p); } catch { throw bad(404, `The plan file isn't there: ${m.plan}`); }
+  if (!st.isFile()) throw bad(404, `The plan isn't a file: ${m.plan}`);
+  const text = fs.readFileSync(p, "utf-8");
+  return { path: p, text: st.size > maxBytes ? text.slice(0, maxBytes) + "\n\n…(cut here)" : text };
+}
+
 // ------------------------------------------------------------------ the board
 
 /** One step of the pipeline: a stage that's on, or a gate that isn't off. */
@@ -446,6 +523,14 @@ export function factoryLaunchBlocker(cfg: FactoryConfig, configured: boolean, ti
   return null;
 }
 
+/** The gate an item waits at for a decision: its current step, a gate whose last decision is pending. */
+export function waitingGate(m: FactoryManifest, steps: FactoryItemStep[]): FactoryItem["waitingGate"] {
+  const s = steps.find((x) => x.current && x.kind === "gate" && x.state === "waiting");
+  if (!s || m.done) return null;
+  const last = s.decisions.at(-1)!;
+  return { id: s.id.replace(/^gate:/, "") as FactoryGateId, label: s.label, mode: last.mode, since: last.at, reason: last.rationale };
+}
+
 /** Every pipeline step for one item: its state, times, per-repo rows and gate decisions. */
 export function itemSteps(m: FactoryManifest, steps: PipelineStep[], column: string): FactoryItemStep[] {
   const colId = (s: PipelineStep) => (s.kind === "stage" ? s.id : `gate:${s.id}`);
@@ -504,7 +589,7 @@ export function buildBoard(cfg: FactoryConfig, configured: boolean, manifests: F
       prs: m.prs,
       risk: risk ? { level: risk.risk!, rationale: risk.rationale } : null,
       runIds: mine.map((r) => r.id),
-      steps: itemSteps(m, steps, column),
+      ...((s) => ({ steps: s, waitingGate: waitingGate(m, s) }))(itemSteps(m, steps, column)),
       mode: m.mode, spec: m.spec, plan: m.plan, error: m.error,
     };
   });
@@ -516,5 +601,6 @@ export function buildBoard(cfg: FactoryConfig, configured: boolean, manifests: F
     items,
     wip: { inFlight: items.filter((i) => i.column !== "done" && i.column !== "queued").length, limit: cfg.limits.wip },
     errors,
+    canDecide: false,
   };
 }

@@ -7,7 +7,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   applyPreset, boardColumns, buildBoard, defaultFactoryConfig, factoryConfigProblems, factoryConfigState, normalizeFactoryConfig,
-  GATE_IDS, SPEC_CHECKS, STAGE_IDS, factoryLaunchBlocker, normalizeManifest, pipeline, placeItem, readManifests, saveFactoryConfig,
+  GATE_IDS, SPEC_CHECKS, STAGE_IDS, factoryLaunchBlocker, manifestFile, normalizeManifest, readPlan, recordGateDecision, pipeline, placeItem, readManifests, saveFactoryConfig,
 } from "../src/factory.ts";
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), "factory-"));
@@ -303,4 +303,43 @@ test("the multirepo scripts read the policy as the dashboard does", async (t) =>
       security: { agentReview: d.security.agentReview, secretScan: d.security.secretScan, failOn: d.security.failOn, scanners: d.security.scanners },
     }, JSON.stringify(raw));
   }
+});
+
+test("a person's gate decision: recorded only where the ticket waits, a rejection ends it, the item shows where it waits", () => {
+  const dir = tmp();
+  const file = path.join(dir, "acme_api_7.json");
+  fs.writeFileSync(file, JSON.stringify({ ticket: "acme/api#7", startedAt: at, updatedAt: at, stages: [{ id: "plan", status: "done" }],
+    gates: [{ id: "spec", decision: "approved", at }, { id: "plan", mode: "human", decision: "pending", rationale: "A person decides the plan gate.", at }] }));
+  assert.equal(manifestFile("ACME/API#7", dir), file);
+
+  const item = buildBoard(defaultFactoryConfig(), true, readManifests(dir).manifests, []).items[0];
+  assert.deepEqual(item.waitingGate, { id: "plan", label: "Plan gate", mode: "human", since: at, reason: "A person decides the plan gate." });
+
+  assert.throws(() => recordGateDecision("acme/api#7", "prePr", "approved", "kim", null, dir), (e: any) => e.status === 409 && /isn't waiting at the pre-pr gate/.test(e.message));
+  assert.throws(() => recordGateDecision("ENG-404", "plan", "approved", "kim", null, dir), (e: any) => e.status === 404);
+  const m = recordGateDecision("acme/api#7", "plan", "approved", "kim", " looks right ", dir, "2026-10-27T11:00:00.000Z");
+  assert.deepEqual(m.gates.at(-1), { id: "plan", mode: "human", decision: "approved", by: "kim", risk: null, rationale: "looks right", sha: null, at: "2026-10-27T11:00:00.000Z" });
+  assert.equal(buildBoard(defaultFactoryConfig(), true, readManifests(dir).manifests, []).items[0].waitingGate, null);
+  assert.throws(() => recordGateDecision("acme/api#7", "plan", "rejected", "kim", null, dir), (e: any) => e.status === 409, "decided already");
+  assert.equal(fs.existsSync(`${file}.lock`), false);
+
+  fs.writeFileSync(file, JSON.stringify({ ticket: "acme/api#7", gates: [{ id: "spec", mode: "human", decision: "pending", at }] }));
+  const r = recordGateDecision("acme/api#7", "spec", "rejected", "kim", "too vague", dir);
+  assert.deepEqual([r.done, r.error], [true, "Spec gate rejected by kim: too vague"]);
+});
+
+test("readPlan reads a plan in ~/.claude/plans or the work folder, nothing else", () => {
+  const home = tmp();
+  const plans = path.join(home, ".claude", "plans");
+  fs.mkdirSync(plans, { recursive: true });
+  fs.writeFileSync(path.join(plans, "ENG-1-retries.md"), "# Plan\nRetry with backoff.");
+  const m = (plan: string, workroot: string | null = null) => manifest({ plan, workroot });
+  assert.deepEqual(readPlan(m("~/.claude/plans/ENG-1-retries.md"), home), { path: path.join(plans, "ENG-1-retries.md"), text: "# Plan\nRetry with backoff." });
+  assert.throws(() => readPlan(m("~/.ssh/id_rsa"), home), (e: any) => e.status === 403);
+  assert.throws(() => readPlan(m("~/.claude/plans/../../.ssh/id_rsa"), home), (e: any) => e.status === 403);
+  assert.throws(() => readPlan(m("~/.claude/plans/missing.md"), home), (e: any) => e.status === 404);
+  assert.throws(() => readPlan(manifest({ plan: null }), home), (e: any) => e.status === 404);
+  const wr = tmp();
+  fs.writeFileSync(path.join(wr, "PLAN.md"), "in the worktree");
+  assert.equal(readPlan(m(path.join(wr, "PLAN.md"), wr), home).text, "in the worktree");
 });

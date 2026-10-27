@@ -208,3 +208,15 @@ test("pre-PR: a failed build blocks, and a scan older than the last change doesn
   // A second-opinion review after the scan: scan again.
   assert.match(decide(p, { stages: [row("build", "api", "done", t(1)), row("security", "api", "done", t(3)), row("review", "api", "done", t(4))] }, "prePr").reason, /api \(older than the last change\)/);
 });
+
+test("a decision already made at a gate stands: approved passes, rejected stops", () => {
+  const p = on({ plan: "human" });
+  const g = (decision, by = "kim", rationale = null) => ({ gates: [{ id: "plan", decision: "pending" }, { id: "plan", decision, by, rationale, mode: "human" }] });
+  const ok = decide(p, g("approved"), "plan", { run: "autonomous", canAsk: false });
+  assert.deepEqual([ok.action, ok.reason, ok.decided], ["pass", "Already approved by kim.", true]);
+  const no = decide(p, g("rejected", "kim", "wrong approach"), "plan");
+  assert.deepEqual([no.action, no.reason], ["stop", "Rejected by kim: wrong approach."]);
+  assert.equal(decide(p, { gates: [{ id: "plan", decision: "pending" }] }, "plan", { run: "autonomous", canAsk: false }).action, "stop", "still pending: waits");
+  assert.equal(decide(null, g("approved"), "plan").action, "pass", "with no policy on too");
+  assert.equal(decide(on({ merge: "human" }), { gates: [{ id: "merge", decision: "approved" }] }, "merge").action, "handoff");
+});

@@ -952,6 +952,8 @@ export interface FactoryItem {
   runIds: string[];
   /** Every step of the pipeline for this item, in order (the Tickets view's track and details). */
   steps: FactoryItemStep[];
+  /** The gate it's waiting at for a decision (approve or reject on the Factory page), or null. */
+  waitingGate: { id: FactoryGateId; label: string; mode: FactoryGateMode | null; since: string; reason: string | null } | null;
   mode: FactoryManifest['mode'];
   spec: FactorySpec | null;
   plan: string | null;
@@ -978,6 +980,23 @@ export interface FactoryItemStep {
   decisions: { decision: 'pending' | 'approved' | 'rejected'; mode: FactoryGateMode | null; by: string | null; risk: 'low' | 'medium' | 'high' | null; rationale: string | null; at: string }[];
 }
 
+/** POST /api/factory/gate: a person's decision at a gate an item is waiting at. */
+export interface FactoryGateDecision {
+  ticket: string;
+  gate: FactoryGateId;
+  decision: 'approved' | 'rejected';
+  note?: string;
+  /** On approval, start the next implement run for the ticket (default true). */
+  resume?: boolean;
+}
+export interface FactoryGateResult {
+  /** Who it was recorded as. */
+  by: string;
+  /** The run started to carry on, or null (not asked, rejected, or refused: see launchError). */
+  run: RunMeta | null;
+  launchError: string | null;
+}
+
 export interface FactoryBoard {
   /** factory.json exists and says enabled. */
   enabled: boolean;
@@ -989,6 +1008,8 @@ export interface FactoryBoard {
   wip: { inFlight: number; limit: number };
   /** Manifests that couldn't be read. */
   errors: string[];
+  /** The person may decide gates here (full access). */
+  canDecide: boolean;
 }
 
 // ---------------------------------------------------------------- apps / workspaces

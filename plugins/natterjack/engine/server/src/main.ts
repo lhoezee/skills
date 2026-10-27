@@ -20,7 +20,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { restartSelf } from "./self-restart.ts";
 import type { Boot, ImportRunJob, LaunchRequest, ProfileInfo, PublishPlanResponse, RunEvent, RunMeta } from "../../shared/api.ts";
 import { implementTicket, runTicket } from "../../shared/run-ticket.ts";
@@ -42,7 +42,7 @@ import { RunManager, httpError, runLabel } from "./runs.ts";
 import { Deck, Scheduler } from "./deck.ts";
 import { Inbox } from "./inbox.ts";
 import { Reviews, numberParam, repoParam } from "./reviews.ts";
-import { type FactoryRun, buildBoard, factoryConfigState, factoryLaunchBlocker, readManifests, saveFactoryConfig } from "./factory.ts";
+import { type FactoryRun, buildBoard, factoryConfigState, factoryLaunchBlocker, manifestFile, normalizeManifest, readManifests, readPlan, recordGateDecision, saveFactoryConfig } from "./factory.ts";
 import { Watcher } from "./watches.ts";
 import { Usage } from "./usage.ts";
 import { UsageHistory } from "./usage-history.ts";
@@ -379,7 +379,26 @@ function factoryBoard() {
   const state = factoryConfigState(!isReader());
   const { manifests, errors } = readManifests();
   if (state.error) errors.unshift(state.error);
-  return buildBoard(state.config, state.exists && !state.error, manifests, factoryRuns(500), errors);
+  return { ...buildBoard(state.config, state.exists && !state.error, manifests, factoryRuns(500), errors), canDecide: !isReader() };
+}
+
+/** Who decides on this dashboard, for the gate audit trail: the workspace's git user.name, else the OS user. */
+let personCache: string | null = null;
+function person(): string {
+  if (personCache) return personCache;
+  let name = "";
+  try { name = execFileSync("git", ["-C", MAIN_WORKSPACE_PATH, "config", "user.name"], { encoding: "utf-8", windowsHide: true, timeout: 5000 }).trim(); } catch {}
+  personCache = name || (() => { try { return os.userInfo().username; } catch { return "someone"; } })();
+  return personCache;
+}
+
+/**
+ * A ticket on the Factory board, as its pipeline recorded it (any tracker's id shape, not just this
+ * workspace's pattern): it only has to name an existing manifest, which the callers check.
+ */
+function factoryTicketParam(v: unknown): string | null {
+  const s = String(v ?? "").trim();
+  return s && s.length <= 200 && !/[\u0000-\u001f]/.test(s) ? s : null;
 }
 
 /** `/implement X` or a plugin's `/multirepo:implement X` (not Explain: that only reads). */
@@ -1623,6 +1642,14 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
     if (p === "/api/reviews") return sendJson(res, await reviews.list(force));
     if (p === "/api/factory") return sendJson(res, factoryBoard());
     if (p === "/api/factory/config") return sendJson(res, factoryConfigState(!isReader()));
+    if (p === "/api/factory/plan") {
+      const ticket = factoryTicketParam(q("ticket"));
+      if (!ticket) return sendError(res, 400, "Invalid ticket id");
+      const file = manifestFile(ticket);
+      const m = file ? normalizeManifest(JSON.parse(fs.readFileSync(file, "utf-8"))) : null;
+      if (!m) return sendError(res, 404, `${ticket} isn't in the factory.`);
+      return sendJson(res, readPlan(m, os.homedir()));
+    }
     if (p === "/api/reviews/pr") {
       const repo = repoParam(q("repo"));
       const number = numberParam(q("number"));
@@ -2112,6 +2139,22 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
     const status = (await agentsNow()).find((a) => a.id === id);
     if (!status || status.problem) return sendError(res, 400, status?.problem || "That agent isn't available.");
     return sendJson(res, await reviews.agentReview(repo, number, id, status.label, body.force === true));
+  }
+  if (p === "/api/factory/gate") {
+    // A person's decision at a gate a ticket waits at; approving carries the work on (a new implement run).
+    if (isReader()) return sendError(res, 403, "Deciding a factory gate needs full access; yours is read-only (Settings → Access).");
+    const ticket = factoryTicketParam(body.ticket);
+    if (!ticket) return sendError(res, 400, "Invalid ticket id");
+    const by = person();
+    const m = recordGateDecision(ticket, body.gate, body.decision, by, typeof body.note === "string" ? body.note : null);
+    let run = null, launchError = null;
+    if (body.decision === "approved" && body.resume !== false) {
+      try {
+        run = launchRun({ presetId: deck.config().issues.implementPreset, args: { ticket: m.ticket }, options: { auto: m.mode === "autonomous" } }, "factory");
+      } catch (e) { launchError = (e as Error).message; }
+    }
+    live.refresh("factory");
+    return sendJson(res, { by, run, launchError });
   }
   if (p === "/api/factory/config") {
     // factory.json is the team's policy for agent work: full access only.

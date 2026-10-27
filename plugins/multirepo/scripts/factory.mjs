@@ -235,11 +235,21 @@ export function stageOn(policy, id) {
  *   stop       stop here and say on the ticket why (record it pending, or rejected)
  *   handoff    nothing more for this run (the merge gate: implement never merges)
  * `run` is how this run goes (interactive | autonomous); `canAsk` whether it can ask a person.
+ * A decision already made at the gate (a person on the Factory page, or an earlier run) stands:
+ * approved passes, rejected stops (except the merge gate, which this run never acts on).
  */
 export function decide(policy, manifest, gate, { run = "interactive", canAsk = run === "interactive" } = {}) {
   if (!GATES.includes(gate)) throw usage(`--gate must be one of ${GATES.join(", ")}`);
   const name = GATE_NAMES[gate];
   const p = normalizePolicy(policy);
+  const decided = [...((manifest && manifest.gates) || [])].reverse().find((g) => g && g.id === gate);
+  if (gate !== "merge" && decided && decided.decision !== "pending") {
+    const who = decided.by ? ` by ${decided.by}` : "";
+    const why = decided.rationale ? `: ${decided.rationale}` : "";
+    return decided.decision === "approved"
+      ? { gate, mode: decided.mode ?? null, action: "pass", reason: `Already approved${who}${why}.`, decided: true }
+      : { gate, mode: decided.mode ?? null, action: "stop", reason: `Rejected${who}${why}.`, decided: true };
+  }
   if (!p.enabled) return { gate, mode: null, action: "own-rules", reason: "No factory policy is on: follow this skill's own rules." };
   const mode = p.gates[gate];
   const out = (action, reason) => ({ gate, mode, action, reason });
