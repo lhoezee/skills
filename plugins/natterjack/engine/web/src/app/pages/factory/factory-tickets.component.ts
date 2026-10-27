@@ -66,13 +66,20 @@ const STATE: Record<FactoryItem['state'], { label: string; cls: string }> = {
                 <button class="linkish" type="button" (click)="togglePlan(it.ticket)">{{ plans()[it.ticket] !== undefined ? 'Hide the plan' : 'Read the plan' }}</button>
                 @if (plans()[it.ticket]; as p) { <pre class="plan">{{ p }}</pre> }
               }
-              @if (canDecide()) {
+              @if (it.reason === 'Question waiting' && it.runIds.length) {
+                <p class="faint">Its run is asking about this right now: <a [routerLink]="['/runs', it.runIds[0]]">answer the question there</a>.</p>
+              } @else if (canDecide()) {
                 <textarea rows="2" [ngModel]="notes()[it.ticket] || ''" (ngModelChange)="setNote(it.ticket, $event)" placeholder="A note for the record (optional; say why when rejecting)" [attr.aria-label]="'Note on the ' + g.label"></textarea>
                 <div class="btns">
-                  <button class="btn primary sm" type="button" (click)="decide(it, 'approved', true)" [disabled]="busy() === it.ticket">{{ busy() === it.ticket ? 'Saving…' : 'Approve and continue' }}</button>
-                  <button class="btn sm" type="button" (click)="decide(it, 'approved', false)" [disabled]="busy() === it.ticket" title="Record the approval without starting a run now">Approve only</button>
+                  @if (g.id === 'merge') {
+                    <button class="btn primary sm" type="button" (click)="decide(it, 'approved', false)" [disabled]="busy() === it.ticket" title="Record the approval; merging happens on the code host">{{ busy() === it.ticket ? 'Saving…' : 'Approve' }}</button>
+                  } @else {
+                    <button class="btn primary sm" type="button" (click)="decide(it, 'approved', true)" [disabled]="busy() === it.ticket">{{ busy() === it.ticket ? 'Saving…' : 'Approve and continue' }}</button>
+                    <button class="btn sm" type="button" (click)="decide(it, 'approved', false)" [disabled]="busy() === it.ticket" title="Record the approval without starting a run now">Approve only</button>
+                  }
                   <button class="btn danger sm" type="button" (click)="decide(it, 'rejected', false)" [disabled]="busy() === it.ticket">Reject</button>
                 </div>
+                @if (g.id === 'merge') { <p class="faint">Merging happens on the code host (or the Reviews page); this records the decision.</p> }
               } @else {
                 <p class="faint">Deciding needs full access (Settings → Access).</p>
               }
@@ -216,9 +223,12 @@ export class FactoryTicketsComponent {
   constructor() {
     const t = setInterval(() => this.now.set(Date.now()), 15_000);
     inject(DestroyRef).onDestroy(() => clearInterval(t));
+    // Open and scroll to ?ticket= once, when it first shows: not again on every live refresh.
+    let handled: string | null = null;
     effect(() => {
       const f = this.focus();
-      if (!f || !this.items().some((i) => i.ticket === f)) return;
+      if (!f || f === handled || !this.items().some((i) => i.ticket === f)) return;
+      handled = f;
       this.open.update((s) => new Set([...s, f]));
       setTimeout(() => document.getElementById('ticket-' + f)?.scrollIntoView({ block: 'start', behavior: 'smooth' }));
     });

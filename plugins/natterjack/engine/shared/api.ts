@@ -912,6 +912,8 @@ export interface FactoryManifest {
   plan: string | null;
   startedAt: string;
   updatedAt: string;
+  /** When the ticket's current round started (picking a finished one up again starts a new round). */
+  roundStartedAt: string | null;
   /** Spec readiness, scored when the pipeline read the ticket. */
   spec: FactorySpec | null;
   stages: { id: FactoryStageId; repo: string | null; agent: string | null; status: FactoryStepStatus; startedAt: string | null; endedAt: string | null; note: string | null }[];

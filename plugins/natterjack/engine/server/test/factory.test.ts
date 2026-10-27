@@ -7,7 +7,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   applyPreset, boardColumns, buildBoard, defaultFactoryConfig, factoryConfigProblems, factoryConfigState, normalizeFactoryConfig,
-  GATE_IDS, SPEC_CHECKS, STAGE_IDS, factoryLaunchBlocker, manifestFile, normalizeManifest, readPlan, recordGateDecision, pipeline, placeItem, readManifests, saveFactoryConfig,
+  GATE_IDS, SPEC_CHECKS, STAGE_IDS, factoryLaunchBlocker, manifestFile, normalizeManifest, readPlan, recordGateDecision, ticketFile, pipeline, placeItem, readManifests, saveFactoryConfig,
 } from "../src/factory.ts";
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), "factory-"));
@@ -305,41 +305,74 @@ test("the multirepo scripts read the policy as the dashboard does", async (t) =>
   }
 });
 
-test("a person's gate decision: recorded only where the ticket waits, a rejection ends it, the item shows where it waits", () => {
+test("a person's gate decision: recorded only where the ticket waits, a rejection ends it, the item shows where it waits", async () => {
   const dir = tmp();
   const file = path.join(dir, "acme_api_7.json");
   fs.writeFileSync(file, JSON.stringify({ ticket: "acme/api#7", startedAt: at, updatedAt: at, stages: [{ id: "plan", status: "done" }],
     gates: [{ id: "spec", decision: "approved", at }, { id: "plan", mode: "human", decision: "pending", rationale: "A person decides the plan gate.", at }] }));
-  assert.equal(manifestFile("ACME/API#7", dir), file);
+  assert.equal(ticketFile("acme/api#7"), "acme_api_7.json");
+  // Windows file names ignore case: the same file, whichever case the path comes back in.
+  const samePath = (a: string | null, b: string) => (process.platform === "win32" ? a?.toLowerCase() === b.toLowerCase() : a === b);
+  assert.ok(samePath(manifestFile("ACME/API#7", dir), file), "found whatever the ticket's case");
+  fs.writeFileSync(path.join(dir, "custom-name.json"), JSON.stringify({ ticket: "OPS-3" }));
+  assert.equal(manifestFile("OPS-3", dir), path.join(dir, "custom-name.json"), "another writer's file name");
 
-  const item = buildBoard(defaultFactoryConfig(), true, readManifests(dir).manifests, []).items[0];
+  const item = buildBoard(defaultFactoryConfig(), true, readManifests(dir).manifests, [], [], true).items.find((i) => i.ticket === "acme/api#7")!;
   assert.deepEqual(item.waitingGate, { id: "plan", label: "Plan gate", mode: "human", since: at, reason: "A person decides the plan gate." });
 
-  assert.throws(() => recordGateDecision("acme/api#7", "prePr", "approved", "kim", null, dir), (e: any) => e.status === 409 && /isn't waiting at the pre-pr gate/.test(e.message));
-  assert.throws(() => recordGateDecision("ENG-404", "plan", "approved", "kim", null, dir), (e: any) => e.status === 404);
-  const m = recordGateDecision("acme/api#7", "plan", "approved", "kim", " looks right ", dir, "2026-10-27T11:00:00.000Z");
+  await assert.rejects(recordGateDecision("acme/api#7", "prePr", "approved", "kim", null, { dir }), (e: any) => e.status === 409 && /isn't waiting at the pre-pr gate/.test(e.message));
+  await assert.rejects(recordGateDecision("ENG-404", "plan", "approved", "kim", null, { dir }), (e: any) => e.status === 404);
+  const m = await recordGateDecision("acme/api#7", "plan", "approved", "kim", " looks right ", { dir, now: "2026-10-27T11:00:00.000Z" });
   assert.deepEqual(m.gates.at(-1), { id: "plan", mode: "human", decision: "approved", by: "kim", risk: null, rationale: "looks right", sha: null, at: "2026-10-27T11:00:00.000Z" });
-  assert.equal(buildBoard(defaultFactoryConfig(), true, readManifests(dir).manifests, []).items[0].waitingGate, null);
-  assert.throws(() => recordGateDecision("acme/api#7", "plan", "rejected", "kim", null, dir), (e: any) => e.status === 409, "decided already");
+  assert.equal(buildBoard(defaultFactoryConfig(), true, readManifests(dir).manifests, []).items.find((i) => i.ticket === "acme/api#7")!.waitingGate, null);
+  await assert.rejects(recordGateDecision("acme/api#7", "plan", "rejected", "kim", null, { dir }), (e: any) => e.status === 409, "decided already");
   assert.equal(fs.existsSync(`${file}.lock`), false);
 
+  // factory.mjs holding the lock: the decision waits (without blocking), then gives up with a 409.
+  fs.writeFileSync(`${file}.lock`, "held");
+  const started = Date.now();
+  let ticked = 0;
+  const tick = setInterval(() => ticked++, 50);
   fs.writeFileSync(file, JSON.stringify({ ticket: "acme/api#7", gates: [{ id: "spec", mode: "human", decision: "pending", at }] }));
-  const r = recordGateDecision("acme/api#7", "spec", "rejected", "kim", "too vague", dir);
+  await assert.rejects(recordGateDecision("acme/api#7", "spec", "approved", "kim", null, { dir }), (e: any) => e.status === 409 && /busy/.test(e.message));
+  clearInterval(tick);
+  assert.ok(Date.now() - started >= 4_000 && ticked > 20, "the event loop kept running while it waited");
+  fs.unlinkSync(`${file}.lock`);
+
+  const r = await recordGateDecision("acme/api#7", "spec", "rejected", "kim", "too vague", { dir });
   assert.deepEqual([r.done, r.error], [true, "Spec gate rejected by kim: too vague"]);
 });
 
-test("readPlan reads a plan in ~/.claude/plans or the work folder, nothing else", () => {
+test("a new round leaves earlier gate decisions in the trail but out of the ticket's place", () => {
+  const t = (n: number) => `2026-10-27T1${n}:00:00.000Z`;
+  const m = manifest({ roundStartedAt: t(5), gates: [{ id: "spec", decision: "pending", at: t(1) }, { id: "spec", decision: "rejected", by: "kim", at: t(2) }] });
+  assert.equal(m.roundStartedAt, t(5));
+  const item = buildBoard(defaultFactoryConfig(), true, [m], []).items[0];
+  assert.deepEqual([item.column, item.state], ["queued", "idle"], "the old rejection doesn't fail it");
+});
+
+test("readPlan reads a plan in ~/.claude/plans or a workspace's own work folder, nothing else", () => {
   const home = tmp();
   const plans = path.join(home, ".claude", "plans");
   fs.mkdirSync(plans, { recursive: true });
   fs.writeFileSync(path.join(plans, "ENG-1-retries.md"), "# Plan\nRetry with backoff.");
-  const m = (plan: string, workroot: string | null = null) => manifest({ plan, workroot });
-  assert.deepEqual(readPlan(m("~/.claude/plans/ENG-1-retries.md"), home), { path: path.join(plans, "ENG-1-retries.md"), text: "# Plan\nRetry with backoff." });
-  assert.throws(() => readPlan(m("~/.ssh/id_rsa"), home), (e: any) => e.status === 403);
-  assert.throws(() => readPlan(m("~/.claude/plans/../../.ssh/id_rsa"), home), (e: any) => e.status === 403);
-  assert.throws(() => readPlan(m("~/.claude/plans/missing.md"), home), (e: any) => e.status === 404);
-  assert.throws(() => readPlan(manifest({ plan: null }), home), (e: any) => e.status === 404);
-  const wr = tmp();
-  fs.writeFileSync(path.join(wr, "PLAN.md"), "in the worktree");
-  assert.equal(readPlan(m(path.join(wr, "PLAN.md"), wr), home).text, "in the worktree");
+  fs.mkdirSync(path.join(home, ".ssh"));
+  fs.writeFileSync(path.join(home, ".ssh", "id_rsa"), "secret");
+  const m = (plan: string | null, workroot: string | null = null) => manifest({ plan, workroot });
+  assert.deepEqual(readPlan(m("~/.claude/plans/ENG-1-retries.md"), home, []), { path: fs.realpathSync(path.join(plans, "ENG-1-retries.md")), text: "# Plan\nRetry with backoff." });
+  assert.throws(() => readPlan(m("~/.ssh/id_rsa"), home, []), (e: any) => e.status === 403);
+  assert.throws(() => readPlan(m("~/.claude/plans/../../.ssh/id_rsa"), home, []), (e: any) => e.status === 403);
+  assert.throws(() => readPlan(m("~/.claude/plans/missing.md"), home, []), (e: any) => e.status === 404);
+  assert.throws(() => readPlan(m(null), home, []), (e: any) => e.status === 404);
+  // The manifest's own workroot isn't trusted: only a folder of this workspace's.
+  assert.throws(() => readPlan(m(path.join(home, ".ssh", "id_rsa"), home), home, []), (e: any) => e.status === 403);
+  const ws = tmp();
+  const wt = path.join(ws, "worktrees", "eng-1");
+  fs.mkdirSync(wt, { recursive: true });
+  fs.writeFileSync(path.join(wt, "PLAN.md"), "in the worktree");
+  assert.equal(readPlan(m(path.join(wt, "PLAN.md"), wt), home, [ws]).text, "in the worktree");
+  assert.throws(() => readPlan(m(path.join(wt, "PLAN.md"), wt), home, [tmp()]), (e: any) => e.status === 403);
+  // A symlink in ~/.claude/plans pointing out is followed to where it points, and refused.
+  try { fs.symlinkSync(path.join(home, ".ssh", "id_rsa"), path.join(plans, "sneaky.md")); } catch { return; }
+  assert.throws(() => readPlan(m("~/.claude/plans/sneaky.md"), home, []), (e: any) => e.status === 403);
 });

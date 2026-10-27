@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { decide, normalizePolicy, stageOn, wip } from "../factory.mjs";
+import { decide, normalizePolicy, stageOn, update, wip } from "../factory.mjs";
 import { changedFiles, runScanner, scanSecrets, securityScan } from "../security-scan.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -219,4 +219,33 @@ test("a decision already made at a gate stands: approved passes, rejected stops"
   assert.equal(decide(p, { gates: [{ id: "plan", decision: "pending" }] }, "plan", { run: "autonomous", canAsk: false }).action, "stop", "still pending: waits");
   assert.equal(decide(null, g("approved"), "plan").action, "pass", "with no policy on too");
   assert.equal(decide(on({ merge: "human" }), { gates: [{ id: "merge", decision: "approved" }] }, "merge").action, "handoff");
+});
+
+test("a decision stands only as a person's answer to the latest request, in this round, and pre-PR only until there's new work", () => {
+  const p = on({ prePr: "auto", plan: "human", spec: "auto" });
+  const t = (n) => `2026-10-27T1${n}:00:00.000Z`;
+  // An automatic approval from an earlier run doesn't stand: the checks run again.
+  const autoOk = { gates: [{ id: "prePr", decision: "approved", by: "auto", at: t(0) }], stages: [] };
+  assert.notEqual(decide(p, autoOk, "prePr").reason, "Already approved by auto.");
+  // A person's approval of a pending pre-PR gate stands until a build, review or scan runs after it.
+  const asked = [{ id: "prePr", decision: "pending", at: t(0) }, { id: "prePr", decision: "approved", by: "kim", at: t(1) }];
+  assert.equal(decide(p, { gates: asked, stages: [] }, "prePr").action, "pass");
+  assert.notEqual(decide(p, { gates: asked, stages: [{ id: "build", repo: "api", status: "done", endedAt: t(2) }] }, "prePr").reason, "Already approved by kim.");
+  assert.notEqual(decide(p, { gates: asked, stages: [{ id: "review", repo: "api", status: "running" }] }, "prePr").reason, "Already approved by kim.");
+  // A rejection from an earlier round (the ticket was picked up again) no longer stands.
+  const rejected = [{ id: "spec", decision: "pending", at: t(0) }, { id: "spec", decision: "rejected", by: "kim", rationale: "too vague", at: t(1) }];
+  assert.equal(decide(p, { gates: rejected, roundStartedAt: t(0) }, "spec").action, "stop");
+  assert.match(decide(p, { gates: rejected, roundStartedAt: t(3), spec: { score: 90, level: "ready", readyAt: 80 } }, "spec").reason, /Spec readiness 90 is Ready/);
+});
+
+test("starting a finished ticket again starts a new round", () => {
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), "round-"));
+  fs.mkdirSync(path.join(ws, ".claude", "dashboard"), { recursive: true });
+  const at = (n) => `2026-10-27T1${n}:00:00.000Z`;
+  update("start", { ticket: "ENG-1" }, { start: ws, now: at(0) });
+  update("start", { ticket: "ENG-1", title: "again, same round" }, { start: ws, now: at(1) });
+  assert.equal(update("show", { ticket: "ENG-1" }, { start: ws }).manifest.roundStartedAt, at(0));
+  update("done", { ticket: "ENG-1", error: "spec not ready" }, { start: ws, now: at(2) });
+  const m = update("start", { ticket: "ENG-1" }, { start: ws, now: at(3) }).manifest;
+  assert.deepEqual([m.roundStartedAt, m.done, m.error], [at(3), false, null]);
 });

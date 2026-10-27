@@ -276,6 +276,7 @@ export function normalizeManifest(raw: any): FactoryManifest | null {
     plan: typeof raw.plan === "string" ? raw.plan : null,
     startedAt: started,
     updatedAt: iso(raw.updatedAt) || started,
+    roundStartedAt: iso(raw.roundStartedAt),
     spec: normalizeSpec(raw.spec),
     stages: (Array.isArray(raw.stages) ? raw.stages : []).filter((s: any) => s && STAGE_IDS.includes(s.id)).slice(0, 500).map((s: any) => ({
       id: s.id, repo: optStr(s.repo), agent: optStr(s.agent), status: pick(s.status, STEP, "pending"),
@@ -333,11 +334,13 @@ export function readManifests(dir = manifestDir(), limit = MAX_MANIFESTS): { man
 
 // ------------------------------------------------------------------ decisions from the dashboard
 
+/** factory.mjs's lock on a manifest: `<file>.lock`, created exclusively, broken when older than this. */
 const LOCK_STALE_MS = 10_000;
 const LOCK_WAIT_MS = 5_000;
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-/** Runs fn holding `<file>.lock` (factory.mjs takes the same lock): created exclusively, broken when stale. */
-function withLock<T>(file: string, fn: () => T): T {
+/** Runs fn holding `<file>.lock` (the lock factory.mjs takes), waiting without blocking the server. */
+async function withLock<T>(file: string, fn: () => T): Promise<T> {
   const lock = `${file}.lock`;
   const deadline = Date.now() + LOCK_WAIT_MS;
   let fd: number | null = null;
@@ -346,7 +349,7 @@ function withLock<T>(file: string, fn: () => T): T {
       if (e.code !== "EEXIST") throw e;
       try { if (Date.now() - fs.statSync(lock).mtimeMs > LOCK_STALE_MS) { fs.unlinkSync(lock); continue; } } catch { continue; }
       if (Date.now() > deadline) throw Object.assign(new Error("The ticket's progress file is busy; try again."), { status: 409 });
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+      await sleep(25);
     }
   }
   try { return fn(); } finally {
@@ -355,22 +358,33 @@ function withLock<T>(file: string, fn: () => T): T {
   }
 }
 
-/** The manifest file for a ticket (by the ticket inside it, case-insensitively), or null. */
+/** A ticket id as factory.mjs names its file: owner/repo#7 → owner_repo_7.json. */
+export function ticketFile(ticket: string): string {
+  return String(ticket).trim().replace(/[^A-Za-z0-9._-]+/g, "_").replace(/^\.+/, "_") + ".json";
+}
+
+/** The manifest file for a ticket: by factory.mjs's file name, else (another writer's name) the newest manifests' tickets. */
 export function manifestFile(ticket: string, dir = manifestDir()): string | null {
-  let files: string[] = [];
-  try { files = fs.readdirSync(dir).filter((f) => f.endsWith(".json")); } catch { return null; }
+  const named = path.join(dir, ticketFile(ticket));
   const want = ticket.trim().toLowerCase();
-  for (const f of files) {
-    try { if (String(JSON.parse(fs.readFileSync(path.join(dir, f), "utf-8")).ticket || "").toLowerCase() === want) return path.join(dir, f); } catch {}
-  }
+  const holds = (file: string) => { try { return String(JSON.parse(fs.readFileSync(file, "utf-8")).ticket || "").toLowerCase() === want; } catch { return false; } };
+  if (fs.existsSync(named) && holds(named)) return named;
+  readManifests(dir, Infinity);
+  for (const [file, hit] of parsed) if (path.dirname(file) === dir && hit.manifest && hit.manifest.ticket.toLowerCase() === want) return file;
   return null;
+}
+
+/** The gate rows of the ticket's current round (picking a finished ticket up again starts a new one). */
+export function roundGates(m: FactoryManifest): FactoryManifest["gates"] {
+  return m.roundStartedAt ? m.gates.filter((g) => g.at >= m.roundStartedAt!) : m.gates;
 }
 
 /**
  * Records a person's decision at the gate a ticket is waiting at: appended to its gates (the audit
  * trail). A rejection ends the item (done, with why). Refused when the ticket isn't waiting there.
  */
-export function recordGateDecision(ticket: string, gate: FactoryGateId, decision: "approved" | "rejected", by: string, note: string | null, dir = manifestDir(), now = new Date().toISOString()): FactoryManifest {
+export async function recordGateDecision(ticket: string, gate: FactoryGateId, decision: "approved" | "rejected", by: string, note: string | null,
+  { dir = manifestDir(), now = new Date().toISOString() }: { dir?: string; now?: string } = {}): Promise<FactoryManifest> {
   const bad = (status: number, message: string) => Object.assign(new Error(message), { status });
   if (!GATE_IDS.includes(gate)) throw bad(400, "Unknown gate.");
   if (decision !== "approved" && decision !== "rejected") throw bad(400, "Decide approved or rejected.");
@@ -387,22 +401,29 @@ export function recordGateDecision(ticket: string, gate: FactoryGateId, decision
     raw.gates = gates;
     if (decision === "rejected") { raw.done = true; raw.error = `${GATE_LABELS[gate]} rejected by ${by}${why ? `: ${why}` : ""}`; }
     raw.updatedAt = now;
-    const tmp = `${file}.${process.pid}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(raw, null, 2) + "\n");
-    try { fs.renameSync(tmp, file); } catch { fs.copyFileSync(tmp, file); fs.unlinkSync(tmp); }
+    writeConfigFile(path.basename(file), raw, path.dirname(file));
     return normalizeManifest(raw)!;
   });
 }
 
-/** The plan file a ticket's manifest names, when it's a plan (under ~/.claude/plans or the work folder): { path, text }. */
-export function readPlan(m: FactoryManifest, home: string, maxBytes = 300_000): { path: string; text: string } {
+/**
+ * The plan file a ticket's manifest names: { path, text }. Only from ~/.claude/plans, or from the
+ * ticket's work folder when that's one of this workspace's own (`workspaces`: main and its
+ * worktrees). The manifest's word alone isn't trusted, and symlinks are resolved first.
+ */
+export function readPlan(m: FactoryManifest, home: string, workspaces: string[], maxBytes = 300_000): { path: string; text: string } {
   const bad = (status: number, message: string) => Object.assign(new Error(message), { status });
   if (!m.plan) throw bad(404, `${m.ticket} has no plan file recorded.`);
-  const p = path.resolve(m.plan.replace(/^~(?=$|[\\/])/, home));
-  const inside = (root: string) => { const r = path.relative(path.resolve(root), p); return !!r && !r.startsWith("..") && !path.isAbsolute(r); };
-  if (!inside(path.join(home, ".claude", "plans")) && !(m.workroot && inside(m.workroot))) throw bad(403, "The plan isn't in ~/.claude/plans or the ticket's work folder.");
-  let st: fs.Stats;
-  try { st = fs.statSync(p); } catch { throw bad(404, `The plan file isn't there: ${m.plan}`); }
+  const real = (p: string) => { try { return fs.realpathSync(p); } catch { return null; } };
+  const p = real(path.resolve(m.plan.replace(/^~(?=$|[\\/])/, home)));
+  if (!p) throw bad(404, `The plan file isn't there: ${m.plan}`);
+  const under = (root: string | null, x: string) => { if (!root) return false; const r = path.relative(root, x); return r === "" || (!r.startsWith("..") && !path.isAbsolute(r)); };
+  const roots = workspaces.map(real).filter((x): x is string => !!x);
+  const workroot = m.workroot ? real(m.workroot) : null;
+  const workOk = !!workroot && roots.some((r) => under(r, workroot));
+  const plans = real(path.join(home, ".claude", "plans"));
+  if (!(plans && under(plans, p) && p !== plans) && !(workOk && under(workroot, p))) throw bad(403, "The plan isn't in ~/.claude/plans or the ticket's work folder.");
+  const st = fs.statSync(p);
   if (!st.isFile()) throw bad(404, `The plan isn't a file: ${m.plan}`);
   const text = fs.readFileSync(p, "utf-8");
   return { path: p, text: st.size > maxBytes ? text.slice(0, maxBytes) + "\n\n…(cut here)" : text };
@@ -443,7 +464,8 @@ export interface FactoryRun {
 const WHO: Record<FactoryGateMode, string> = { human: "you", approver: "the Approver", auto: "its checks", off: "" };
 
 /** Where an item is: the first step it hasn't finished, and whether it's moving, waiting or failing. */
-export function placeItem(m: FactoryManifest, steps: PipelineStep[]): { column: string; state: FactoryItem["state"]; reason: string | null } {
+export function placeItem(full: FactoryManifest, steps: PipelineStep[]): { column: string; state: FactoryItem["state"]; reason: string | null } {
+  const m = { ...full, gates: roundGates(full) };
   // Stopped short (spec or plan rejected, aborted): it stays where it stopped, failing, with why.
   if (m.done && m.error) {
     const at = placeItem({ ...m, done: false, error: null }, steps);
@@ -550,7 +572,7 @@ export function itemSteps(m: FactoryManifest, steps: PipelineStep[], column: str
       const finished = state === "done" || state === "skipped" || state === "failed";
       return { ...base, repos, state, startedAt: minIso(rows.map((r) => r.startedAt)), endedAt: finished ? maxIso(rows.map((r) => r.endedAt)) : null };
     }
-    const hist = m.gates.filter((g) => g.id === s.id).map((g) => ({ decision: g.decision, mode: g.mode, by: g.by, risk: g.risk, rationale: g.rationale, at: g.at }));
+    const hist = roundGates(m).filter((g) => g.id === s.id).map((g) => ({ decision: g.decision, mode: g.mode, by: g.by, risk: g.risk, rationale: g.rationale, at: g.at }));
     const last = hist.at(-1);
     const state: FactoryItemStep["state"] = !last ? (laterActivity(i) || m.done ? "skipped" : "pending")
       : last.decision === "approved" ? "done" : last.decision === "rejected" ? "failed" : "waiting";
@@ -559,7 +581,7 @@ export function itemSteps(m: FactoryManifest, steps: PipelineStep[], column: str
 }
 
 /** The Factory board: every manifest placed in its column, joined with its ticket's runs. */
-export function buildBoard(cfg: FactoryConfig, configured: boolean, manifests: FactoryManifest[], runs: FactoryRun[], errors: string[] = []): FactoryBoard {
+export function buildBoard(cfg: FactoryConfig, configured: boolean, manifests: FactoryManifest[], runs: FactoryRun[], errors: string[] = [], canDecide = false): FactoryBoard {
   const steps = pipeline(cfg);
   const order = new Map(steps.map((s, i) => [s.kind === "stage" ? s.id : `gate:${s.id}`, i]));
   const items = manifests.map((m): FactoryItem => {
@@ -578,6 +600,7 @@ export function buildBoard(cfg: FactoryConfig, configured: boolean, manifests: F
       return { repo, status: best ? best.status : "pending" as FactoryStepStatus, stage: best ? best.id : null };
     });
     const risk = m.gates.filter((g) => g.risk).at(-1);
+    const itemStepList = itemSteps(m, steps, column);
     return {
       ticket: m.ticket, title: m.title, url: m.url, column, state, reason,
       branch: m.branch, workroot: m.workroot, repos,
@@ -589,7 +612,8 @@ export function buildBoard(cfg: FactoryConfig, configured: boolean, manifests: F
       prs: m.prs,
       risk: risk ? { level: risk.risk!, rationale: risk.rationale } : null,
       runIds: mine.map((r) => r.id),
-      ...((s) => ({ steps: s, waitingGate: waitingGate(m, s) }))(itemSteps(m, steps, column)),
+      steps: itemStepList,
+      waitingGate: waitingGate(m, itemStepList),
       mode: m.mode, spec: m.spec, plan: m.plan, error: m.error,
     };
   });
@@ -601,6 +625,6 @@ export function buildBoard(cfg: FactoryConfig, configured: boolean, manifests: F
     items,
     wip: { inFlight: items.filter((i) => i.column !== "done" && i.column !== "queued").length, limit: cfg.limits.wip },
     errors,
-    canDecide: false,
+    canDecide,
   };
 }

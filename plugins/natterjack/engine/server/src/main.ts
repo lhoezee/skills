@@ -379,17 +379,22 @@ function factoryBoard() {
   const state = factoryConfigState(!isReader());
   const { manifests, errors } = readManifests();
   if (state.error) errors.unshift(state.error);
-  return { ...buildBoard(state.config, state.exists && !state.error, manifests, factoryRuns(500), errors), canDecide: !isReader() };
+  return buildBoard(state.config, state.exists && !state.error, manifests, factoryRuns(500), errors, !isReader());
 }
 
-/** Who decides on this dashboard, for the gate audit trail: the workspace's git user.name, else the OS user. */
-let personCache: string | null = null;
-function person(): string {
-  if (personCache) return personCache;
+/**
+ * Who decides, for the gate audit trail: the signed-in person on a hosted dashboard; else the
+ * workspace's git user.name (looked up again after a minute), else the OS user.
+ */
+let personCache: { at: number; name: string } | null = null;
+function person(user: string | null): string {
+  if (user) return user;
+  if (personCache && Date.now() - personCache.at < 60_000) return personCache.name;
   let name = "";
   try { name = execFileSync("git", ["-C", MAIN_WORKSPACE_PATH, "config", "user.name"], { encoding: "utf-8", windowsHide: true, timeout: 5000 }).trim(); } catch {}
-  personCache = name || (() => { try { return os.userInfo().username; } catch { return "someone"; } })();
-  return personCache;
+  name = name || (() => { try { return os.userInfo().username; } catch { return "someone"; } })();
+  personCache = { at: Date.now(), name };
+  return name;
 }
 
 /**
@@ -1648,7 +1653,7 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
       const file = manifestFile(ticket);
       const m = file ? normalizeManifest(JSON.parse(fs.readFileSync(file, "utf-8"))) : null;
       if (!m) return sendError(res, 404, `${ticket} isn't in the factory.`);
-      return sendJson(res, readPlan(m, os.homedir()));
+      return sendJson(res, readPlan(m, os.homedir(), listWorkspaces().map((w) => w.path)));
     }
     if (p === "/api/reviews/pr") {
       const repo = repoParam(q("repo"));
@@ -2145,10 +2150,14 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
     if (isReader()) return sendError(res, 403, "Deciding a factory gate needs full access; yours is read-only (Settings → Access).");
     const ticket = factoryTicketParam(body.ticket);
     if (!ticket) return sendError(res, 400, "Invalid ticket id");
-    const by = person();
-    const m = recordGateDecision(ticket, body.gate, body.decision, by, typeof body.note === "string" ? body.note : null);
+    // The ticket's own run may be asking about this gate right now: it's answered there, not here.
+    const going = factoryRuns().find((r) => r.implement && r.ticket && r.ticket.toLowerCase() === ticket.toLowerCase() && (r.status === "running" || r.status === "waiting"));
+    if (going) return sendError(res, 409, `${ticket}'s run is still going${going.status === "waiting" ? " and asking a question" : ""}: decide there (Activity), or stop it first.`);
+    const by = person(user);
+    const m = await recordGateDecision(ticket, body.gate, body.decision, by, typeof body.note === "string" ? body.note : null);
     let run = null, launchError = null;
-    if (body.decision === "approved" && body.resume !== false) {
+    // The merge gate is decided on the code host: approving records it, it never starts a run.
+    if (body.decision === "approved" && body.resume !== false && body.gate !== "merge") {
       try {
         run = launchRun({ presetId: deck.config().issues.implementPreset, args: { ticket: m.ticket }, options: { auto: m.mode === "autonomous" } }, "factory");
       } catch (e) { launchError = (e as Error).message; }
