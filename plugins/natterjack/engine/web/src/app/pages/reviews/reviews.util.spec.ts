@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ReviewPr } from '../../../../../shared/api';
-import { filterPrs, needsSummary, prKey } from './reviews.util';
+import { authorsOf, filterPrs, needsSummary, prKey } from './reviews.util';
 
 function pr(over: Partial<ReviewPr> = {}): ReviewPr {
   return {
@@ -32,6 +32,18 @@ describe('filterPrs', () => {
     expect(filterPrs(prs, { ...base, text: 'kim login' }).map((p) => p.number)).toEqual([7]);
     expect(filterPrs(prs, { ...base, text: 'web#7' }).length).toBe(1);
     expect(filterPrs(prs, { ...base, text: 'retries kim' }).length).toBe(0);
+  });
+
+  it('matches the author exactly', () => {
+    const prs = [pr({ number: 1, author: 'sam' }), pr({ number: 2, author: 'samantha' }), pr({ number: 3, author: null })];
+    expect(filterPrs(prs, { ...base, author: 'sam' }).map((p) => p.number)).toEqual([1]);
+  });
+});
+
+describe('authorsOf', () => {
+  it('lists each author once, most PRs first, then by name', () => {
+    const prs = [pr({ author: 'zoe' }), pr({ author: 'kim' }), pr({ author: 'zoe' }), pr({ author: 'amy' }), pr({ author: null })];
+    expect(authorsOf(prs)).toEqual([{ login: 'zoe', count: 2 }, { login: 'amy', count: 1 }, { login: 'kim', count: 1 }]);
   });
 });
 

@@ -1590,11 +1590,12 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
       if (!repo || !number) return sendError(res, 400, "Invalid pull request");
       return sendJson(res, await reviews.detail(repo, number));
     }
-    if (p === "/api/reviews/diff" || p === "/api/reviews/guide" || p === "/api/reviews/security") {
+    if (p === "/api/reviews/diff" || p === "/api/reviews/guide" || p === "/api/reviews/security" || p === "/api/reviews/agent") {
       const repo = repoParam(q("repo"));
       const number = numberParam(q("number"));
       if (!repo || !number) return sendError(res, 400, "Invalid pull request");
       if (p === "/api/reviews/diff") return sendJson(res, await reviews.diff(repo, number));
+      if (p === "/api/reviews/agent") return sendJson(res, await reviews.savedAgentReview(repo, number));
       return sendJson(res, p === "/api/reviews/guide" ? await reviews.savedGuide(repo, number) : await reviews.savedSecurity(repo, number));
     }
     if (p === "/api/usage") return sendJson(res, await usage.get(force));
@@ -2062,6 +2063,23 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
     if (!repo || !number) return sendError(res, 400, "Invalid pull request");
     const force = body.force === true;
     return sendJson(res, p === "/api/reviews/guide" ? await reviews.guide(repo, number, force) : await reviews.security(repo, number, force));
+  }
+  if (p === "/api/reviews/agent") {
+    // One headless turn of the chosen agent; it can only read the PR (agent-review.ts).
+    const repo = repoParam(body.repo);
+    const number = numberParam(body.number);
+    if (!repo || !number) return sendError(res, 400, "Invalid pull request");
+    const id = isAgentId(body.agent) ? body.agent : "claude";
+    const status = (await agentsNow()).find((a) => a.id === id);
+    if (!status || status.problem) return sendError(res, 400, status?.problem || "That agent isn't available.");
+    return sendJson(res, await reviews.agentReview(repo, number, id, status.label, body.force === true));
+  }
+  if (p === "/api/reviews/submit") {
+    // Posts to GitHub as the person: only ever from their click on the Reviews page.
+    const repo = repoParam(body.repo);
+    const number = numberParam(body.number);
+    if (!repo || !number) return sendError(res, 400, "Invalid pull request");
+    return sendJson(res, await reviews.submit({ repo, number, event: body.event, body: String(body.body ?? ""), comments: Array.isArray(body.comments) ? body.comments : [] }));
   }
   if (p.startsWith("/api/meetings/")) {
     const what = p.slice("/api/meetings/".length);

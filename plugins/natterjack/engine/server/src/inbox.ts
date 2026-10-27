@@ -28,6 +28,23 @@ export function ghText(args: string[], maxBuffer = 4 * 1024 * 1024): Promise<str
   });
 }
 
+/** Runs gh with `input` on stdin (e.g. `gh api ... --input -`) and parses its JSON output. */
+export function ghWithInput(args: string[], input: string): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const child = execFile("gh", args, { timeout: 30000, windowsHide: true, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
+      if (err) {
+        // gh api prints GitHub's error body on stdout; its message says what was wrong.
+        let msg = "";
+        try { const b = JSON.parse(stdout); msg = [b.message, ...(Array.isArray(b.errors) ? b.errors.map((e: any) => (typeof e === "string" ? e : e.message)) : [])].filter(Boolean).join(": "); } catch {}
+        return reject(new Error(msg || (stderr || err.message).trim().split("\n")[0]));
+      }
+      try { resolve(JSON.parse(stdout || "null")); } catch { resolve(null); }
+    });
+    child.stdin!.on("error", () => {});
+    child.stdin!.end(input);
+  });
+}
+
 export function rollupState(checks): "none" | "failing" | "pending" | "passing" {
   if (!Array.isArray(checks) || checks.length === 0) return "none";
   let pending = false;

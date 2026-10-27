@@ -719,6 +719,30 @@ export interface SecurityFinding { severity: Severity; title: string; text: stri
 /** GET/POST /api/reviews/security: an agent's security review of the diff, for one head commit. */
 export interface SecurityReview { sha: string; at: string; summary: string; findings: SecurityFinding[] }
 
+/** "Ask agent for review": what a coding agent (Claude Code, Copilot, Codex) found in a PR. */
+export type AgentFindingCategory = 'bug' | 'performance' | 'security' | 'nitpick';
+export interface AgentFinding {
+  id: string;
+  category: AgentFindingCategory;
+  severity: 'high' | 'medium' | 'low';
+  title: string;
+  text: string;
+  /** Where it is: a file in the PR, and a line of the new file. */
+  file: string | null;
+  line: number | null;
+  /** The line is in the diff, so it can be a line comment on GitHub (otherwise it goes in the review's text). */
+  onDiff: boolean;
+}
+export interface AgentReview { sha: string; at: string; agent: AgentId; agentLabel: string; summary: string; findings: AgentFinding[] }
+
+/** A review the dashboard posts to the PR as the person: a comment, an approval or a request for changes. */
+export type ReviewEvent = 'COMMENT' | 'APPROVE' | 'REQUEST_CHANGES';
+export interface ReviewSubmit {
+  repo: string; number: number; event: ReviewEvent; body: string;
+  comments: { path: string; line: number; body: string }[];
+}
+export interface ReviewSubmitted { url: string | null; state: string; comments: number; movedToBody: number }
+
 // ---------------------------------------------------------------- apps / workspaces
 
 export interface AppStatus {

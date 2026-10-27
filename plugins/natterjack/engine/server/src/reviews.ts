@@ -9,15 +9,22 @@
  * The PR's text and diff are data in that prompt and the model has no tools, so a PR that
  * tries to instruct it can at worst change its own summary.
  *
+ * "Ask agent for review" runs one of the person's coding agents over the PR (agent-review.ts) and
+ * keeps its findings per head commit too. Posting findings, approving and requesting changes go
+ * to GitHub as the person, only when they click; the agent itself can't write anything.
+ *
  * The list is cached for LIST_TTL_MS; gh is slow and rate-limited.
  */
 
 import fs from "node:fs";
 import path from "node:path";
-import type { ReviewDiff, ReviewGuide, ReviewList, ReviewPr, ReviewPrDetail, ReviewSummary, SecurityReview } from "../../shared/api.ts";
+import type {
+  AgentId, AgentReview, ReviewDiff, ReviewEvent, ReviewGuide, ReviewList, ReviewPr, ReviewPrDetail, ReviewSubmit, ReviewSubmitted, ReviewSummary, SecurityReview,
+} from "../../shared/api.ts";
+import { type AgentReviewRun, agentReviewPrompt, lineOnDiff, parseAgentReview, runAgentReview, sourceFor } from "./agent-review.ts";
 import { askClaude } from "./claude.ts";
 import { workspaceConfig } from "./config.ts";
-import { gh as ghJson, ghText, rollupState } from "./inbox.ts";
+import { gh as ghJson, ghText, ghWithInput, rollupState } from "./inbox.ts";
 import { type GuideInput, GuideStore, guidePrompt, parseDiff, parseGuide, parseSecurity, securityPrompt } from "./review-guide.ts";
 
 const LIST_TTL_MS = 2 * 60 * 1000;
@@ -59,6 +66,10 @@ export interface ReviewsDeps {
   askDeep: (prompt: string) => Promise<string>;
   /** The tracker ticket a PR names in its title or branch, or null. */
   ticket: (text: string) => Promise<{ id: string; title: string; url: string; description: string } | null>;
+  /** One agent review turn (agent-review.ts); answers with the agent's final text. */
+  review: (run: AgentReviewRun & { repo: string; number: number }) => Promise<string>;
+  /** gh with a JSON body on stdin (posting a review). */
+  ghPost: (args: string[], input: string) => Promise<any>;
   ledgerDir: string;
   /** workspace.json codeHost. */
   codeHost: () => { kind: string; orgs: string[] };
@@ -121,6 +132,8 @@ export class Reviews {
       ask: (prompt) => askClaude(prompt, { model: SUMMARY_MODEL }),
       askDeep: (prompt) => askClaude(prompt, { model: GUIDE_MODEL, timeoutMs: GUIDE_TIMEOUT_MS }),
       ticket: async () => null,
+      review: runAgentReview,
+      ghPost: ghWithInput,
       codeHost: () => workspaceConfig().codeHost,
       ...deps,
     };
@@ -311,6 +324,63 @@ export class Reviews {
   security(repo: string, number: number, force = false): Promise<SecurityReview> {
     return this.once(`security:${repo}#${number}`, () => this.makeDeep(repo, number, force, "security", async (input, ids) =>
       parseSecurity(await this.deps.askDeep(securityPrompt(input)), ids)));
+  }
+
+  /** The saved agent review for the PR's current commit, or null. */
+  async savedAgentReview(repo: string, number: number): Promise<AgentReview | null> {
+    const d = await this.view(repo, number, "headRefOid");
+    return this.store.get<AgentReview>(repo, number, d.headRefOid, "agent");
+  }
+
+  /**
+   * A coding agent's review of the PR (bugs, performance, security, nitpicks) for its current
+   * commit: the saved one when the same agent made it, or a new one (force: a new one anyway).
+   */
+  agentReview(repo: string, number: number, agent: AgentId, agentLabel: string, force = false): Promise<AgentReview> {
+    return this.once(`agent:${repo}#${number}`, async () => {
+      const d = await this.view(repo, number, "title,body,headRefOid");
+      const saved = this.store.get<AgentReview>(repo, number, d.headRefOid, "agent");
+      if (saved && saved.agent === agent && !force) return saved;
+      const diff = await this.diffAt(repo, number, d.headRefOid);
+      const source = sourceFor(agent);
+      const files = source === "files"
+        ? { "pr.md": `# ${d.title}\n\n${d.body || "(no description)"}\n`, "pr.diff": await this.deps.ghText(["pr", "diff", String(number), "--repo", repo]) }
+        : undefined;
+      const text = await this.deps.review({ agent, repo, number, prompt: agentReviewPrompt({ repo, number, title: d.title }, source), files });
+      const made: AgentReview = { ...parseAgentReview(text, diff.files), sha: d.headRefOid, at: new Date().toISOString(), agent, agentLabel };
+      this.store.put(repo, number, d.headRefOid, "agent", made);
+      return made;
+    });
+  }
+
+  /**
+   * Posts a review to the PR as the person: a comment (with line comments), an approval or a
+   * request for changes, on the PR's current commit. A line comment on a line that isn't in the
+   * diff would make GitHub refuse the whole review, so those go in the review's text instead.
+   */
+  async submit(r: ReviewSubmit): Promise<ReviewSubmitted> {
+    const events: ReviewEvent[] = ["COMMENT", "APPROVE", "REQUEST_CHANGES"];
+    if (!events.includes(r.event)) throw Object.assign(new Error("Unknown review event."), { status: 400 });
+    const d = await this.view(r.repo, r.number, "headRefOid");
+    const diff = await this.diffAt(r.repo, r.number, d.headRefOid);
+    const comments: { path: string; line: number; side: "RIGHT"; body: string }[] = [];
+    const moved: string[] = [];
+    for (const c of Array.isArray(r.comments) ? r.comments.slice(0, 100) : []) {
+      const body = String(c?.body || "").trim().slice(0, 60_000);
+      if (!body) continue;
+      const line = Number(c.line);
+      if (typeof c.path === "string" && Number.isInteger(line) && lineOnDiff(diff.files, c.path, line)) comments.push({ path: c.path, line, side: "RIGHT", body });
+      else moved.push(c.path ? `**${c.path}${Number.isInteger(line) && line > 0 ? `:${line}` : ""}**\n\n${body}` : body);
+    }
+    const text = [String(r.body || "").trim(), ...moved].filter(Boolean).join("\n\n---\n\n").slice(0, 65_000);
+    if (r.event === "REQUEST_CHANGES" && !text) throw Object.assign(new Error("Say what needs to change."), { status: 400 });
+    if (r.event === "COMMENT" && !text && !comments.length) throw Object.assign(new Error("There's nothing to post."), { status: 400 });
+    const res = await this.deps.ghPost(
+      ["api", `repos/${r.repo}/pulls/${r.number}/reviews`, "--method", "POST", "--input", "-"],
+      JSON.stringify({ commit_id: d.headRefOid, event: r.event, body: text, comments }),
+    );
+    this.cache = null;
+    return { url: (res && res.html_url) || null, state: (res && res.state) || r.event, comments: comments.length, movedToBody: moved.length };
   }
 
   /** One job per key at a time: asking again while it runs waits for the same one. */

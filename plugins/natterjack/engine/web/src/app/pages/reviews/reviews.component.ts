@@ -8,7 +8,7 @@ import { relTime } from '../../core/util';
 import { PageHeaderComponent } from '../../shared/page-header.component';
 import { ReviewDetailComponent } from './review-detail.component';
 import { ReviewGuideComponent } from './review-guide.component';
-import { type ReviewFilter, filterPrs, needsSummary, prKey } from './reviews.util';
+import { type ReviewFilter, authorsOf, filterPrs, needsSummary, prKey } from './reviews.util';
 
 /** Summaries asked for at once from the list (the server makes two at a time anyway). */
 const SUMMARY_PARALLEL = 2;
@@ -50,6 +50,12 @@ const SUMMARY_ROWS = 40;
             @for (o of list()!.orgs; track o) { <option [value]="o">{{ o }}</option> }
           </select>
         }
+        @if (authors().length > 1) {
+          <select class="sel" [ngModel]="author()" (ngModelChange)="author.set($event)" aria-label="Author">
+            <option value="">All authors</option>
+            @for (a of authors(); track a.login) { <option [value]="a.login">{{ a.login }} ({{ a.count }})</option> }
+          </select>
+        }
         <input class="q" type="search" placeholder="Filter by title, repo or author" aria-label="Filter pull requests" [ngModel]="text()" (ngModelChange)="text.set($event)" />
         <label class="chk"><input type="checkbox" [ngModel]="drafts()" (ngModelChange)="drafts.set($event)" /> Drafts</label>
       </div>
@@ -88,7 +94,7 @@ const SUMMARY_ROWS = 40;
         </nav>
 
         @if (selected(); as s) {
-          <dash-review-detail [repo]="s.repo" [number]="s.n" [summary]="summaries()[s.repo + '#' + s.n] || null" (summarized)="onSummary(s.repo + '#' + s.n, $event)" (closed)="select(null)" />
+          <dash-review-detail [repo]="s.repo" [number]="s.n" [viewer]="list()!.viewer" [summary]="summaries()[s.repo + '#' + s.n] || null" (summarized)="onSummary(s.repo + '#' + s.n, $event)" (closed)="select(null)" />
         } @else if (rows().length) {
           <div class="panel pick"><div class="empty">Pick a pull request to see what changed, its checks and its reviews.</div></div>
         }
@@ -138,6 +144,7 @@ export class ReviewsComponent implements OnInit {
   readonly loading = signal(false);
   readonly filter = signal<ReviewFilter>('all');
   readonly org = signal('');
+  readonly author = signal('');
   readonly text = signal('');
   readonly drafts = signal(false);
   /** Summaries made on this page, by PR key (newer than the list's). */
@@ -159,11 +166,18 @@ export class ReviewsComponent implements OnInit {
   readonly guiding = computed(() => (this.query()?.get('view') === 'guide' ? this.selected() : null));
   readonly selectedKey = computed(() => { const s = this.selected(); return s ? `${s.repo}#${s.n}` : null; });
 
-  readonly rows = computed(() => filterPrs(this.list()?.prs || [], { filter: this.filter(), org: this.org(), text: this.text(), drafts: this.drafts() }));
+  readonly rows = computed(() => filterPrs(this.list()?.prs || [], { filter: this.filter(), org: this.org(), author: this.author(), text: this.text(), drafts: this.drafts() }));
   readonly counts = computed(() => {
-    const base = { org: this.org(), text: this.text(), drafts: this.drafts() };
+    const base = { org: this.org(), author: this.author(), text: this.text(), drafts: this.drafts() };
     const prs = this.list()?.prs || [];
     return { requested: filterPrs(prs, { ...base, filter: 'requested' }).length, all: filterPrs(prs, { ...base, filter: 'all' }).length, mine: filterPrs(prs, { ...base, filter: 'mine' }).length };
+  });
+  /** Authors of the open PRs in the chosen organization (the one picked stays listed). */
+  readonly authors = computed(() => {
+    const org = this.org().toLowerCase();
+    const list = authorsOf((this.list()?.prs || []).filter((p) => !org || p.repo.split('/')[0].toLowerCase() === org));
+    const a = this.author();
+    return a && !list.some((x) => x.login === a) ? [...list, { login: a, count: 0 }] : list;
   });
   readonly meta = computed(() => {
     const l = this.list();
