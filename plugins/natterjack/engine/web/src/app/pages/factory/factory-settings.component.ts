@@ -2,7 +2,7 @@ import { ChangeDetectionStrategy, Component, OnInit, computed, inject, signal } 
 import { FormsModule } from '@angular/forms';
 import { RouterLink } from '@angular/router';
 import type {
-  AgentId, FactoryConfig, FactoryConfigState, FactoryGateId, FactoryGateMode, FactoryPreset, FactoryScanner, FactoryStageId, MergeMethod, Severity,
+  AgentId, FactoryConfig, FactoryConfigState, FactoryGateId, FactoryGateMode, FactoryPreset, FactoryScanner, FactoryStageId, MergeMethod, Severity, SpecCheckId,
 } from '../../../../../shared/api';
 import { ApiService } from '../../core/api.service';
 import { ToastService } from '../../core/toast.service';
@@ -181,6 +181,31 @@ const GATE_HELP: Record<FactoryGateId, string> = {
         </div>
 
         <div class="panel">
+          <div class="panel-h"><h2>Spec readiness</h2><span class="ty">the spec gate</span></div>
+          <div class="body">
+            <p class="h">When an agent session reads a ticket, it scores how ready the ticket is to start on (0-100), from what any good spec has, under whatever headings your team uses. The levels and weights are yours.</p>
+            <div class="grid3">
+              <label class="field">Ready at <input type="number" min="1" max="100" [ngModel]="c.spec.readyAt" (ngModelChange)="setSpec('readyAt', $event)" /></label>
+              <label class="field">Needs work from <input type="number" min="0" max="100" [ngModel]="c.spec.needsWorkAt" (ngModelChange)="setSpec('needsWorkAt', $event)" /></label>
+              <label class="field">Unattended runs need <input type="number" min="0" max="100" [ngModel]="c.spec.minScore" (ngModelChange)="setSpec('minScore', $event)" placeholder="Advice only" /></label>
+            </div>
+            <p class="h">Below "Needs work from" is Not ready. With a minimum for unattended runs, an autonomous run below it stops and says on the ticket what's missing.</p>
+            <table class="weights">
+              <thead><tr><th>Check</th><th>Looks for</th><th>Weight</th></tr></thead>
+              <tbody>
+                @for (k of specChecks(); track k.id) {
+                  <tr [class.off]="weight(k.id) === 0">
+                    <td>{{ k.label }}</td><td class="h">{{ k.help }}</td>
+                    <td><input type="number" min="0" max="100" [ngModel]="c.spec.weights[k.id] ?? null" (ngModelChange)="setWeight(k.id, $event)" [placeholder]="'' + k.weight" [attr.aria-label]="k.label + ' weight'" /></td>
+                  </tr>
+                }
+              </tbody>
+            </table>
+            <p class="h">Weights are relative (0 turns a check off; empty keeps the default).</p>
+          </div>
+        </div>
+
+        <div class="panel">
           <div class="panel-h"><h2>Approver</h2><span class="ty">advisory for now</span></div>
           <div class="body">
             <p class="h">An agent that rates each change's risk so people spend time on the risky ones. Until it has a track record it only advises: nothing merges on its say yet.</p>
@@ -258,6 +283,7 @@ const GATE_HELP: Record<FactoryGateId, string> = {
     tr.off td:first-child { color: var(--ink-faint); }
     .scanners td input { width: 100%; box-sizing: border-box; }
     .adds { display: flex; flex-wrap: wrap; gap: 6px; }
+    .weights td input { width: 80px; }
     .rows { display: flex; flex-direction: column; }
     .row { display: grid; grid-template-columns: 1fr 240px; gap: 8px 24px; padding: 12px 16px; border-bottom: 1px solid var(--line-soft); align-items: start; }
     .t { font-weight: 600; font-size: 14px; color: var(--ink); }
@@ -298,6 +324,7 @@ export class FactorySettingsComponent implements OnInit {
   });
   readonly steps = computed(() => (this.draft() ? pipelineSteps(this.draft()!) : []));
   readonly presetList = computed(() => Object.entries(this.state()?.presets || {}).map(([id, p]) => ({ id: id as Exclude<FactoryPreset, 'custom'>, label: p.label, description: p.description })));
+  readonly specChecks = computed(() => this.state()?.specChecks || []);
   readonly missingSuggested = computed(() => {
     const have = new Set((this.draft()?.security.scanners || []).map((s) => s.command));
     return (this.state()?.suggestedScanners || []).filter((s) => !have.has(s.command));
@@ -352,6 +379,22 @@ export class FactorySettingsComponent implements OnInit {
   setRiskPaths(text: string): void { this.edit((c) => { c.approver.highRiskPaths = splitList(text); }); }
   setApprover(key: keyof FactoryConfig['approver'], v: any): void {
     this.edit((c) => { (c.approver as any)[key] = key === 'mergeMethod' ? (v as MergeMethod) : v; });
+  }
+
+  setSpec(key: 'readyAt' | 'needsWorkAt' | 'minScore', v: unknown): void {
+    this.edit((c) => {
+      const n = numOrNull(v);
+      if (key === 'minScore') c.spec.minScore = n == null ? null : Math.round(Math.min(Math.max(n, 0), 100));
+      else c.spec[key] = Math.round(Math.min(Math.max(n ?? 0, 0), 100));
+    });
+  }
+  setWeight(id: SpecCheckId, v: unknown): void {
+    this.edit((c) => { const n = numOrNull(v); if (n == null) delete c.spec.weights[id]; else c.spec.weights[id] = Math.round(Math.min(Math.max(n, 0), 100)); });
+  }
+  /** A check's weight: the team's, else the default. */
+  weight(id: SpecCheckId): number {
+    const w = this.draft()?.spec.weights[id];
+    return w ?? this.specChecks().find((k) => k.id === id)?.weight ?? 0;
   }
 
   discard(): void {

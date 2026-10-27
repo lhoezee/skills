@@ -7,6 +7,7 @@ import { DataService } from '../../core/data.service';
 import { relTime } from '../../core/util';
 import { PageHeaderComponent } from '../../shared/page-header.component';
 import { FactoryTicketsComponent } from './factory-tickets.component';
+import { specLevel } from './factory.util';
 
 type View = 'tickets' | 'board';
 const VIEW_KEY = 'natterjack.factory.view';
@@ -74,6 +75,7 @@ const STATE: Record<FactoryItem['state'], { label: string; cls: string }> = {
                 </div>
                 @if (it.title) { <div class="ttl">{{ it.title }}</div> }
                 @if (it.reason) { <div class="why">{{ it.reason }}</div> }
+                @if (it.spec; as sp) { <span class="tag spec" [class]="'tag spec ' + level(sp.level).cls" [title]="'Spec readiness ' + sp.score + '/100'">Spec {{ sp.score }}</span> }
                 @if (it.repos.length) {
                   <div class="repos">
                     @for (r of it.repos; track r.repo) {
@@ -135,6 +137,7 @@ const STATE: Record<FactoryItem['state'], { label: string; cls: string }> = {
     .risk.medium { background: var(--yellow-bg); color: var(--yellow); }
     .risk.low { color: var(--green); }
     .links { display: flex; flex-wrap: wrap; gap: 8px; font-size: 12px; }
+    .spec { align-self: flex-start; font-size: 10.5px; }
   `],
 })
 export class FactoryComponent implements OnInit {
@@ -171,5 +174,6 @@ export class FactoryComponent implements OnInit {
 
   state(it: FactoryItem) { return STATE[it.state]; }
   mark(s: FactoryStepStatus): string { return MARK[s]; }
+  level = specLevel;
   rel(t: string): string { return relTime(t); }
 }

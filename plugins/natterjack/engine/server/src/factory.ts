@@ -15,8 +15,9 @@ import fs from "node:fs";
 import path from "node:path";
 import type {
   AgentId, FactoryBoard, FactoryColumn, FactoryConfig, FactoryConfigState, FactoryGateId, FactoryGateMode, FactoryItem,
-  FactoryItemStep, FactoryManifest, FactoryPreset, FactoryPresetPatch, FactoryScanner, FactoryStageConfig, FactoryStageId, FactoryStepStatus, MergeMethod, RunStatus, Severity,
+  FactoryItemStep, FactoryManifest, FactoryPreset, FactoryPresetPatch, FactoryScanner, FactorySpec, FactoryStageConfig, FactoryStageId, FactoryStepStatus, MergeMethod, RunStatus, Severity, SpecCheckId,
 } from "../../shared/api.ts";
+import { pipelineOrder, withPresetPatch } from "../../shared/factory-rules.ts";
 import { CONFIG_DIR, LEDGER_DIR, readConfigFile, writeConfigFile } from "./config.ts";
 
 export const FACTORY_FILE = "factory.json";
@@ -44,6 +45,19 @@ export const SUGGESTED_SCANNERS: FactoryScanner[] = [
   { name: "govulncheck", command: "govulncheck ./...", when: "go.mod", failOn: "high" },
 ];
 
+/** spec-check.mjs's checks (multirepo plugin): what each looks for, and its default weight. */
+export const SPEC_CHECKS: { id: SpecCheckId; label: string; help: string; weight: number }[] = [
+  { id: "problem", label: "Problem", help: "What's wrong or needed, and for whom.", weight: 15 },
+  { id: "outcome", label: "Outcome", help: "What's true when it's done.", weight: 15 },
+  { id: "criteria", label: "Acceptance criteria", help: "Present, and testable: a behaviour, a value, or given/when/then.", weight: 25 },
+  { id: "scope", label: "Scope", help: "What's in and what's out.", weight: 10 },
+  { id: "constraints", label: "Constraints", help: "Performance, security, compatibility, data.", weight: 5 },
+  { id: "affected", label: "Affected areas", help: "The repos, APIs or screens it touches.", weight: 10 },
+  { id: "questions", label: "Open questions", help: "None left: no TBD, no unanswered question.", weight: 10 },
+  { id: "verify", label: "How to verify", help: "Test or QA steps.", weight: 10 },
+];
+const SPEC_IDS = SPEC_CHECKS.map((c) => c.id);
+
 const stage = (id: FactoryStageId, on: boolean): FactoryStageConfig => ({ id, on, agent: null, model: null, effort: null });
 
 /** The Supervised preset with the factory off: what Settings starts from. */
@@ -59,6 +73,7 @@ export function defaultFactoryConfig(): FactoryConfig {
     gates: { spec: "human", plan: "human", prePr: "human", merge: "human" },
     requiredChecks: [],
     reviewers: { bots: [], pipeline: true, noUnresolved: true },
+    spec: { readyAt: 80, needsWorkAt: 50, minScore: null, weights: {} },
     approver: {
       enabled: false,
       highRiskPaths: ["**/migrations/**", "**/auth/**", "infra/**", ".github/workflows/**", "**/*.lock"],
@@ -89,15 +104,8 @@ export const PRESET_PATCHES: Record<Exclude<FactoryPreset, "custom">, FactoryPre
 
 /** A preset applied to a config (the same as Settings does). */
 export function applyPreset(c: FactoryConfig, preset: FactoryPreset): FactoryConfig {
-  const out: FactoryConfig = JSON.parse(JSON.stringify(c));
-  out.preset = preset;
-  if (preset === "custom") return out;
-  const p = PRESET_PATCHES[preset];
-  if (p.mode) out.mode = p.mode;
-  out.gates = { ...p.gates };
-  out.approver = { ...out.approver, ...p.approver };
-  out.stages.find((s) => s.id === "approve")!.on = p.approve;
-  return out;
+  if (preset === "custom") return { ...JSON.parse(JSON.stringify(c)), preset };
+  return withPresetPatch(c, preset, PRESET_PATCHES[preset]);
 }
 
 // ------------------------------------------------------------------ reading factory.json
@@ -124,6 +132,12 @@ export function normalizeFactoryConfig(raw: any): FactoryConfig {
   const rev = raw.reviewers || {};
   const ap = raw.approver || {};
   const gates = raw.gates || {};
+  const sp = raw.spec || {};
+  const weights: Partial<Record<SpecCheckId, number>> = {};
+  for (const id of SPEC_IDS) {
+    const w = sp.weights && sp.weights[id];
+    if (w != null && w !== "" && Number.isFinite(Number(w))) weights[id] = Math.round(Math.min(Math.max(Number(w), 0), 100));
+  }
   // Stages: the file's order for the ones it lists, the rest after in the default order; unknown ids dropped.
   const listed: FactoryStageConfig[] = [];
   for (const s of Array.isArray(raw.stages) ? raw.stages : []) {
@@ -163,6 +177,12 @@ export function normalizeFactoryConfig(raw: any): FactoryConfig {
     gates: Object.fromEntries(GATE_IDS.map((g) => [g, pick(gates[g], GATE_MODES, d.gates[g])])) as Record<FactoryGateId, FactoryGateMode>,
     requiredChecks: strs(raw.requiredChecks) ?? [],
     reviewers: { bots: strs(rev.bots) ?? [], pipeline: rev.pipeline !== false, noUnresolved: rev.noUnresolved !== false },
+    spec: {
+      readyAt: Math.round(num(sp.readyAt, d.spec.readyAt, 1, 100)),
+      needsWorkAt: Math.round(num(sp.needsWorkAt, d.spec.needsWorkAt, 0, 100)),
+      minScore: numOrNull(sp.minScore, 0, 100) == null ? null : Math.round(numOrNull(sp.minScore, 0, 100)!),
+      weights,
+    },
     approver: {
       enabled: ap.enabled === true,
       highRiskPaths: strs(ap.highRiskPaths, 100) ?? d.approver.highRiskPaths,
@@ -183,6 +203,8 @@ export function factoryConfigProblems(c: FactoryConfig): string[] {
   if (!on("build")) out.push("The Build stage can't be turned off: it's where the work happens.");
   if (Object.values(c.gates).includes("approver") && !c.approver.enabled) out.push("A gate is set to the Approver, but the Approver is off.");
   if (c.approver.mergeAction !== "none" && c.gates.merge !== "approver") out.push("The Approver can only merge when the merge gate is set to the Approver.");
+  if (c.spec.needsWorkAt >= c.spec.readyAt) out.push("Spec readiness: \"Needs work\" has to start below \"Ready\".");
+  if (SPEC_IDS.every((id) => (c.spec.weights[id] ?? SPEC_CHECKS.find((x) => x.id === id)!.weight) === 0)) out.push("Spec readiness: at least one check needs a weight.");
   return out;
 }
 
@@ -192,7 +214,7 @@ export function factoryConfigState(canEdit: boolean, dir = CONFIG_DIR): FactoryC
   try { mtimeMs = fs.statSync(f.file).mtimeMs; } catch {}
   return {
     config: normalizeFactoryConfig(f.data), exists: f.data != null || !!f.error, error: f.error, canEdit, mtimeMs,
-    presets: PRESET_PATCHES, suggestedScanners: SUGGESTED_SCANNERS, stageLabels: STAGE_LABELS, gateLabels: GATE_LABELS,
+    presets: PRESET_PATCHES, suggestedScanners: SUGGESTED_SCANNERS, stageLabels: STAGE_LABELS, gateLabels: GATE_LABELS, specChecks: SPEC_CHECKS,
   };
 }
 
@@ -217,6 +239,25 @@ export function manifestDir(ledgerDir = LEDGER_DIR): string { return path.join(l
 
 const iso = (v: unknown) => (typeof v === "string" && !Number.isNaN(Date.parse(v)) ? v : null);
 
+/** A manifest's spec readiness, or null when it has none (or isn't readable). */
+export function normalizeSpec(raw: any): FactorySpec | null {
+  if (!raw || typeof raw !== "object" || !Number.isFinite(raw.score) || !Array.isArray(raw.checks)) return null;
+  const pct = (v: unknown, d: number) => (Number.isFinite(Number(v)) ? Math.min(Math.max(Math.round(Number(v)), 0), 100) : d);
+  return {
+    score: pct(raw.score, 0),
+    level: pick(raw.level, ["ready", "needs-work", "not-ready"] as const, "not-ready"),
+    readyAt: pct(raw.readyAt, 80), needsWorkAt: pct(raw.needsWorkAt, 50),
+    minScore: raw.minScore == null ? null : pct(raw.minScore, 0),
+    checks: raw.checks.filter((c: any) => c && SPEC_IDS.includes(c.id)).map((c: any) => ({
+      id: c.id, label: optStr(c.label) || c.id, weight: Number.isFinite(c.weight) ? c.weight : 0,
+      score: Number.isFinite(c.score) ? Math.min(Math.max(c.score, 0), 1) : 0,
+      finding: typeof c.finding === "string" ? c.finding.slice(0, 500) : "",
+      ...(c.override && typeof c.override.reason === "string" ? { override: { from: Number(c.override.from) || 0, reason: c.override.reason.slice(0, 500) } } : {}),
+    })),
+    at: iso(raw.at) || new Date(0).toISOString(),
+  };
+}
+
 /** A manifest file's JSON as a FactoryManifest (unknown values dropped), or null when it isn't one. */
 export function normalizeManifest(raw: any): FactoryManifest | null {
   if (!raw || typeof raw !== "object" || typeof raw.ticket !== "string" || !raw.ticket.trim()) return null;
@@ -234,6 +275,7 @@ export function normalizeManifest(raw: any): FactoryManifest | null {
     plan: typeof raw.plan === "string" ? raw.plan : null,
     startedAt: started,
     updatedAt: iso(raw.updatedAt) || started,
+    spec: normalizeSpec(raw.spec),
     stages: (Array.isArray(raw.stages) ? raw.stages : []).filter((s: any) => s && STAGE_IDS.includes(s.id)).slice(0, 500).map((s: any) => ({
       id: s.id, repo: optStr(s.repo), agent: optStr(s.agent), status: pick(s.status, STEP, "pending"),
       startedAt: iso(s.startedAt), endedAt: iso(s.endedAt), note: typeof s.note === "string" ? s.note.slice(0, 4000) : null,
@@ -254,17 +296,32 @@ export function normalizeManifest(raw: any): FactoryManifest | null {
   };
 }
 
-/** Every manifest in the folder, newest first, plus the files that couldn't be read. */
+/** Parsed manifests by file, kept until the file's mtime changes (the board reloads every few seconds). */
+const parsed = new Map<string, { mtimeMs: number; manifest: FactoryManifest | null; error: string | null }>();
+
+/** The newest manifests in the folder (by file time, at most MAX_MANIFESTS), newest first, plus the files that couldn't be read. */
 export function readManifests(dir = manifestDir()): { manifests: FactoryManifest[]; errors: string[] } {
-  let files: string[] = [];
-  try { files = fs.readdirSync(dir).filter((f) => f.endsWith(".json")); } catch { return { manifests: [], errors: [] }; }
+  let files: { f: string; mtimeMs: number }[] = [];
+  try {
+    files = fs.readdirSync(dir).filter((f) => f.endsWith(".json"))
+      .map((f) => { try { return { f, mtimeMs: fs.statSync(path.join(dir, f)).mtimeMs }; } catch { return null; } })
+      .filter((x): x is { f: string; mtimeMs: number } => !!x)
+      .sort((a, b) => b.mtimeMs - a.mtimeMs).slice(0, MAX_MANIFESTS);
+  } catch { return { manifests: [], errors: [] }; }
   const manifests: FactoryManifest[] = [];
   const errors: string[] = [];
-  for (const f of files) {
-    try {
-      const m = normalizeManifest(JSON.parse(fs.readFileSync(path.join(dir, f), "utf-8")));
-      if (m) manifests.push(m); else errors.push(`${f}: not a factory manifest (no ticket).`);
-    } catch (e) { errors.push(`${f}: ${(e as Error).message}`); }
+  for (const { f, mtimeMs } of files) {
+    const file = path.join(dir, f);
+    let hit = parsed.get(file);
+    if (!hit || hit.mtimeMs !== mtimeMs) {
+      try {
+        const m = normalizeManifest(JSON.parse(fs.readFileSync(file, "utf-8")));
+        hit = { mtimeMs, manifest: m, error: m ? null : `${f}: not a factory manifest (no ticket).` };
+      } catch (e) { hit = { mtimeMs, manifest: null, error: `${f}: ${(e as Error).message}` }; }
+      parsed.set(file, hit);
+    }
+    if (hit.manifest) manifests.push(hit.manifest);
+    if (hit.error) errors.push(hit.error);
   }
   manifests.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   return { manifests: manifests.slice(0, MAX_MANIFESTS), errors };
@@ -280,21 +337,8 @@ export type PipelineStep = { kind: "stage"; id: FactoryStageId } | { kind: "gate
  * guards: spec before planning, plan after it, pre-PR before the PR, merge before merging.
  */
 export function pipeline(c: FactoryConfig): PipelineStep[] {
-  const out: PipelineStep[] = [];
-  const gate = (id: FactoryGateId) => { if (c.gates[id] !== "off") out.push({ kind: "gate", id, mode: c.gates[id] }); };
-  const on = c.stages.filter((s) => s.on).map((s) => s.id);
-  let specDone = false, prePrDone = false, mergeDone = false;
-  for (const id of on) {
-    if (!specDone && (id === "plan" || id === "build")) { gate("spec"); specDone = true; }
-    if (!prePrDone && id === "pr") { gate("prePr"); prePrDone = true; }
-    if (!mergeDone && id === "merge") { gate("merge"); mergeDone = true; }
-    out.push({ kind: "stage", id });
-    if (id === "plan") gate("plan");
-  }
-  if (!specDone) gate("spec");
-  if (!prePrDone) gate("prePr");
-  if (!mergeDone) gate("merge");
-  return out;
+  // shared/factory-rules.ts: the Factory policy page previews the same order.
+  return pipelineOrder(c) as PipelineStep[];
 }
 
 export function boardColumns(c: FactoryConfig): FactoryColumn[] {
@@ -314,6 +358,11 @@ const WHO: Record<FactoryGateMode, string> = { human: "you", approver: "the Appr
 
 /** Where an item is: the first step it hasn't finished, and whether it's moving, waiting or failing. */
 export function placeItem(m: FactoryManifest, steps: PipelineStep[]): { column: string; state: FactoryItem["state"]; reason: string | null } {
+  // Stopped short (spec or plan rejected, aborted): it stays where it stopped, failing, with why.
+  if (m.done && m.error) {
+    const at = placeItem({ ...m, done: false, error: null }, steps);
+    return { column: at.column, state: "failing", reason: `Stopped: ${m.error}` };
+  }
   if (m.done || (m.prs.length && m.prs.every((p) => p.state === "merged"))) return { column: "done", state: "done", reason: null };
   const hasActivity = (i: number) => steps.slice(i).some((s) => (s.kind === "stage" ? m.stages.some((x) => x.id === s.id) : m.gates.some((g) => g.id === s.id)));
   const nothing = !m.stages.length && !m.gates.length;
@@ -403,7 +452,7 @@ export function buildBoard(cfg: FactoryConfig, configured: boolean, manifests: F
       risk: risk ? { level: risk.risk!, rationale: risk.rationale } : null,
       runIds: mine.map((r) => r.id),
       steps: itemSteps(m, steps, column),
-      mode: m.mode, plan: m.plan, error: m.error,
+      mode: m.mode, spec: m.spec, plan: m.plan, error: m.error,
     };
   });
   return {

@@ -820,6 +820,17 @@ export interface FactoryConfig {
     /** A bot review counts only with no unresolved threads. */
     noUnresolved: boolean;
   };
+  /** Spec readiness: how ready a ticket is for an agent to start, scored when a session reads it. */
+  spec: {
+    /** Scores at or above this are Ready. */
+    readyAt: number;
+    /** Scores at or above this (and below readyAt) are Needs work; below, Not ready. */
+    needsWorkAt: number;
+    /** Autonomous runs below this stop and say on the ticket what's missing (null: advice only). */
+    minScore: number | null;
+    /** Weight per check (0 turns one off); checks not listed keep their default. */
+    weights: Partial<Record<SpecCheckId, number>>;
+  };
   /** The Approver agent (advisory until it has a track record; nothing merges on its say yet). */
   approver: {
     enabled: boolean;
@@ -850,6 +861,8 @@ export interface FactoryConfigState {
   suggestedScanners: FactoryScanner[];
   stageLabels: Record<FactoryStageId, string>;
   gateLabels: Record<FactoryGateId, string>;
+  /** The spec checks, with what each looks for and its default weight. */
+  specChecks: { id: SpecCheckId; label: string; help: string; weight: number }[];
 }
 
 export interface FactoryPresetPatch {
@@ -860,6 +873,20 @@ export interface FactoryPresetPatch {
   approver: Pick<FactoryConfig['approver'], 'enabled' | 'mergeAction' | 'samplingPct'>;
   /** The Approver stage is on. */
   approve: boolean;
+}
+
+export type SpecCheckId = 'problem' | 'outcome' | 'criteria' | 'scope' | 'constraints' | 'affected' | 'questions' | 'verify';
+export type SpecLevel = 'ready' | 'needs-work' | 'not-ready';
+
+/** A ticket's spec readiness, as spec-check.mjs scored it (with the agent's corrections). */
+export interface FactorySpec {
+  score: number;
+  level: SpecLevel;
+  readyAt: number;
+  needsWorkAt: number;
+  minScore: number | null;
+  checks: { id: SpecCheckId; label: string; weight: number; score: number; finding: string; override?: { from: number; reason: string } }[];
+  at: string;
 }
 
 /** What a pipeline step reports in a work item's manifest. */
@@ -885,6 +912,8 @@ export interface FactoryManifest {
   plan: string | null;
   startedAt: string;
   updatedAt: string;
+  /** Spec readiness, scored when the pipeline read the ticket. */
+  spec: FactorySpec | null;
   stages: { id: FactoryStageId; repo: string | null; agent: string | null; status: FactoryStepStatus; startedAt: string | null; endedAt: string | null; note: string | null }[];
   gates: { id: FactoryGateId; mode: FactoryGateMode | null; decision: 'pending' | 'approved' | 'rejected'; by: string | null; risk: 'low' | 'medium' | 'high' | null; rationale: string | null; sha: string | null; at: string }[];
   prs: { repo: string | null; url: string; number: number | null; state: 'open' | 'merged' | 'closed' | null }[];
@@ -924,6 +953,7 @@ export interface FactoryItem {
   /** Every step of the pipeline for this item, in order (the Tickets view's track and details). */
   steps: FactoryItemStep[];
   mode: FactoryManifest['mode'];
+  spec: FactorySpec | null;
   plan: string | null;
   /** Why the pipeline stopped short, when it did. */
   error: string | null;

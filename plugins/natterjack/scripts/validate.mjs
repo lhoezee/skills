@@ -401,10 +401,16 @@ export function validate(root) {
     const approverOn = !!(fac.approver && fac.approver.enabled === true);
     if (Object.values(fac.gates || {}).includes("approver") && !approverOn) err("factory.json", "a gate is set to the Approver, but approver.enabled isn't true");
     if (fac.approver && fac.approver.mergeAction && fac.approver.mergeAction !== "none" && (fac.gates || {}).merge !== "approver") err("factory.json", "approver.mergeAction needs gates.merge set to \"approver\"");
-    for (const s of (fac.security && fac.security.scanners) || []) {
+    const scanners = fac.security && fac.security.scanners;
+    if (scanners !== undefined && !Array.isArray(scanners)) err("factory.json", "security.scanners must be a list of { name, command, when, failOn }");
+    for (const s of Array.isArray(scanners) ? scanners : []) {
       if (!s || typeof s.command !== "string" || !s.command.trim()) err("factory.json", "every security.scanners entry needs a command");
       else if (s.failOn !== undefined && !SEV.includes(s.failOn)) err("factory.json", `scanner "${s.name || s.command}": failOn must be one of ${SEV.join(", ")}`);
     }
+    const sp = fac.spec || {};
+    for (const k of ["readyAt", "needsWorkAt", "minScore"]) if (sp[k] != null && !(Number.isFinite(sp[k]) && sp[k] >= 0 && sp[k] <= 100)) err("factory.json", `spec.${k} must be a number from 0 to 100`);
+    if (Number.isFinite(sp.readyAt) && Number.isFinite(sp.needsWorkAt) && sp.needsWorkAt >= sp.readyAt) err("factory.json", "spec.needsWorkAt must be below spec.readyAt");
+    for (const k of Object.keys(sp.weights || {})) if (!["problem", "outcome", "criteria", "scope", "constraints", "affected", "questions", "verify"].includes(k)) warn("factory.json", `spec.weights.${k} isn't a spec check; ignored`);
     if (fac.limits && fac.limits.wip !== undefined && !(Number.isInteger(fac.limits.wip) && fac.limits.wip >= 1)) err("factory.json", "limits.wip must be a whole number, 1 or more");
   }
 

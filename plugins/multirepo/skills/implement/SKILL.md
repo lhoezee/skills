@@ -44,7 +44,7 @@ node "$F" done  --ticket <ID> [--error "<why it stopped>"]
 
 | When | Report |
 |---|---|
-| Ticket read (step 1) | `start` with the title, URL and mode |
+| Ticket read (step 1) | `start` with the title, URL and mode, then score the spec (below) |
 | WORKROOT is set (step 5) | `start` again with `--workroot`, `--branch` and `--repos` (it merges into what's there) |
 | Plan file written (step 4) | `stage --stage plan --status done` |
 | You ask to proceed (step 4) / the user answers | `gate --gate plan --decision pending`, then `approved` (or `rejected`, then `done`). Autonomous: `approved --by auto` |
@@ -105,6 +105,17 @@ Prefer `/multirepo:fetch-ticket <TICKET>`: it normalizes the ticket to JSON, inc
 
 - **Which tracker**: `.claude/dashboard/workspace.json` `issues.kind` (in a worktree it's read from the source workspace), else the id's shape (`owner/repo#N`, `#N` → GitHub Issues), else what's connected (a Linear MCP, an Atlassian/Jira MCP, `gh`). Tool names vary by server; match the suffix (`get_issue`, `getJiraIssue`). Not found → report and stop.
 - Take the title, description, acceptance criteria, type, labels, parent, links and all comments.
+
+Then **score the spec**: how ready the ticket is to start on, by what any good spec has (problem, outcome, testable acceptance criteria, scope, constraints, affected areas, no open questions, how to verify), under whatever headings the team uses. The team's levels and weights come from `factory.json` `spec`.
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/spec-check.mjs" <ticket.json> --ticket <ID> [--overrides '<json>']
+```
+
+`<ticket.json>` is fetch-ticket's output (saved to a file; `-` reads stdin). `--ticket` records the score for the Factory board. Read each check's finding against the ticket: where the text fooled it (criteria that look testable but contradict each other, a "?" that was answered in a comment), re-run with `--overrides '{"criteria":{"score":0.5,"reason":"AC 2 and 3 contradict"}}'`. A score of 0, 0.5 or 1, and always a reason. Then the **spec gate**:
+- **Ready**: carry on (`gate --gate spec --decision approved --by auto`).
+- **Needs work / Not ready, interactive**: say the score and what's missing in a line each, and offer **Align first** (`/multirepo:align`, when installed) / **Proceed anyway** / **Abort**; record the answer as the spec gate's decision.
+- **Autonomous**: below the result's `minScore` (when set), comment on the ticket with the score and what's missing, `gate --gate spec --decision rejected --by auto`, `done --error "spec not ready"`, and stop. Otherwise carry on and put the score and gaps in the Assumptions.
 
 Then:
 - **Blocked-by links** (`links[]` with `type: "blocked by"`) whose `state` isn't done → tell the user and ask whether to proceed. Autonomous: stop, comment that it's blocked, leave the state alone.

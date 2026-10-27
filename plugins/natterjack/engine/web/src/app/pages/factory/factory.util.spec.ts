@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { FactoryConfig, FactoryPresetPatch } from '../../../../../shared/api';
-import { duration, matchingPreset, numOrNull, pipelineSteps, splitList, withPreset } from './factory.util';
+import { checkMark, duration, matchingPreset, specLevel, numOrNull, pipelineSteps, splitList, withPreset } from './factory.util';
 
 const STAGES = ['align', 'plan', 'build', 'review', 'security', 'qa', 'guide', 'pr', 'approve', 'merge'] as const;
 
@@ -65,5 +65,12 @@ describe('duration', () => {
     expect(duration(t(0), t(60 * 76))).toBe('3d 4h');
     expect(duration(t(0), null, Date.parse(t(7)))).toBe('7m');
     expect(duration(null, t(1))).toBe('');
+  });
+});
+
+describe('spec readiness', () => {
+  it('names levels and marks checks', () => {
+    expect([specLevel('ready').label, specLevel('needs-work').cls, specLevel('not-ready').cls]).toEqual(['Ready', 'amber', 'bad']);
+    expect([checkMark(1), checkMark(0.5), checkMark(0)]).toEqual(['✓', '~', '✗']);
   });
 });

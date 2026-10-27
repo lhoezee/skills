@@ -4,9 +4,10 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import {
   applyPreset, boardColumns, buildBoard, defaultFactoryConfig, factoryConfigProblems, factoryConfigState, normalizeFactoryConfig,
-  normalizeManifest, pipeline, placeItem, readManifests, saveFactoryConfig,
+  GATE_IDS, SPEC_CHECKS, STAGE_IDS, normalizeManifest, pipeline, placeItem, readManifests, saveFactoryConfig,
 } from "../src/factory.ts";
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), "factory-"));
@@ -179,4 +180,56 @@ test("itemSteps gives every step its state, times, repo rows and gate decisions"
   // A step it never reported, before one it did, counts as skipped.
   const skip = buildBoard(cfg, true, [manifest({ stages: [{ id: "build", repo: "api", status: "running" }] })], []).items[0].steps;
   assert.deepEqual(skip.slice(0, 4).map((x) => x.state), ["skipped", "skipped", "skipped", "running"]);
+});
+
+test("spec readiness: the team's levels and weights, checked; a manifest's score carried to its item", () => {
+  const c = normalizeFactoryConfig({ spec: { readyAt: "85", needsWorkAt: 60, minScore: 55.4, weights: { scope: 0, constraints: "8", bogus: 5, verify: -3 } } });
+  assert.deepEqual(c.spec, { readyAt: 85, needsWorkAt: 60, minScore: 55, weights: { scope: 0, constraints: 8, verify: 0 } });
+  assert.deepEqual(defaultFactoryConfig().spec, { readyAt: 80, needsWorkAt: 50, minScore: null, weights: {} });
+  const bad = normalizeFactoryConfig({ spec: { readyAt: 50, needsWorkAt: 70 } });
+  assert.match(factoryConfigProblems(bad).join(" "), /Needs work" has to start below/);
+  const off = normalizeFactoryConfig({ spec: { weights: Object.fromEntries(["problem", "outcome", "criteria", "scope", "constraints", "affected", "questions", "verify"].map((k) => [k, 0])) } });
+  assert.match(factoryConfigProblems(off).join(" "), /at least one check/);
+  assert.equal(factoryConfigState(true, tmp()).specChecks.reduce((s, x) => s + x.weight, 0), 100);
+
+  const m = manifest({ spec: { score: 64.6, level: "needs-work", readyAt: 80, needsWorkAt: 50, minScore: null, at,
+    checks: [{ id: "criteria", label: "Acceptance criteria", weight: 25, score: 0.5, finding: "2 of 4 testable", override: { from: 1, reason: "AC 2 contradicts AC 3" } }, { id: "nope", score: 1 }] } });
+  assert.equal(m.spec!.score, 65);
+  assert.deepEqual(m.spec!.checks.map((x) => [x.id, x.override?.reason]), [["criteria", "AC 2 contradicts AC 3"]]);
+  assert.equal(normalizeManifest({ ticket: "X", spec: { score: "high" } })!.spec, null);
+  assert.equal(buildBoard(defaultFactoryConfig(), true, [m], []).items[0].spec!.level, "needs-work");
+});
+
+test("a ticket that stopped short stays where it stopped, failing, with why", () => {
+  const steps = pipeline(defaultFactoryConfig());
+  const m = manifest({ gates: [{ id: "spec", decision: "rejected", by: "auto", at }], done: true, error: "spec not ready" });
+  assert.deepEqual(placeItem(m, steps), { column: "gate:spec", state: "failing", reason: "Stopped: spec not ready" });
+  assert.deepEqual(placeItem(manifest({ done: true }), steps), { column: "done", state: "done", reason: null });
+});
+
+test("readManifests parses only the newest files, and re-reads one only when it changes", () => {
+  const dir = tmp();
+  for (let i = 0; i < 305; i++) {
+    const f = path.join(dir, `T-${i}.json`);
+    fs.writeFileSync(f, JSON.stringify({ ticket: `T-${i}`, title: "v1" }));
+    fs.utimesSync(f, new Date(1_700_000_000_000 + i * 1000), new Date(1_700_000_000_000 + i * 1000));
+  }
+  const first = readManifests(dir).manifests;
+  assert.equal(first.length, 300);
+  assert.ok(!first.some((m) => ["T-0", "T-4"].includes(m.ticket)), "the oldest files are left out");
+  const f = path.join(dir, "T-304.json");
+  fs.writeFileSync(f, JSON.stringify({ ticket: "T-304", title: "v2" }));
+  fs.utimesSync(f, new Date(1_800_000_000_000), new Date(1_800_000_000_000));
+  assert.equal(readManifests(dir).manifests.find((m) => m.ticket === "T-304")!.title, "v2");
+});
+
+// The multirepo plugin's scripts (in this repo) write what the engine reads: their lists must match.
+test("the multirepo scripts' stages, gates and spec checks match the engine's", async (t) => {
+  const scripts = path.join(import.meta.dirname, "..", "..", "..", "..", "multirepo", "scripts");
+  if (!fs.existsSync(path.join(scripts, "spec-check.mjs"))) return t.skip("no multirepo plugin next to this engine");
+  const { STAGES, GATES } = await import(pathToFileURL(path.join(scripts, "factory.mjs")).href);
+  const { CHECKS } = await import(pathToFileURL(path.join(scripts, "spec-check.mjs")).href);
+  assert.deepEqual(STAGES, STAGE_IDS);
+  assert.deepEqual(GATES, GATE_IDS);
+  assert.deepEqual(CHECKS.map((c: any) => [c.id, c.label, c.weight]), SPEC_CHECKS.map((c) => [c.id, c.label, c.weight]));
 });

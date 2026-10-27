@@ -2,7 +2,7 @@ import { ChangeDetectionStrategy, Component, input, signal } from '@angular/core
 import { RouterLink } from '@angular/router';
 import type { FactoryItem, FactoryItemStep, FactoryStepState, FactoryStepStatus } from '../../../../../shared/api';
 import { relTime } from '../../core/util';
-import { duration } from './factory.util';
+import { checkMark, duration, specLevel } from './factory.util';
 
 const STEP_MARK: Record<FactoryStepState, string> = { done: '✓', running: '●', failed: '✕', waiting: '!', skipped: '–', pending: '○' };
 const STEP_WORD: Record<FactoryStepState, string> = { done: 'Done', running: 'Under way', failed: 'Failed', waiting: 'Waiting', skipped: 'Skipped', pending: 'Not reached' };
@@ -30,6 +30,9 @@ const STATE: Record<FactoryItem['state'], { label: string; cls: string }> = {
             <span class="ttl">{{ it.title || '' }}</span>
             <span class="tag" [class]="state(it).cls">{{ state(it).label }}</span>
             @if (it.reason) { <span class="why">{{ it.reason }}</span> }
+            @if (it.spec; as sp) {
+              <button class="spec tag" type="button" [class]="'spec tag ' + level(sp.level).cls" (click)="toggle(it.ticket)" [title]="'Spec readiness ' + sp.score + '/100: ' + level(sp.level).label + '. Ready at ' + sp.readyAt + '.'">Spec {{ sp.score }} · {{ level(sp.level).label }}</button>
+            }
           </div>
           <div class="meta">
             @if (it.agent) { <span>{{ it.agent }}{{ it.model ? ' · ' + it.model : '' }}</span> }
@@ -59,6 +62,22 @@ const STATE: Record<FactoryItem['state'], { label: string; cls: string }> = {
                 @if (it.repos.length) { <dt>Repos</dt><dd>@for (r of it.repos; track r.repo) { <span class="repo" [class]="'repo st-' + r.status">{{ r.repo }} {{ rowMark(r.status) }}</span> }</dd> }
                 @if (it.runIds.length > 1) { <dt>Runs</dt><dd>@for (id of it.runIds; track id; let i = $index) { <a [routerLink]="['/runs', id]">{{ i === 0 ? 'latest' : '#' + (it.runIds.length - i) }}</a>{{ $last ? '' : ' · ' }} }</dd> }
               </dl>
+              @if (it.spec; as sp) {
+                <section class="specd">
+                  <h3>Spec readiness <span class="tag" [class]="level(sp.level).cls">{{ sp.score }}/100 · {{ level(sp.level).label }}</span>
+                    <span class="faint">ready at {{ sp.readyAt }}, needs work from {{ sp.needsWorkAt }}{{ sp.minScore != null ? ', unattended runs need ' + sp.minScore : '' }} · scored {{ rel(sp.at) }}</span></h3>
+                  <ul>
+                    @for (c of sp.checks; track c.id) {
+                      @if (c.weight) {
+                        <li><span class="mk" [class.st-done]="c.score >= 1" [class.st-waiting]="c.score > 0 && c.score < 1" [class.st-failed]="!c.score">{{ cmark(c.score) }}</span>
+                          <b>{{ c.label }}</b> <span>{{ c.finding }}</span>
+                          @if (c.override; as o) { <span class="faint">(the agent changed this from {{ cmark(o.from) }}: {{ o.reason }})</span> }
+                        </li>
+                      }
+                    }
+                  </ul>
+                </section>
+              }
               <table>
                 <thead><tr><th>Step</th><th>State</th><th>Started</th><th>Took</th><th>What happened</th></tr></thead>
                 <tbody>
@@ -126,6 +145,11 @@ const STATE: Record<FactoryItem['state'], { label: string; cls: string }> = {
     tr.cur td { background: var(--paper-2); }
     td:first-child { white-space: nowrap; font-weight: 600; }
     .faint { color: var(--ink-faint); }
+    .spec.tag { cursor: pointer; border: 0; font: inherit; font-size: 10.5px; }
+    .specd h3 { margin: 0 0 6px; font-size: 12.5px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+    .specd h3 .faint { font-weight: 400; font-size: 12px; }
+    .specd ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; font-size: 12.5px; }
+    .specd li { display: flex; flex-wrap: wrap; gap: 0 6px; align-items: baseline; }
     .line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 5px; }
     .line + .line { margin-top: 3px; }
     .mk.st-done { color: var(--green); }
@@ -151,6 +175,8 @@ export class FactoryTicketsComponent {
   mark(s: FactoryStepState): string { return STEP_MARK[s]; }
   word(s: FactoryStepState): string { return STEP_WORD[s]; }
   rowMark(s: FactoryStepStatus): string { return ROW_MARK[s]; }
+  level = specLevel;
+  cmark = checkMark;
   rel(t: string): string { return relTime(t); }
   took(s: FactoryItemStep): string {
     if (s.state === 'pending' || s.state === 'skipped') return '';

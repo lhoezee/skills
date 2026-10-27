@@ -89,3 +89,16 @@ test("policy prints factory.json, or exists: false", () => {
   const none = workspace();
   assert.deepEqual(JSON.parse(execFileSync(process.execPath, [SCRIPT, "policy", "--root", none.wt], { encoding: "utf-8" })), { exists: false });
 });
+
+test("reports made at the same moment (one subagent per repo) are all kept", async () => {
+  const { ws, wt } = workspace();
+  const { spawn } = await import("node:child_process");
+  const repos = ["a", "b", "c", "d", "e", "f"];
+  await Promise.all(repos.map((r) => new Promise((resolve, reject) => {
+    const p = spawn(process.execPath, [SCRIPT, "stage", "--ticket", "ENG-1", "--stage", "build", "--status", "running", "--repo", r, "--root", wt], { stdio: "ignore" });
+    p.on("exit", (code) => (code === 0 ? resolve() : reject(new Error(`exit ${code}`))));
+  })));
+  const m = JSON.parse(fs.readFileSync(path.join(ws, ".claude", "ledger", "factory", "ENG-1.json"), "utf-8"));
+  assert.deepEqual(m.stages.map((s) => s.repo).sort(), repos);
+  assert.equal(fs.existsSync(path.join(ws, ".claude", "ledger", "factory", "ENG-1.json.lock")), false);
+});

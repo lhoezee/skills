@@ -18,6 +18,7 @@
  *                          [--by who] [--mode human|approver|auto] [--risk low|medium|high] [--rationale "..."] [--sha s]
  *   node factory.mjs pr    --ticket <id> --url <pr url> [--repo r] [--number n] [--state open|merged|closed]
  *   node factory.mjs done  --ticket <id> [--error "why it stopped"]
+ *   (spec readiness is recorded by spec-check.mjs --ticket <id>)
  *   node factory.mjs show  --ticket <id>
  *   node factory.mjs policy [--root <dir>]     the workspace's factory.json (or { exists: false })
  *
@@ -28,6 +29,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { findRoot, isMain, parseArgs, readJson, readWorktreeMeta } from "./lib.mjs";
+import { withFileLock } from "./worktree.mjs";
 
 export const STAGES = ["align", "plan", "build", "review", "security", "qa", "guide", "pr", "approve", "merge"];
 export const GATES = ["spec", "plan", "prePr", "merge"];
@@ -81,7 +83,7 @@ function fresh(ticket, now, policy) {
     version: 1, ticket, title: null, url: null, mode: "interactive",
     policy: policy ? { preset: policy.preset ?? null, updatedAt: policy.updatedAt } : null,
     workroot: null, branch: null, repos: [], plan: null,
-    startedAt: now, updatedAt: now, stages: [], gates: [], prs: [], done: false, error: null,
+    startedAt: now, updatedAt: now, spec: null, stages: [], gates: [], prs: [], done: false, error: null,
   };
 }
 
@@ -93,9 +95,19 @@ export function update(command, args, { start = process.cwd(), now = new Date().
   const file = manifestPath(ws, ticket);
   if (!file) return { skipped: "This workspace has no Natterjack dashboard (.claude/dashboard), so there's no Factory board to report to." };
   const policy = readPolicy(ws);
-  const m = readJson(file) || fresh(ticket, now, policy);
-  if (command === "show") return { manifest: m, file };
+  if (command === "show") return { manifest: readJson(file) || fresh(ticket, now, policy), file };
+  // Subagents report in parallel (one per repo): read, change and write under a lock so no report is lost.
+  return withFileLock(file, () => {
+    const m = readJson(file) || fresh(ticket, now, policy);
+    apply(command, args, m, policy, now);
+    m.updatedAt = now;
+    write(file, m);
+    return { manifest: m, file };
+  });
+}
 
+/** One command's change to a manifest (throws a usage error for bad arguments). */
+function apply(command, args, m, policy, now) {
   if (command === "start") {
     for (const k of ["title", "url", "branch", "plan"]) if (str(args[k])) m[k] = str(args[k]);
     if (args.mode === "autonomous" || args.mode === "interactive") m.mode = args.mode;
@@ -138,15 +150,17 @@ export function update(command, args, { start = process.cwd(), now = new Date().
     const have = m.prs.find((p) => p.url === url);
     if (have) { have.state = state; if (str(args.repo)) have.repo = str(args.repo); }
     else m.prs.push({ repo: str(args.repo), url, number: Number.isInteger(n) ? n : null, state });
+  } else if (command === "spec") {
+    // spec-check.mjs's result: kept as is (the board shows the score, level and each check).
+    const r = args.result;
+    if (!r || typeof r !== "object" || !Number.isFinite(r.score) || !Array.isArray(r.checks)) throw usage("spec needs spec-check.mjs's result");
+    m.spec = { score: r.score, level: r.level, readyAt: r.readyAt, needsWorkAt: r.needsWorkAt, minScore: r.minScore ?? null, checks: r.checks, at: now };
   } else if (command === "done") {
     m.done = true;
     m.error = str(args.error);
   } else {
     throw usage(`Unknown command "${command}". Use start, stage, gate, pr, done, show or policy.`);
   }
-  m.updatedAt = now;
-  write(file, m);
-  return { manifest: m, file };
 }
 
 async function main(argv) {

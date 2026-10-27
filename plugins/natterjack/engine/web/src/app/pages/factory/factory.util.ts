@@ -1,6 +1,16 @@
-import type { FactoryConfig, FactoryGateId, FactoryPreset, FactoryPresetPatch, FactoryStageId } from '../../../../../shared/api';
+import type { FactoryConfig, FactoryGateId, FactoryPreset, FactoryPresetPatch, FactoryStageId, SpecLevel } from '../../../../../shared/api';
+import { pipelineOrder, withPresetPatch } from '../../../../../shared/factory-rules';
 
 export const GATE_IDS: FactoryGateId[] = ['spec', 'plan', 'prePr', 'merge'];
+
+const SPEC_LEVELS: Record<SpecLevel, { label: string; cls: string }> = {
+  ready: { label: 'Ready', cls: 'good' }, 'needs-work': { label: 'Needs work', cls: 'amber' }, 'not-ready': { label: 'Not ready', cls: 'bad' },
+};
+/** A spec readiness level's words and tag colour. */
+export function specLevel(l: SpecLevel): { label: string; cls: string } { return SPEC_LEVELS[l] || SPEC_LEVELS['not-ready']; }
+
+/** A check's mark: met, partly, missing. */
+export function checkMark(score: number): string { return score >= 1 ? '✓' : score > 0 ? '~' : '✗'; }
 
 /** The preset a config matches (its gates, mode and Approver settings), else 'custom'. */
 export function matchingPreset(c: FactoryConfig, presets: Record<string, FactoryPresetPatch>): FactoryPreset {
@@ -15,39 +25,14 @@ export function matchingPreset(c: FactoryConfig, presets: Record<string, Factory
   return 'custom';
 }
 
-/** A preset applied to a config: its gates, mode and Approver settings; everything else kept. */
+/** A preset applied to a config: its gates, mode and Approver settings; everything else kept (the server's rule). */
 export function withPreset(c: FactoryConfig, id: Exclude<FactoryPreset, 'custom'>, presets: Record<string, FactoryPresetPatch>): FactoryConfig {
-  const p = presets[id];
-  const out: FactoryConfig = structuredClone(c);
-  out.preset = id;
-  if (p.mode) out.mode = p.mode;
-  out.gates = { ...p.gates };
-  out.approver = { ...out.approver, ...p.approver };
-  const approve = out.stages.find((s) => s.id === 'approve');
-  if (approve) approve.on = p.approve;
-  return out;
+  return withPresetPatch(c, id, presets[id]);
 }
 
-/**
- * The board's columns for a config, in order (the server's rule): the stages that are on, with
- * each gate that isn't off where it guards: spec before planning, plan after it, pre-PR before
- * the PR, merge before merging.
- */
+/** The board's columns for a config, in order (the server's rule, shared/factory-rules.ts). */
 export function pipelineSteps(c: FactoryConfig): ({ kind: 'stage'; id: FactoryStageId } | { kind: 'gate'; id: FactoryGateId })[] {
-  const out: ({ kind: 'stage'; id: FactoryStageId } | { kind: 'gate'; id: FactoryGateId })[] = [];
-  const gate = (id: FactoryGateId) => { if (c.gates[id] !== 'off') out.push({ kind: 'gate', id }); };
-  let spec = false, prePr = false, merge = false;
-  for (const s of c.stages.filter((x) => x.on)) {
-    if (!spec && (s.id === 'plan' || s.id === 'build')) { gate('spec'); spec = true; }
-    if (!prePr && s.id === 'pr') { gate('prePr'); prePr = true; }
-    if (!merge && s.id === 'merge') { gate('merge'); merge = true; }
-    out.push({ kind: 'stage', id: s.id });
-    if (s.id === 'plan') gate('plan');
-  }
-  if (!spec) gate('spec');
-  if (!prePr) gate('prePr');
-  if (!merge) gate('merge');
-  return out;
+  return pipelineOrder(c) as ({ kind: 'stage'; id: FactoryStageId } | { kind: 'gate'; id: FactoryGateId })[];
 }
 
 /** "a, b,, c" or one per line → ['a', 'b', 'c'] (no duplicates). */
