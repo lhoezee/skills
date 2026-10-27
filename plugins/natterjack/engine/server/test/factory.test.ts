@@ -7,7 +7,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   applyPreset, boardColumns, buildBoard, defaultFactoryConfig, factoryConfigProblems, factoryConfigState, normalizeFactoryConfig,
-  GATE_IDS, SPEC_CHECKS, STAGE_IDS, normalizeManifest, pipeline, placeItem, readManifests, saveFactoryConfig,
+  GATE_IDS, SPEC_CHECKS, STAGE_IDS, factoryLaunchBlocker, normalizeManifest, pipeline, placeItem, readManifests, saveFactoryConfig,
 } from "../src/factory.ts";
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), "factory-"));
@@ -249,4 +249,25 @@ test("Copilot on #112: plan gate without planning, retried rows, a deleted polic
   const first = saveFactoryConfig({ config: defaultFactoryConfig(), mtimeMs: null }, dir);
   fs.unlinkSync(path.join(dir, "factory.json"));
   assert.throws(() => saveFactoryConfig({ config: first.config, mtimeMs: first.mtimeMs }, dir), (e: any) => e.status === 409);
+});
+
+test("the factory refuses a launch over the ticket's budget or hours, the day's budget, or the WIP limit", () => {
+  const cfg = { ...defaultFactoryConfig(), enabled: true, limits: { wip: 1, itemBudgetUsd: 10, dayBudgetUsd: 30, itemHours: 2 } };
+  const now = Date.parse("2026-10-27T15:00:00");
+  const run = (id: string, ticket: string, costUsd: number, startedAt = "2026-10-27T09:00:00", durationMs = 0) =>
+    ({ id, ticket, status: "succeeded" as const, costUsd, startedAt: new Date(startedAt).toISOString(), agent: "claude", model: null, durationMs });
+  const started = (t: string) => manifest({ ticket: t, stages: [{ id: "build", status: "running" }] });
+
+  assert.equal(factoryLaunchBlocker(cfg, true, "ENG-1", [], [], now), null);
+  assert.equal(factoryLaunchBlocker({ ...cfg, enabled: false }, true, "ENG-1", [started("ENG-2")], [run("a", "ENG-1", 99)], now), null, "off: no limits");
+  assert.match(factoryLaunchBlocker(cfg, true, "ENG-1", [], [run("a", "eng-1", 6), run("b", "ENG-1", 4.5)], now)!, /ENG-1 has used \$10\.50 of its \$10\.00 budget/);
+  assert.match(factoryLaunchBlocker(cfg, true, "ENG-1", [], [run("a", "ENG-1", 1, undefined, 2.5 * 3_600_000)], now)!, /2\.5 of its 2 agent hours/);
+  // Today's spend counts runs of tickets on the board, started since midnight.
+  const day = [run("a", "ENG-2", 9), run("b", "ENG-3", 9), run("c", "ENG-4", 9), run("d", "ENG-5", 9, "2026-10-26T20:00:00"), run("e", "OTHER-1", 50)];
+  const board = ["ENG-2", "ENG-3", "ENG-4", "ENG-5"].map((t) => manifest({ ticket: t, done: true }));
+  assert.equal(factoryLaunchBlocker(cfg, true, "ENG-1", board, day, now), null);
+  assert.match(factoryLaunchBlocker(cfg, true, "ENG-1", board, [...day, run("f", "ENG-2", 4)], now)!, /spent \$31\.00 of its \$30\.00 budget today/);
+  // WIP: another ticket in flight blocks a new one, but not one that's already in flight.
+  assert.match(factoryLaunchBlocker(cfg, true, "ENG-1", [started("ENG-2")], [], now)!, /1 ticket is already in the factory \(WIP limit 1\): ENG-2/);
+  assert.equal(factoryLaunchBlocker(cfg, true, "ENG-2", [started("ENG-2"), started("ENG-3")], [], now), null);
 });

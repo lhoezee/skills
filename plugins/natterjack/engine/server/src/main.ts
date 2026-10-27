@@ -42,7 +42,7 @@ import { RunManager, httpError, runLabel } from "./runs.ts";
 import { Deck, Scheduler } from "./deck.ts";
 import { Inbox } from "./inbox.ts";
 import { Reviews, numberParam, repoParam } from "./reviews.ts";
-import { type FactoryRun, buildBoard, factoryConfigState, readManifests, saveFactoryConfig } from "./factory.ts";
+import { type FactoryRun, buildBoard, factoryConfigState, factoryLaunchBlocker, readManifests, saveFactoryConfig } from "./factory.ts";
 import { Watcher } from "./watches.ts";
 import { Usage } from "./usage.ts";
 import { UsageHistory } from "./usage-history.ts";
@@ -361,17 +361,30 @@ function mainRepos(): string[] {
   return [...out];
 }
 
+/** Runs as the Factory sees them: each with its ticket. */
+function factoryRuns(): FactoryRun[] {
+  const wsTicket = new Map(listWorkspaces().map((w) => [w.slug, w.ticketId || null]));
+  return runs.list().slice(0, 500).map((r) => ({
+    id: r.id, ticket: runTicket(r, wsTicket.get(r.workspace))?.id ?? null, status: r.status,
+    costUsd: r.costUsd || 0, startedAt: r.startedAt, agent: r.agent || "claude", model: r.model, durationMs: r.durationMs || 0,
+  }));
+}
+
 /** The Factory board: every work item's manifest in its column, with its ticket's runs. */
 function factoryBoard() {
   const state = factoryConfigState(!isReader());
   const { manifests, errors } = readManifests();
   if (state.error) errors.unshift(state.error);
-  const wsTicket = new Map(listWorkspaces().map((w) => [w.slug, w.ticketId || null]));
-  const factoryRuns: FactoryRun[] = runs.list().slice(0, 500).map((r) => ({
-    id: r.id, ticket: runTicket(r, wsTicket.get(r.workspace))?.id ?? null, status: r.status,
-    costUsd: r.costUsd || 0, startedAt: r.startedAt, agent: r.agent || "claude", model: r.model,
-  }));
-  return buildBoard(state.config, state.exists && !state.error, manifests, factoryRuns, errors);
+  return buildBoard(state.config, state.exists && !state.error, manifests, factoryRuns(), errors);
+}
+
+/** Why the factory's policy won't start an implement run for this prompt's ticket, or null. */
+function factoryBlocker(prompt: string): string | null {
+  const ticket = implementTicket(prompt);
+  if (!ticket) return null;
+  const state = factoryConfigState(true);
+  if (!state.exists || state.error) return null;
+  return factoryLaunchBlocker(state.config, true, ticket, readManifests().manifests, factoryRuns());
 }
 
 /** The worktree a run worked in (the run page's rule) and its repos, or null for a run that stayed in main. */
@@ -933,7 +946,7 @@ function launchRun(body: LaunchRequest, trigger: string): RunMeta {
   // A local or team model takes no effort (and no dollar budget: it isn't Claude's usage).
   const routed = isRoutedId(model);
   const effort = routed ? null : pick("effort") || (agentId === "claude" ? defaults.effort : null);
-  const blocker = launchBlocker(agentId, model);
+  const blocker = launchBlocker(agentId, model) || factoryBlocker(prompt);
   if (blocker) throw httpError(429, blocker);
   const permissionMode = pick("permissionMode") || "auto";
   // No per-run cap unless the runBudget setting is on (on a subscription it only stops working runs).

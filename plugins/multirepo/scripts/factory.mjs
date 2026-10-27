@@ -21,6 +21,10 @@
  *   (spec readiness is recorded by spec-check.mjs --ticket <id>)
  *   node factory.mjs show  --ticket <id>
  *   node factory.mjs policy [--root <dir>]     the workspace's factory.json (or { exists: false })
+ *   node factory.mjs decide --ticket <id> --gate spec|plan|prePr|merge [--run interactive|autonomous] [--can-ask yes|no]
+ *                          what to do at a gate by the policy: { action: own-rules|skip|pass|ask|stop|handoff, reason }
+ *   node factory.mjs wip   --ticket <id>       other tickets in flight vs the policy's WIP limit: { inFlight, limit, ok }
+ *   node factory.mjs stage-on --stage <stage>   whether the policy runs a stage: { policy, on } (on: null with no policy on)
  *
  * Stages: align plan build review security qa guide pr approve merge. A stage is one row per
  * repo (updated in place); a gate decision is appended (the history is the audit log).
@@ -163,6 +167,88 @@ function apply(command, args, m, policy, now) {
   }
 }
 
+// ------------------------------------------------------------------ the policy's decisions
+
+const GATE_NAMES = { spec: "spec", plan: "plan", prePr: "pre-PR", merge: "merge" };
+
+/** The newest row per repo of one stage. */
+function latestRows(m, stage) {
+  const by = new Map();
+  for (const r of (m && m.stages) || []) if (r.id === stage) by.set(r.repo ?? "", r);
+  return [...by.values()];
+}
+
+/** Whether the policy turns a stage on (stages it doesn't list keep the dashboard's defaults). */
+export function stageOn(policy, id) {
+  const s = Array.isArray(policy && policy.stages) ? policy.stages.find((x) => x && x.id === id) : null;
+  if (s) return s.on !== false;
+  return !["align", "qa", "approve"].includes(id);
+}
+
+/**
+ * What the pipeline does at a gate, by the team's policy:
+ *   own-rules  no policy is on: the skill's own interactive/--auto rules
+ *   skip       the gate is off
+ *   pass       carry on (record it approved --by auto)
+ *   ask        ask the person (AskUserQuestion; a question card in the dashboard)
+ *   stop       stop here and say on the ticket why (record it pending, or rejected)
+ *   handoff    nothing more for this run (the merge gate: implement never merges)
+ * `run` is how this run goes (interactive | autonomous); `canAsk` whether it can ask a person.
+ */
+export function decide(policy, manifest, gate, { run = "interactive", canAsk = run === "interactive" } = {}) {
+  if (!GATES.includes(gate)) throw usage(`--gate must be one of ${GATES.join(", ")}`);
+  const name = GATE_NAMES[gate];
+  if (!policy || policy.enabled !== true) return { gate, mode: null, action: "own-rules", reason: "No factory policy is on: follow this skill's own rules." };
+  const mode = ["human", "approver", "auto", "off"].includes(policy.gates && policy.gates[gate]) ? policy.gates[gate] : "human";
+  const out = (action, reason) => ({ gate, mode, action, reason });
+  const askOrStop = (why) => (canAsk ? out("ask", why) : out("stop", `${why} This run can't ask anyone: stop, and say on the ticket that it's waiting at the ${name} gate.`));
+  const spec = manifest && manifest.spec;
+
+  // The team's minimum spec score stops unattended runs whatever the gate's mode.
+  if (gate === "spec" && run === "autonomous" && spec && spec.minScore != null && spec.score < spec.minScore) {
+    return out("stop", `Spec readiness ${spec.score} is below the team's minimum for unattended runs (${spec.minScore}).`);
+  }
+  if (mode === "off") return out("skip", `The ${name} gate is off.`);
+  if (gate === "merge") return out("handoff", mode === "auto" ? "The merge gate passes when the required checks are green; this run never merges." : "A person (or the Approver, once it runs) merges; this run never merges.");
+  if (mode === "human" || mode === "approver") {
+    const who = mode === "approver" ? "The Approver isn't running yet, so a person decides." : `A person decides the ${name} gate.`;
+    return askOrStop(who);
+  }
+  // auto: passes when its checks pass.
+  if (gate === "spec") {
+    if (!spec) return askOrStop("The spec gate is automatic, but the ticket has no spec score yet (run spec-check.mjs --ticket).");
+    if (spec.level === "ready") return out("pass", `Spec readiness ${spec.score} is Ready (${spec.readyAt}+).`);
+    return askOrStop(`Spec readiness ${spec.score} is below Ready (${spec.readyAt}).`);
+  }
+  if (gate === "plan") return out("pass", "The plan gate is automatic.");
+  // prePr: every repo's review passed, and the security stage when it's on.
+  const reviews = latestRows(manifest, "review");
+  if (!reviews.length) return askOrStop("The pre-PR gate is automatic, but no review is recorded.");
+  const failed = reviews.filter((r) => r.status !== "done").map((r) => r.repo || "review");
+  if (failed.length) return askOrStop(`The review didn't pass for ${failed.join(", ")}.`);
+  if (stageOn(policy, "security")) {
+    const sec = latestRows(manifest, "security");
+    if (!sec.length) return askOrStop("The pre-PR gate is automatic, but the security stage hasn't run.");
+    const bad = sec.filter((r) => r.status === "failed").map((r) => r.repo || "security");
+    if (bad.length) return askOrStop(`The security stage failed for ${bad.join(", ")}.`);
+  }
+  return out("pass", "Reviews and the security stage passed.");
+}
+
+/** Tickets in flight (started, not done) other than this one, against the policy's WIP limit. */
+export function wip(ws, ticket, policy) {
+  const dir = path.join(ws, ".claude", "ledger", "factory");
+  let inFlight = [];
+  try {
+    inFlight = fs.readdirSync(dir).filter((f) => f.endsWith(".json"))
+      .map((f) => readJson(path.join(dir, f)))
+      .filter((m) => m && m.ticket && !m.done && String(m.ticket).toLowerCase() !== String(ticket).toLowerCase() && ((m.stages || []).length || (m.gates || []).length))
+      .map((m) => m.ticket);
+  } catch {}
+  const limit = Number.isInteger(policy && policy.limits && policy.limits.wip) ? policy.limits.wip : 3;
+  return { inFlight, limit, ok: !(policy && policy.enabled === true) || inFlight.length < limit };
+}
+
 async function main(argv) {
   const args = parseArgs(argv);
   const [command] = args._;
@@ -171,6 +257,25 @@ async function main(argv) {
     const ws = sourceWorkspace(start);
     const p = readPolicy(ws);
     process.stdout.write(JSON.stringify(p ? { exists: true, ...p } : { exists: false }, null, 2) + "\n");
+    return;
+  }
+  if (command === "stage-on") {
+    if (!STAGES.includes(args.stage)) throw usage(`--stage must be one of ${STAGES.join(", ")}`);
+    const policy = readPolicy(sourceWorkspace(start));
+    const enabled = !!(policy && policy.enabled === true);
+    process.stdout.write(JSON.stringify({ stage: args.stage, policy: enabled, on: enabled ? stageOn(policy, args.stage) : null }, null, 2) + "\n");
+    return;
+  }
+  if (command === "decide" || command === "wip") {
+    if (typeof args.ticket !== "string" || !args.ticket.trim()) throw usage("--ticket is required");
+    const ws = sourceWorkspace(start);
+    const policy = readPolicy(ws);
+    const file = manifestPath(ws, args.ticket);
+    const canAsk = args["can-ask"] === undefined ? undefined : args["can-ask"] !== "no";
+    const r = command === "wip"
+      ? wip(ws, args.ticket, policy)
+      : decide(policy, file ? readJson(file) : null, args.gate, { run: args.run === "autonomous" ? "autonomous" : "interactive", ...(canAsk === undefined ? {} : { canAsk }) });
+    process.stdout.write(JSON.stringify(r, null, 2) + "\n");
     return;
   }
   const out = update(command, args, { start });

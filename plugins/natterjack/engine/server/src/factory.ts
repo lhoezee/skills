@@ -353,7 +353,7 @@ export function boardColumns(c: FactoryConfig): FactoryColumn[] {
 }
 
 /** A run of the item's ticket, as the board needs it. */
-export interface FactoryRun { id: string; ticket: string | null; status: RunStatus; costUsd: number; startedAt: string; agent: string | null; model: string | null }
+export interface FactoryRun { id: string; ticket: string | null; status: RunStatus; costUsd: number; startedAt: string; agent: string | null; model: string | null; durationMs?: number }
 
 const WHO: Record<FactoryGateMode, string> = { human: "you", approver: "the Approver", auto: "its checks", off: "" };
 
@@ -399,6 +399,39 @@ function latestPerRepo<T extends { repo: string | null }>(rows: T[]): T[] {
   const by = new Map<string, T>();
   for (const r of rows) by.set(r.repo ?? "", r);
   return [...by.values()];
+}
+
+const sameTicket = (a: string | null | undefined, b: string | null | undefined) => !!a && !!b && a.toLowerCase() === b.toLowerCase();
+const money = (n: number) => `$${n.toFixed(2)}`;
+
+/**
+ * Why the factory won't start another run for a ticket, or null. Only with the factory on:
+ * the ticket's budget or agent hours are used up, the day's factory budget is spent (runs of
+ * tickets on the board, started today), or the WIP limit is full and this ticket isn't already
+ * in flight (carrying on with one in flight is fine).
+ */
+export function factoryLaunchBlocker(cfg: FactoryConfig, configured: boolean, ticket: string, manifests: FactoryManifest[], runs: FactoryRun[], now = Date.now()): string | null {
+  if (!configured || !cfg.enabled) return null;
+  const mine = runs.filter((r) => sameTicket(r.ticket, ticket));
+  const { itemBudgetUsd, dayBudgetUsd, itemHours, wip } = cfg.limits;
+  const spent = mine.reduce((s, r) => s + (r.costUsd || 0), 0);
+  if (itemBudgetUsd != null && spent >= itemBudgetUsd) return `${ticket} has used ${money(spent)} of its ${money(itemBudgetUsd)} budget (Factory policy). Raise the budget on Factory → Policy to carry on.`;
+  const hours = mine.reduce((s, r) => s + (r.durationMs || 0), 0) / 3_600_000;
+  if (itemHours != null && hours >= itemHours) return `${ticket} has had ${hours.toFixed(1)} of its ${itemHours} agent hours (Factory policy). Raise the limit on Factory → Policy to carry on.`;
+  if (dayBudgetUsd != null) {
+    const day = new Date(now);
+    day.setHours(0, 0, 0, 0);
+    const onBoard = (t: string | null) => manifests.some((m) => sameTicket(m.ticket, t));
+    const today = runs.filter((r) => Date.parse(r.startedAt) >= day.getTime() && onBoard(r.ticket)).reduce((s, r) => s + (r.costUsd || 0), 0);
+    if (today >= dayBudgetUsd) return `The factory has spent ${money(today)} of its ${money(dayBudgetUsd)} budget today (Factory policy).`;
+  }
+  const inFlight = (m: FactoryManifest) => !m.done && (m.stages.length > 0 || m.gates.length > 0);
+  const self = manifests.find((m) => sameTicket(m.ticket, ticket));
+  if (!(self && inFlight(self))) {
+    const others = manifests.filter((m) => inFlight(m) && !sameTicket(m.ticket, ticket));
+    if (others.length >= wip) return `${others.length} ${others.length === 1 ? "ticket is" : "tickets are"} already in the factory (WIP limit ${wip}): ${others.slice(0, 5).map((m) => m.ticket).join(", ")}. Finish one first, or raise the limit on Factory → Policy.`;
+  }
+  return null;
 }
 
 /** Every pipeline step for one item: its state, times, per-repo rows and gate decisions. */
