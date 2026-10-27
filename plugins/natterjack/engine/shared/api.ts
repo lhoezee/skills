@@ -675,6 +675,50 @@ export interface ReviewPrDetail {
   summary: ReviewSummary | null;
 }
 
+/** What a hunk is for, in a guided review: core carries the behaviour; the rest is collapsed by default. */
+export type HunkTag = 'core' | 'supporting' | 'test' | 'generated' | 'formatting';
+
+/** One line of a hunk: t is '+', '-' or ' '; old/new are its line numbers on each side. */
+export interface DiffLine { t: '+' | '-' | ' '; text: string; old: number | null; new: number | null }
+/** id: "h1", "h2"... across the whole PR, in diff order (what a guide points at). */
+export interface DiffHunk { id: string; header: string; oldStart: number; newStart: number; lines: DiffLine[] }
+export interface DiffFile {
+  path: string; oldPath: string | null; status: 'added' | 'deleted' | 'renamed' | 'modified';
+  binary: boolean; additions: number; deletions: number; hunks: DiffHunk[];
+}
+/** GET /api/reviews/diff?repo=&number= (truncated: the diff was too big to show all of). */
+export interface ReviewDiff { sha: string; files: DiffFile[]; truncated: boolean }
+
+/** A point a guide makes, with the hunks it's about. */
+export interface GuidePoint { title: string; text: string; hunks: string[] }
+
+/**
+ * GET /api/reviews/guide?repo=&number= (null: none for this commit yet), POST /api/reviews/guide
+ * { repo, number, force? }: chapters in reading order, for one head commit.
+ */
+export interface ReviewGuide {
+  sha: string; at: string;
+  /** The tracker ticket the PR names (title or branch), when one was found. */
+  ticket: { id: string; title: string; url: string } | null;
+  /** What the PR is for: the ticket's ask and the approach taken. */
+  intent: string;
+  core: GuidePoint[];
+  consequences: GuidePoint[];
+  supporting: GuidePoint[];
+  risk: GuidePoint[];
+  /** 3-5 specific things for the reviewer to check. */
+  questions: string[];
+  /** Hunk id → what it's for. Hunks left out count as supporting. */
+  tags: Record<string, HunkTag>;
+  /** About how long a careful review takes. */
+  minutes: number;
+}
+
+export type Severity = 'critical' | 'high' | 'medium' | 'low';
+export interface SecurityFinding { severity: Severity; title: string; text: string; hunks: string[] }
+/** GET/POST /api/reviews/security: an agent's security review of the diff, for one head commit. */
+export interface SecurityReview { sha: string; at: string; summary: string; findings: SecurityFinding[] }
+
 // ---------------------------------------------------------------- apps / workspaces
 
 export interface AppStatus {

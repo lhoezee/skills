@@ -7,6 +7,7 @@ import { ApiService } from '../../core/api.service';
 import { relTime } from '../../core/util';
 import { PageHeaderComponent } from '../../shared/page-header.component';
 import { ReviewDetailComponent } from './review-detail.component';
+import { ReviewGuideComponent } from './review-guide.component';
 import { type ReviewFilter, filterPrs, needsSummary, prKey } from './reviews.util';
 
 /** Summaries asked for at once from the list (the server makes two at a time anyway). */
@@ -21,7 +22,7 @@ const SUMMARY_ROWS = 40;
  */
 @Component({
   selector: 'dash-reviews',
-  imports: [PageHeaderComponent, RouterLink, FormsModule, ReviewDetailComponent],
+  imports: [PageHeaderComponent, RouterLink, FormsModule, ReviewDetailComponent, ReviewGuideComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <dash-page-header eyebrow="Agents" title="Reviews" [sub]="api.copy('reviewsSub', 'Open pull requests across your organizations, each with a short summary of what it does.')">
@@ -29,7 +30,9 @@ const SUMMARY_ROWS = 40;
       <button class="btn ghost sm" type="button" (click)="load(true)" [disabled]="loading()">{{ loading() ? 'Refreshing…' : 'Refresh' }}</button>
     </dash-page-header>
 
-    @if (error() && !list()) { <div class="warn-note">{{ error() }}</div> }
+    @if (guiding(); as s) {
+      <dash-review-guide [repo]="s.repo" [number]="s.n" (back)="closeGuide()" />
+    } @else if (error() && !list()) { <div class="warn-note">{{ error() }}</div> }
     @else if (!list()) { <div class="empty">Loading…</div> }
     @else {
       @for (e of list()!.errors; track e) { <div class="warn-note">{{ e }}</div> }
@@ -152,6 +155,8 @@ export class ReviewsComponent implements OnInit {
     const n = Number(this.query()?.get('n'));
     return repo && Number.isInteger(n) && n > 0 ? { repo, n } : null;
   });
+  /** ?view=guide: the open PR's guided review, full width. */
+  readonly guiding = computed(() => (this.query()?.get('view') === 'guide' ? this.selected() : null));
   readonly selectedKey = computed(() => { const s = this.selected(); return s ? `${s.repo}#${s.n}` : null; });
 
   readonly rows = computed(() => filterPrs(this.list()?.prs || [], { filter: this.filter(), org: this.org(), text: this.text(), drafts: this.drafts() }));
@@ -200,6 +205,10 @@ export class ReviewsComponent implements OnInit {
 
   select(pr: { repo: string; number: number } | null): void {
     this.router.navigate([], { queryParams: { repo: pr?.repo ?? null, n: pr?.number ?? null }, queryParamsHandling: 'merge' });
+  }
+
+  closeGuide(): void {
+    this.router.navigate([], { queryParams: { view: null }, queryParamsHandling: 'merge' });
   }
 
   private pump(): void {

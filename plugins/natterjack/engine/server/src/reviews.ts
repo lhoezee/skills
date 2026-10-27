@@ -14,10 +14,11 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import type { ReviewList, ReviewPr, ReviewPrDetail, ReviewSummary } from "../../shared/api.ts";
+import type { ReviewDiff, ReviewGuide, ReviewList, ReviewPr, ReviewPrDetail, ReviewSummary, SecurityReview } from "../../shared/api.ts";
 import { askClaude } from "./claude.ts";
 import { workspaceConfig } from "./config.ts";
 import { gh as ghJson, ghText, rollupState } from "./inbox.ts";
+import { type GuideInput, GuideStore, guidePrompt, parseDiff, parseGuide, parseSecurity, securityPrompt } from "./review-guide.ts";
 
 const LIST_TTL_MS = 2 * 60 * 1000;
 /** PRs one search returns at most (gh's search caps at 1000). */
@@ -27,6 +28,11 @@ const MAX_SUMMARIES = 1000;
 /** Summaries made at once; more wait their turn. */
 const MAX_PARALLEL = 2;
 const SUMMARY_MODEL = "haiku";
+/** The guide and the security review need more judgement than a summary. */
+const GUIDE_MODEL = "sonnet";
+const GUIDE_TIMEOUT_MS = 5 * 60 * 1000;
+/** Diffs kept in memory (by head commit), so the page and a guide don't fetch one twice. */
+const DIFF_CACHE = 20;
 /** What the summary prompt carries at most. */
 export const CAPS = { body: 4000, files: 150, diff: 40_000 };
 
@@ -49,6 +55,10 @@ export interface ReviewsDeps {
   gh: (args: string[]) => Promise<any>;
   ghText: (args: string[]) => Promise<string>;
   ask: (prompt: string) => Promise<string>;
+  /** The guide's and the security review's model call. */
+  askDeep: (prompt: string) => Promise<string>;
+  /** The tracker ticket a PR names in its title or branch, or null. */
+  ticket: (text: string) => Promise<{ id: string; title: string; url: string; description: string } | null>;
   ledgerDir: string;
   /** workspace.json codeHost. */
   codeHost: () => { kind: string; orgs: string[] };
@@ -98,18 +108,23 @@ export class Reviews {
   inflight: Promise<void> | null = null;
   /** PR key ("owner/name#n") → its latest summary. */
   summaries = new Map<string, SummaryEntry>();
-  making = new Map<string, Promise<ReviewSummary>>();
+  making = new Map<string, Promise<any>>();
   queue: (() => void)[] = [];
   running = 0;
+  store: GuideStore;
+  diffs = new Map<string, ReviewDiff>();
 
   constructor(deps: Partial<ReviewsDeps> & { ledgerDir: string }) {
     this.deps = {
       gh: ghJson,
-      ghText,
+      ghText: (args) => ghText(args, 64 * 1024 * 1024),
       ask: (prompt) => askClaude(prompt, { model: SUMMARY_MODEL }),
+      askDeep: (prompt) => askClaude(prompt, { model: GUIDE_MODEL, timeoutMs: GUIDE_TIMEOUT_MS }),
+      ticket: async () => null,
       codeHost: () => workspaceConfig().codeHost,
       ...deps,
     };
+    this.store = new GuideStore(this.deps.ledgerDir);
     this.load();
   }
 
@@ -254,6 +269,74 @@ export class Reviews {
     this.summaries.set(key, entry);
     this.save();
     return { text, sha: entry.sha, at: entry.at };
+  }
+
+  /** The PR's diff as files and numbered hunks, for its current head commit. */
+  async diff(repo: string, number: number): Promise<ReviewDiff> {
+    const d = await this.view(repo, number, "headRefOid");
+    return this.diffAt(repo, number, d.headRefOid);
+  }
+
+  private async diffAt(repo: string, number: number, sha: string): Promise<ReviewDiff> {
+    const key = `${repo}#${number}@${sha}`;
+    const hit = this.diffs.get(key);
+    if (hit) return hit;
+    const diff = { ...parseDiff(await this.deps.ghText(["pr", "diff", String(number), "--repo", repo])), sha };
+    this.diffs.set(key, diff);
+    if (this.diffs.size > DIFF_CACHE) this.diffs.delete(this.diffs.keys().next().value!);
+    return diff;
+  }
+
+  /** The saved guide for the PR's current commit, or null. */
+  async savedGuide(repo: string, number: number): Promise<ReviewGuide | null> {
+    const d = await this.view(repo, number, "headRefOid");
+    return this.store.get<ReviewGuide>(repo, number, d.headRefOid, "guide");
+  }
+
+  /** The saved security review for the PR's current commit, or null. */
+  async savedSecurity(repo: string, number: number): Promise<SecurityReview | null> {
+    const d = await this.view(repo, number, "headRefOid");
+    return this.store.get<SecurityReview>(repo, number, d.headRefOid, "security");
+  }
+
+  /** The guide for the PR's current commit: the saved one, or a new one (force: a new one anyway). */
+  guide(repo: string, number: number, force = false): Promise<ReviewGuide> {
+    return this.once(`guide:${repo}#${number}`, () => this.makeDeep(repo, number, force, "guide", async (input, ids) => ({
+      ...parseGuide(await this.deps.askDeep(guidePrompt(input)), ids),
+      ticket: input.ticket ? { id: input.ticket.id, title: input.ticket.title, url: input.ticket.url } : null,
+    })));
+  }
+
+  /** An agent's security review of the PR's diff, for its current commit (saved like the guide). */
+  security(repo: string, number: number, force = false): Promise<SecurityReview> {
+    return this.once(`security:${repo}#${number}`, () => this.makeDeep(repo, number, force, "security", async (input, ids) =>
+      parseSecurity(await this.deps.askDeep(securityPrompt(input)), ids)));
+  }
+
+  /** One job per key at a time: asking again while it runs waits for the same one. */
+  private once<T>(key: string, make: () => Promise<T>): Promise<T> {
+    const busy = this.making.get(key);
+    if (busy) return busy as Promise<any>;
+    const job = make().finally(() => this.making.delete(key));
+    this.making.set(key, job as Promise<any>);
+    return job;
+  }
+
+  private async makeDeep<T extends object>(repo: string, number: number, force: boolean, kind: string,
+    make: (input: GuideInput, ids: Set<string>) => Promise<T>): Promise<T & { sha: string; at: string }> {
+    const d = await this.view(repo, number, "title,body,author,baseRefName,headRefName,headRefOid");
+    const saved = this.store.get<T & { sha: string; at: string }>(repo, number, d.headRefOid, kind);
+    if (saved && !force) return saved;
+    const diff = await this.diffAt(repo, number, d.headRefOid);
+    const ticket = await this.deps.ticket(`${d.title} ${d.headRefName}`).catch(() => null);
+    const input: GuideInput = {
+      repo, number, title: d.title, body: d.body || "", author: d.author ? d.author.login : null,
+      base: d.baseRefName, head: d.headRefName, ticket, files: diff.files,
+    };
+    const ids = new Set(diff.files.flatMap((f) => f.hunks.map((h) => h.id)));
+    const made = { ...(await make(input, ids)), sha: d.headRefOid, at: new Date().toISOString() };
+    this.store.put(repo, number, d.headRefOid, kind, made);
+    return made;
   }
 
   /** Runs fn when fewer than MAX_PARALLEL summaries are being made. */

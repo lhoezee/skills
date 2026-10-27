@@ -1,5 +1,6 @@
 import { ChangeDetectionStrategy, Component, computed, effect, inject, input, output, signal } from '@angular/core';
 import type { ReviewPrDetail, ReviewSummary } from '../../../../../shared/api';
+import { RouterLink } from '@angular/router';
 import { ApiService } from '../../core/api.service';
 import { relTime } from '../../core/util';
 
@@ -22,6 +23,7 @@ const DECISIONS: Record<string, { label: string; cls: string }> = {
 /** One pull request on the Reviews page: its summary, checks, reviews and the files it changes. */
 @Component({
   selector: 'dash-review-detail',
+  imports: [RouterLink],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <article class="panel detail" aria-live="polite">
@@ -62,6 +64,7 @@ const DECISIONS: Record<string, { label: string; cls: string }> = {
           @if (decision(); as dec) { <span class="tag" [class]="dec.cls">{{ dec.label }}</span> }
           @if (d()!.mergeable === 'CONFLICTING') { <span class="tag bad">Merge conflict</span> }
           <span class="diffstat"><span class="add">+{{ d()!.additions }}</span> <span class="del">−{{ d()!.deletions }}</span> in {{ d()!.changedFiles }} {{ d()!.changedFiles === 1 ? 'file' : 'files' }}</span>
+          <a class="btn primary sm" [routerLink]="[]" [queryParams]="{ view: 'guide' }" queryParamsHandling="merge">Guided review</a>
           <a class="btn sm" [href]="d()!.url" target="_blank" rel="noopener">Open on GitHub</a>
         </div>
 

@@ -516,7 +516,17 @@ function cleanupAttachments() {
 cleanupAttachments();
 setInterval(cleanupAttachments, 6 * 3600 * 1000).unref();
 const inbox = new Inbox(runs);
-const reviews = new Reviews({ ledgerDir: LEDGER_DIR });
+const reviews = new Reviews({
+  ledgerDir: LEDGER_DIR,
+  // The ticket a PR names (title or branch), read as the person; a guide's Intent starts from it.
+  ticket: async (text) => {
+    const id = text.match(ticketInTextRe())?.[0];
+    const tracker = trackers.get();
+    if (!id || !tracker.status().connected) return null;
+    const t = await tracker.issue(id);
+    return { id, title: t.title || "", url: t.url || tracker.issueUrl(id) || "", description: t.description || "" };
+  },
+});
 // Connect to Atlassian: Jira and Confluence read as the person who signed in. Hosted, sign-in comes back to the dashboard's own address.
 const atlassian = new Atlassian(LEDGER_DIR, { hosted: !!HOSTED, publicOrigin: HOSTED ? HOSTED.publicOrigin : null });
 const atlassianAuth = () => atlassian.get();
@@ -1580,6 +1590,13 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
       if (!repo || !number) return sendError(res, 400, "Invalid pull request");
       return sendJson(res, await reviews.detail(repo, number));
     }
+    if (p === "/api/reviews/diff" || p === "/api/reviews/guide" || p === "/api/reviews/security") {
+      const repo = repoParam(q("repo"));
+      const number = numberParam(q("number"));
+      if (!repo || !number) return sendError(res, 400, "Invalid pull request");
+      if (p === "/api/reviews/diff") return sendJson(res, await reviews.diff(repo, number));
+      return sendJson(res, p === "/api/reviews/guide" ? await reviews.savedGuide(repo, number) : await reviews.savedSecurity(repo, number));
+    }
     if (p === "/api/usage") return sendJson(res, await usage.get(force));
     if (p === "/api/usage/history") {
       const days = Math.min(Math.max(parseInt(q("days") || "", 10) || 30, 7), 90);
@@ -2038,6 +2055,13 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
     const number = numberParam(body.number);
     if (!repo || !number) return sendError(res, 400, "Invalid pull request");
     return sendJson(res, await reviews.summary(repo, number, body.force === true));
+  }
+  if (p === "/api/reviews/guide" || p === "/api/reviews/security") {
+    const repo = repoParam(body.repo);
+    const number = numberParam(body.number);
+    if (!repo || !number) return sendError(res, 400, "Invalid pull request");
+    const force = body.force === true;
+    return sendJson(res, p === "/api/reviews/guide" ? await reviews.guide(repo, number, force) : await reviews.security(repo, number, force));
   }
   if (p.startsWith("/api/meetings/")) {
     const what = p.slice("/api/meetings/".length);
