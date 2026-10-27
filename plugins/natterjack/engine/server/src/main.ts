@@ -406,6 +406,9 @@ function factoryTicketParam(v: unknown): string | null {
   return s && s.length <= 200 && !/[\u0000-\u001f]/.test(s) ? s : null;
 }
 
+/** Tickets whose gate decision is being recorded (one at a time per ticket). */
+const deciding = new Set<string>();
+
 /** `/implement X` or a plugin's `/multirepo:implement X` (not Explain: that only reads). */
 const IMPLEMENT_PROMPT = /^\/(?:[\w.-]+:)?implement\s+\S/;
 
@@ -2151,19 +2154,32 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
     const ticket = factoryTicketParam(body.ticket);
     if (!ticket) return sendError(res, 400, "Invalid ticket id");
     // The ticket's own run may be asking about this gate right now: it's answered there, not here.
-    const going = factoryRuns().find((r) => r.implement && r.ticket && r.ticket.toLowerCase() === ticket.toLowerCase() && (r.status === "running" || r.status === "waiting"));
-    if (going) return sendError(res, 409, `${ticket}'s run is still going${going.status === "waiting" ? " and asking a question" : ""}: decide there (Activity), or stop it first.`);
-    const by = person(user);
-    const m = await recordGateDecision(ticket, body.gate, body.decision, by, typeof body.note === "string" ? body.note : null);
-    let run = null, launchError = null;
-    // The merge gate is decided on the code host: approving records it, it never starts a run.
-    if (body.decision === "approved" && body.resume !== false && body.gate !== "merge") {
-      try {
-        run = launchRun({ presetId: deck.config().issues.implementPreset, args: { ticket: m.ticket }, options: { auto: m.mode === "autonomous" } }, "factory");
-      } catch (e) { launchError = (e as Error).message; }
+    // Checked before, inside the manifest's lock, and again right before carrying on.
+    const goingRun = () => factoryRuns().find((r) => r.implement && r.ticket && r.ticket.toLowerCase() === ticket.toLowerCase() && (r.status === "running" || r.status === "waiting"));
+    const refuseIfGoing = () => {
+      const going = goingRun();
+      if (going) throw httpError(409, `${ticket}'s run is still going${going.status === "waiting" ? " and asking a question" : ""}: decide there (Activity), or stop it first.`);
+    };
+    const key = ticket.toLowerCase();
+    if (deciding.has(key)) return sendError(res, 409, `${ticket} is being decided already.`);
+    deciding.add(key);
+    try {
+      refuseIfGoing();
+      const by = person(user);
+      const m = await recordGateDecision(ticket, body.gate, body.decision, by, typeof body.note === "string" ? body.note : null, { guard: refuseIfGoing });
+      let run = null, launchError = null;
+      // The merge gate is decided on the code host: approving records it, it never starts a run.
+      if (body.decision === "approved" && body.resume !== false && body.gate !== "merge") {
+        try {
+          refuseIfGoing();
+          run = launchRun({ presetId: deck.config().issues.implementPreset, args: { ticket: m.ticket }, options: { auto: m.mode === "autonomous" } }, "factory");
+        } catch (e) { launchError = (e as Error).message; }
+      }
+      live.refresh("factory");
+      return sendJson(res, { by, run, launchError });
+    } finally {
+      deciding.delete(key);
     }
-    live.refresh("factory");
-    return sendJson(res, { by, run, launchError });
   }
   if (p === "/api/factory/config") {
     // factory.json is the team's policy for agent work: full access only.

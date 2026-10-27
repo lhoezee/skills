@@ -249,3 +249,15 @@ test("starting a finished ticket again starts a new round", () => {
   const m = update("start", { ticket: "ENG-1" }, { start: ws, now: at(3) }).manifest;
   assert.deepEqual([m.roundStartedAt, m.done, m.error], [at(3), false, null]);
 });
+
+test("a manifest from before rounds keeps its approvals: its round starts when it started", () => {
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), "round2-"));
+  fs.mkdirSync(path.join(ws, ".claude", "ledger", "factory"), { recursive: true });
+  fs.mkdirSync(path.join(ws, ".claude", "dashboard"), { recursive: true });
+  const t = (n) => `2026-10-27T1${n}:00:00.000Z`;
+  fs.writeFileSync(path.join(ws, ".claude", "ledger", "factory", "ENG-1.json"), JSON.stringify({ version: 1, ticket: "ENG-1", startedAt: t(0), stages: [], prs: [], done: false,
+    gates: [{ id: "plan", decision: "pending", at: t(1) }, { id: "plan", decision: "approved", by: "kim", at: t(2) }] }));
+  const m = update("start", { ticket: "ENG-1" }, { start: ws, now: t(5) }).manifest;
+  assert.equal(m.roundStartedAt, t(0));
+  assert.equal(decide(on({ plan: "human" }), m, "plan", { run: "autonomous", canAsk: false }).action, "pass");
+});

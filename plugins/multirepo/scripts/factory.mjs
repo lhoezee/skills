@@ -119,7 +119,8 @@ function apply(command, args, m, policy, now) {
     if (list(args.repos).length) m.repos = [...new Set([...m.repos, ...list(args.repos)])];
     m.policy = policy ? { preset: policy.preset ?? null, updatedAt: policy.updatedAt } : m.policy;
     // Picking up a finished (or rejected) ticket again starts a new round: earlier gate decisions no longer stand.
-    if (m.done || !m.roundStartedAt) m.roundStartedAt = now;
+    if (m.done) m.roundStartedAt = now;
+    else if (!m.roundStartedAt) m.roundStartedAt = m.startedAt || now; // written before rounds existed
     m.done = false;
     m.error = null;
   } else if (command === "stage") {

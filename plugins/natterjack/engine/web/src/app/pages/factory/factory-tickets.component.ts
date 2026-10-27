@@ -44,10 +44,8 @@ const STATE: Record<FactoryItem['state'], { label: string; cls: string }> = {
             @if (it.costUsd || it.budgetUsd) { <span [class.over]="it.budgetUsd != null && it.costUsd > it.budgetUsd">\${{ it.costUsd.toFixed(2) }}{{ it.budgetUsd != null ? ' of $' + it.budgetUsd : '' }}</span> }
             @if (it.risk; as r) { <span class="risk" [class]="'risk ' + r.level" [title]="r.rationale || ''">{{ r.level }} risk</span> }
             @for (p of it.prs; track p.url) { <a [href]="p.url" target="_blank" rel="noopener">{{ p.repo || 'PR' }}{{ p.number ? ' #' + p.number : '' }}{{ p.state === 'merged' ? ' (merged)' : '' }}</a> }
-            @if (it.runIds.length) {
-              @if (it.reason === 'Question waiting') { <a class="answer" [routerLink]="['/runs', it.runIds[0]]">Answer the question</a> }
-              @else { <a [routerLink]="['/runs', it.runIds[0]]">Latest run</a> }
-            }
+            @if (it.askingRunId) { <a class="answer" [routerLink]="['/runs', it.askingRunId]">Answer the question</a> }
+            @else if (it.runIds.length) { <a [routerLink]="['/runs', it.runIds[0]]">Latest run</a> }
           </div>
           <ol class="track" [attr.aria-label]="it.ticket + ' pipeline'">
             @for (s of it.steps; track s.id) {
@@ -66,8 +64,8 @@ const STATE: Record<FactoryItem['state'], { label: string; cls: string }> = {
                 <button class="linkish" type="button" (click)="togglePlan(it.ticket)">{{ plans()[it.ticket] !== undefined ? 'Hide the plan' : 'Read the plan' }}</button>
                 @if (plans()[it.ticket]; as p) { <pre class="plan">{{ p }}</pre> }
               }
-              @if (it.reason === 'Question waiting' && it.runIds.length) {
-                <p class="faint">Its run is asking about this right now: <a [routerLink]="['/runs', it.runIds[0]]">answer the question there</a>.</p>
+              @if (it.implementLive) {
+                <p class="faint">Its implement run is still going, so this is decided there@if (it.askingRunId) {: <a [routerLink]="['/runs', it.askingRunId]">answer the question</a>}.</p>
               } @else if (canDecide()) {
                 <textarea rows="2" [ngModel]="notes()[it.ticket] || ''" (ngModelChange)="setNote(it.ticket, $event)" placeholder="A note for the record (optional; say why when rejecting)" [attr.aria-label]="'Note on the ' + g.label"></textarea>
                 <div class="btns">

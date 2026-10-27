@@ -381,10 +381,11 @@ export function roundGates(m: FactoryManifest): FactoryManifest["gates"] {
 
 /**
  * Records a person's decision at the gate a ticket is waiting at: appended to its gates (the audit
- * trail). A rejection ends the item (done, with why). Refused when the ticket isn't waiting there.
+ * trail). A rejection ends the item (done, with why). Refused when the ticket isn't waiting there;
+ * `guard` runs inside the lock, just before writing (it throws to refuse).
  */
 export async function recordGateDecision(ticket: string, gate: FactoryGateId, decision: "approved" | "rejected", by: string, note: string | null,
-  { dir = manifestDir(), now = new Date().toISOString() }: { dir?: string; now?: string } = {}): Promise<FactoryManifest> {
+  { dir = manifestDir(), now = new Date().toISOString(), guard }: { dir?: string; now?: string; guard?: () => void } = {}): Promise<FactoryManifest> {
   const bad = (status: number, message: string) => Object.assign(new Error(message), { status });
   if (!GATE_IDS.includes(gate)) throw bad(400, "Unknown gate.");
   if (decision !== "approved" && decision !== "rejected") throw bad(400, "Decide approved or rejected.");
@@ -395,7 +396,10 @@ export async function recordGateDecision(ticket: string, gate: FactoryGateId, de
     const gates = Array.isArray(raw.gates) ? raw.gates : [];
     const last = [...gates].reverse().find((g: any) => g && g.id === gate);
     if (raw.done) throw bad(409, `${ticket} is finished.`);
-    if (!last || last.decision !== "pending") throw bad(409, `${ticket} isn't waiting at the ${GATE_LABELS[gate].toLowerCase()}.`);
+    // Only the gate's latest request, in the ticket's current round, can be answered.
+    const round = typeof raw.roundStartedAt === "string" ? raw.roundStartedAt : null;
+    if (!last || last.decision !== "pending" || (round && !(typeof last.at === "string" && last.at >= round))) throw bad(409, `${ticket} isn't waiting at the ${GATE_LABELS[gate].toLowerCase()}.`);
+    guard?.();
     const why = note && note.trim() ? note.trim().slice(0, 2000) : null;
     gates.push({ id: gate, mode: last.mode ?? null, decision, by, risk: null, rationale: why, sha: null, at: now });
     raw.gates = gates;
@@ -612,6 +616,8 @@ export function buildBoard(cfg: FactoryConfig, configured: boolean, manifests: F
       prs: m.prs,
       risk: risk ? { level: risk.risk!, rationale: risk.rationale } : null,
       runIds: mine.map((r) => r.id),
+      askingRunId: (mine.find((r) => r.status === "waiting" && r.implement) || mine.find((r) => r.status === "waiting"))?.id ?? null,
+      implementLive: mine.some((r) => r.implement && (r.status === "running" || r.status === "waiting")),
       steps: itemStepList,
       waitingGate: waitingGate(m, itemStepList),
       mode: m.mode, spec: m.spec, plan: m.plan, error: m.error,

@@ -952,6 +952,10 @@ export interface FactoryItem {
   risk: { level: 'low' | 'medium' | 'high'; rationale: string | null } | null;
   /** Runs for this ticket, newest first. */
   runIds: string[];
+  /** A run of this ticket waiting on an answer (an implement run first), or null. */
+  askingRunId: string | null;
+  /** An implement run of this ticket is going (running or asking): its gates are decided there. */
+  implementLive: boolean;
   /** Every step of the pipeline for this item, in order (the Tickets view's track and details). */
   steps: FactoryItemStep[];
   /** The gate it's waiting at for a decision (approve or reject on the Factory page), or null. */

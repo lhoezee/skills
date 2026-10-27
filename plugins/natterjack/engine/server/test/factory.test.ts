@@ -376,3 +376,22 @@ test("readPlan reads a plan in ~/.claude/plans or a workspace's own work folder,
   try { fs.symlinkSync(path.join(home, ".ssh", "id_rsa"), path.join(plans, "sneaky.md")); } catch { return; }
   assert.throws(() => readPlan(m("~/.claude/plans/sneaky.md"), home, []), (e: any) => e.status === 403);
 });
+
+test("Copilot on #114: only this round's request can be answered; the guard runs in the lock; the asking run is named", async () => {
+  const dir = tmp();
+  const t = (n: number) => `2026-10-27T1${n}:00:00.000Z`;
+  const file = path.join(dir, "ENG-1.json");
+  fs.writeFileSync(file, JSON.stringify({ ticket: "ENG-1", roundStartedAt: t(5), gates: [{ id: "plan", mode: "human", decision: "pending", at: t(1) }] }));
+  await assert.rejects(recordGateDecision("ENG-1", "plan", "rejected", "kim", null, { dir }), (e: any) => e.status === 409, "an earlier round's request");
+  fs.writeFileSync(file, JSON.stringify({ ticket: "ENG-1", roundStartedAt: t(5), gates: [{ id: "plan", mode: "human", decision: "pending", at: t(6) }] }));
+  await assert.rejects(recordGateDecision("ENG-1", "plan", "approved", "kim", null, { dir, guard: () => { throw Object.assign(new Error("run started"), { status: 409 }); } }), /run started/);
+  assert.equal(JSON.parse(fs.readFileSync(file, "utf-8")).gates.length, 1, "nothing written when the guard refuses");
+  assert.equal((await recordGateDecision("ENG-1", "plan", "approved", "kim", null, { dir })).gates.length, 2);
+
+  const run = (id: string, status: "waiting" | "running" | "succeeded", implement: boolean, startedAt: string) => ({ id, ticket: "ENG-2", status, costUsd: 0, startedAt, agent: "claude", model: null, implement });
+  const item = (runs: any[]) => buildBoard(defaultFactoryConfig(), true, [manifest({ ticket: "ENG-2" })], runs).items[0];
+  const a = item([run("impl", "waiting", true, t(1)), run("explain", "succeeded", false, t(2))]);
+  assert.deepEqual([a.askingRunId, a.implementLive, a.runIds[0]], ["impl", true, "explain"]);
+  const b = item([run("explain", "waiting", false, t(2)), run("impl", "succeeded", true, t(1))]);
+  assert.deepEqual([b.askingRunId, b.implementLive], ["explain", false], "an Explain question doesn't hold the gate");
+});
