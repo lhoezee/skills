@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { FactoryConfig, FactoryPresetPatch } from '../../../../../shared/api';
-import { matchingPreset, numOrNull, pipelineSteps, splitList, withPreset } from './factory.util';
+import { duration, matchingPreset, numOrNull, pipelineSteps, splitList, withPreset } from './factory.util';
 
 const STAGES = ['align', 'plan', 'build', 'review', 'security', 'qa', 'guide', 'pr', 'approve', 'merge'] as const;
 
@@ -53,5 +53,17 @@ describe('fields', () => {
   });
   it('reads empty numbers as none', () => {
     expect([numOrNull(''), numOrNull('2.5'), numOrNull('x'), numOrNull(0)]).toEqual([null, 2.5, null, 0]);
+  });
+});
+
+describe('duration', () => {
+  it('reads short and long spans, and runs to now without an end', () => {
+    const t = (m: number) => new Date(Date.UTC(2026, 9, 27, 10, 0) + m * 60_000).toISOString();
+    expect(duration(t(0), t(0.5))).toBe('30s');
+    expect(duration(t(0), t(13))).toBe('13m');
+    expect(duration(t(0), t(125))).toBe('2h 5m');
+    expect(duration(t(0), t(60 * 76))).toBe('3d 4h');
+    expect(duration(t(0), null, Date.parse(t(7)))).toBe('7m');
+    expect(duration(null, t(1))).toBe('');
   });
 });

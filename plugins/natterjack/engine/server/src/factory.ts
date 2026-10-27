@@ -15,7 +15,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type {
   AgentId, FactoryBoard, FactoryColumn, FactoryConfig, FactoryConfigState, FactoryGateId, FactoryGateMode, FactoryItem,
-  FactoryManifest, FactoryPreset, FactoryPresetPatch, FactoryScanner, FactoryStageConfig, FactoryStageId, FactoryStepStatus, MergeMethod, RunStatus, Severity,
+  FactoryItemStep, FactoryManifest, FactoryPreset, FactoryPresetPatch, FactoryScanner, FactoryStageConfig, FactoryStageId, FactoryStepStatus, MergeMethod, RunStatus, Severity,
 } from "../../shared/api.ts";
 import { CONFIG_DIR, LEDGER_DIR, readConfigFile, writeConfigFile } from "./config.ts";
 
@@ -344,6 +344,33 @@ export function placeItem(m: FactoryManifest, steps: PipelineStep[]): { column: 
   return { column: "done", state: m.prs.length ? "waiting" : "done", reason: m.prs.length ? "PR open" : null };
 }
 
+/** Every pipeline step for one item: its state, times, per-repo rows and gate decisions. */
+export function itemSteps(m: FactoryManifest, steps: PipelineStep[], column: string): FactoryItemStep[] {
+  const colId = (s: PipelineStep) => (s.kind === "stage" ? s.id : `gate:${s.id}`);
+  const laterActivity = (i: number) => steps.slice(i + 1).some((s) => (s.kind === "stage" ? m.stages.some((x) => x.id === s.id) : m.gates.some((g) => g.id === s.id)));
+  const minIso = (xs: (string | null)[]) => xs.filter((x): x is string => !!x).sort()[0] ?? null;
+  const maxIso = (xs: (string | null)[]) => xs.filter((x): x is string => !!x).sort().at(-1) ?? null;
+  return steps.map((s, i): FactoryItemStep => {
+    const id = colId(s);
+    const base = { id, kind: s.kind as FactoryItemStep["kind"], label: s.kind === "stage" ? STAGE_LABELS[s.id] : GATE_LABELS[s.id], current: id === column, repos: [] as FactoryItemStep["repos"], decisions: [] as FactoryItemStep["decisions"] };
+    if (s.kind === "stage") {
+      const rows = m.stages.filter((x) => x.id === s.id);
+      const repos = rows.map((r) => ({ repo: r.repo, status: r.status, agent: r.agent, note: r.note, startedAt: r.startedAt, endedAt: r.endedAt }));
+      const st = rows.map((r) => r.status);
+      const state: FactoryItemStep["state"] = !rows.length ? (laterActivity(i) || m.done ? "skipped" : "pending")
+        : st.includes("failed") ? "failed" : st.includes("running") ? "running" : st.includes("pending") ? "pending"
+        : st.every((x) => x === "skipped") ? "skipped" : "done";
+      const finished = state === "done" || state === "skipped" || state === "failed";
+      return { ...base, repos, state, startedAt: minIso(rows.map((r) => r.startedAt)), endedAt: finished ? maxIso(rows.map((r) => r.endedAt)) : null };
+    }
+    const hist = m.gates.filter((g) => g.id === s.id).map((g) => ({ decision: g.decision, mode: g.mode, by: g.by, risk: g.risk, rationale: g.rationale, at: g.at }));
+    const last = hist.at(-1);
+    const state: FactoryItemStep["state"] = !last ? (laterActivity(i) || m.done ? "skipped" : "pending")
+      : last.decision === "approved" ? "done" : last.decision === "rejected" ? "failed" : "waiting";
+    return { ...base, decisions: hist, state, startedAt: hist[0]?.at ?? null, endedAt: last && last.decision !== "pending" ? last.at : null };
+  });
+}
+
 /** The Factory board: every manifest placed in its column, joined with its ticket's runs. */
 export function buildBoard(cfg: FactoryConfig, configured: boolean, manifests: FactoryManifest[], runs: FactoryRun[], errors: string[] = []): FactoryBoard {
   const steps = pipeline(cfg);
@@ -375,6 +402,8 @@ export function buildBoard(cfg: FactoryConfig, configured: boolean, manifests: F
       prs: m.prs,
       risk: risk ? { level: risk.risk!, rationale: risk.rationale } : null,
       runIds: mine.map((r) => r.id),
+      steps: itemSteps(m, steps, column),
+      mode: m.mode, plan: m.plan, error: m.error,
     };
   });
   return {

@@ -1,10 +1,15 @@
 import { ChangeDetectionStrategy, Component, OnInit, computed, inject, signal } from '@angular/core';
-import { RouterLink } from '@angular/router';
+import { toSignal } from '@angular/core/rxjs-interop';
+import { ActivatedRoute, Router, RouterLink } from '@angular/router';
 import type { FactoryBoard, FactoryItem, FactoryStepStatus } from '../../../../../shared/api';
 import { ApiService } from '../../core/api.service';
 import { DataService } from '../../core/data.service';
 import { relTime } from '../../core/util';
 import { PageHeaderComponent } from '../../shared/page-header.component';
+import { FactoryTicketsComponent } from './factory-tickets.component';
+
+type View = 'tickets' | 'board';
+const VIEW_KEY = 'natterjack.factory.view';
 
 const MARK: Record<FactoryStepStatus, string> = { done: '✓', running: '●', failed: '✕', pending: '○', skipped: '–' };
 const STATE: Record<FactoryItem['state'], { label: string; cls: string }> = {
@@ -16,17 +21,23 @@ const STATE: Record<FactoryItem['state'], { label: string; cls: string }> = {
 };
 
 /**
- * The Factory board: one card per work item (ticket), in the column of the first stage or gate
- * it hasn't finished. Read-only for now: cards link to the ticket, its runs and its PRs.
- * Columns come from the policy (Factory policy page); cards from what pipelines report.
+ * The Factory: agent work from ticket to merged PR, read-only for now. Two views of the same items
+ * (?view=, remembered in this browser): Tickets, a row per item with its whole pipeline and the
+ * details of each step; and Board, a card per item in the column of the first stage or gate it
+ * hasn't finished, which shows where work piles up. Columns come from the policy (Factory policy
+ * page); items from what pipelines report.
  */
 @Component({
   selector: 'dash-factory',
-  imports: [PageHeaderComponent, RouterLink],
+  imports: [PageHeaderComponent, RouterLink, FactoryTicketsComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <dash-page-header eyebrow="Agents" title="Factory" [sub]="api.copy('factorySub', 'Agent work from ticket to merged PR, one card per ticket.')">
       @if (board(); as b) { <span class="ty">{{ b.wip.inFlight }} of {{ b.wip.limit }} in flight{{ b.preset ? ' · ' + b.preset : '' }}</span> }
+      <div class="seg" role="group" aria-label="View">
+        <button type="button" [class.on]="view() === 'tickets'" [attr.aria-pressed]="view() === 'tickets'" (click)="setView('tickets')">Tickets</button>
+        <button type="button" [class.on]="view() === 'board'" [attr.aria-pressed]="view() === 'board'" (click)="setView('board')">Board</button>
+      </div>
       <a class="btn ghost sm" routerLink="/factory/settings">Policy</a>
     </dash-page-header>
 
@@ -48,6 +59,9 @@ const STATE: Record<FactoryItem['state'], { label: string; cls: string }> = {
         </div>
       }
 
+      @if (view() === 'tickets') {
+        <dash-factory-tickets [items]="b.items" />
+      } @else {
       <div class="board" role="list" aria-label="Pipeline">
         @for (col of b.columns; track col.id) {
           <section class="col" [class.gate]="col.kind === 'gate'" role="listitem" [attr.aria-label]="col.label">
@@ -88,6 +102,7 @@ const STATE: Record<FactoryItem['state'], { label: string; cls: string }> = {
           </section>
         }
       </div>
+      }
     }
   `,
   styles: [`
@@ -125,6 +140,14 @@ const STATE: Record<FactoryItem['state'], { label: string; cls: string }> = {
 export class FactoryComponent implements OnInit {
   readonly api = inject(ApiService);
   private readonly data = inject(DataService);
+  private readonly router = inject(Router);
+  private readonly query = toSignal(inject(ActivatedRoute).queryParamMap);
+  /** ?view=, else the one picked last in this browser, else Tickets. */
+  readonly view = computed<View>(() => {
+    const q = this.query()?.get('view');
+    if (q === 'board' || q === 'tickets') return q;
+    try { return localStorage.getItem(VIEW_KEY) === 'board' ? 'board' : 'tickets'; } catch { return 'tickets'; }
+  });
   private readonly loaded = signal<FactoryBoard | null>(null);
   readonly err = signal<string | null>(null);
 
@@ -139,6 +162,11 @@ export class FactoryComponent implements OnInit {
   async ngOnInit(): Promise<void> {
     try { this.loaded.set(await this.api.get<FactoryBoard>('/api/factory')); }
     catch (e) { this.err.set((e as Error).message); }
+  }
+
+  setView(v: View): void {
+    try { localStorage.setItem(VIEW_KEY, v); } catch { /* private window */ }
+    this.router.navigate([], { queryParams: { view: v }, queryParamsHandling: 'merge', replaceUrl: true });
   }
 
   state(it: FactoryItem) { return STATE[it.state]; }

@@ -61,3 +61,18 @@ export function numOrNull(v: unknown): number | null {
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
 }
+
+/** How long a step took (or has been going, when it hasn't ended): "45s", "13m", "2h 5m", "3d 4h"; '' without a start. */
+export function duration(start: string | null, end: string | null, now = Date.now()): string {
+  if (!start) return '';
+  const ms = (end ? Date.parse(end) : now) - Date.parse(start);
+  if (!Number.isFinite(ms) || ms < 0) return '';
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 48) return m % 60 ? `${h}h ${m % 60}m` : `${h}h`;
+  const d = Math.floor(h / 24);
+  return h % 24 ? `${d}d ${h % 24}h` : `${d}d`;
+}

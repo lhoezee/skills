@@ -921,6 +921,31 @@ export interface FactoryItem {
   risk: { level: 'low' | 'medium' | 'high'; rationale: string | null } | null;
   /** Runs for this ticket, newest first. */
   runIds: string[];
+  /** Every step of the pipeline for this item, in order (the Tickets view's track and details). */
+  steps: FactoryItemStep[];
+  mode: FactoryManifest['mode'];
+  plan: string | null;
+  /** Why the pipeline stopped short, when it did. */
+  error: string | null;
+}
+
+/** Where one item is on one step: done, under way, failed, waiting on a decision, skipped or not reached. */
+export type FactoryStepState = 'done' | 'running' | 'failed' | 'waiting' | 'skipped' | 'pending';
+
+export interface FactoryItemStep {
+  /** The board column's id: a stage id, or gate:<id>. */
+  id: string;
+  kind: 'stage' | 'gate';
+  label: string;
+  state: FactoryStepState;
+  /** The item's current step. */
+  current: boolean;
+  startedAt: string | null;
+  endedAt: string | null;
+  /** A stage's rows, one per repo (or one with repo null). */
+  repos: { repo: string | null; status: FactoryStepStatus; agent: string | null; note: string | null; startedAt: string | null; endedAt: string | null }[];
+  /** A gate's decisions, oldest first. */
+  decisions: { decision: 'pending' | 'approved' | 'rejected'; mode: FactoryGateMode | null; by: string | null; risk: 'low' | 'medium' | 'high' | null; rationale: string | null; at: string }[];
 }
 
 export interface FactoryBoard {

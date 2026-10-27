@@ -150,3 +150,33 @@ test("readManifests reads the folder newest first and reports files it can't rea
   assert.equal(errors.length, 2);
   assert.deepEqual(readManifests(path.join(dir, "missing")), { manifests: [], errors: [] });
 });
+
+test("itemSteps gives every step its state, times, repo rows and gate decisions", () => {
+  const cfg = defaultFactoryConfig();
+  const m = manifest({
+    gates: [
+      { id: "spec", decision: "approved", by: "kim", at: "2026-10-27T10:01:00.000Z" },
+      { id: "plan", decision: "pending", at: "2026-10-27T10:05:00.000Z" },
+      { id: "plan", decision: "approved", by: "kim", rationale: "Looks right", at: "2026-10-27T10:06:00.000Z" },
+    ],
+    stages: [
+      { id: "plan", status: "done", startedAt: "2026-10-27T10:02:00.000Z", endedAt: "2026-10-27T10:04:00.000Z", note: "3 steps" },
+      { id: "build", repo: "api", status: "done", startedAt: "2026-10-27T10:07:00.000Z", endedAt: "2026-10-27T10:20:00.000Z" },
+      { id: "build", repo: "web", status: "running", startedAt: "2026-10-27T10:21:00.000Z" },
+    ],
+  });
+  const b = buildBoard(cfg, true, [m], []);
+  const s = Object.fromEntries(b.items[0].steps.map((x) => [x.id, x]));
+  assert.deepEqual(b.items[0].steps.map((x) => x.id), ["gate:spec", "plan", "gate:plan", "build", "review", "security", "guide", "gate:prePr", "pr", "gate:merge", "merge"]);
+  assert.deepEqual([s["gate:spec"].state, s.plan.state, s["gate:plan"].state, s.build.state, s.review.state], ["done", "done", "done", "running", "pending"]);
+  assert.equal(s.build.current, true);
+  assert.equal(s.plan.current, false);
+  assert.deepEqual([s.build.startedAt, s.build.endedAt], ["2026-10-27T10:07:00.000Z", null]);
+  assert.deepEqual([s.plan.startedAt, s.plan.endedAt, s.plan.repos[0].note], ["2026-10-27T10:02:00.000Z", "2026-10-27T10:04:00.000Z", "3 steps"]);
+  assert.deepEqual(s["gate:plan"].decisions.map((d) => [d.decision, d.by]), [["pending", null], ["approved", "kim"]]);
+  assert.deepEqual([s["gate:plan"].startedAt, s["gate:plan"].endedAt], ["2026-10-27T10:05:00.000Z", "2026-10-27T10:06:00.000Z"]);
+  assert.deepEqual(s.build.repos.map((r) => [r.repo, r.status]), [["api", "done"], ["web", "running"]]);
+  // A step it never reported, before one it did, counts as skipped.
+  const skip = buildBoard(cfg, true, [manifest({ stages: [{ id: "build", repo: "api", status: "running" }] })], []).items[0].steps;
+  assert.deepEqual(skip.slice(0, 4).map((x) => x.state), ["skipped", "skipped", "skipped", "running"]);
+});
