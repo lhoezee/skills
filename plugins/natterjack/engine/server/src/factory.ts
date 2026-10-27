@@ -300,14 +300,17 @@ export function normalizeManifest(raw: any): FactoryManifest | null {
 /** Parsed manifests by file, kept until the file's mtime changes (the board reloads every few seconds). */
 const parsed = new Map<string, { mtimeMs: number; manifest: FactoryManifest | null; error: string | null }>();
 
-/** The newest manifests in the folder (by file time, at most MAX_MANIFESTS), newest first, plus the files that couldn't be read. */
-export function readManifests(dir = manifestDir()): { manifests: FactoryManifest[]; errors: string[] } {
+/**
+ * The newest manifests in the folder (by file time, at most `limit`: the board's MAX_MANIFESTS; limits
+ * are checked against all of them), newest first, plus the files that couldn't be read.
+ */
+export function readManifests(dir = manifestDir(), limit = MAX_MANIFESTS): { manifests: FactoryManifest[]; errors: string[] } {
   let files: { f: string; mtimeMs: number }[] = [];
   try {
     files = fs.readdirSync(dir).filter((f) => f.endsWith(".json"))
       .map((f) => { try { return { f, mtimeMs: fs.statSync(path.join(dir, f)).mtimeMs }; } catch { return null; } })
       .filter((x): x is { f: string; mtimeMs: number } => !!x)
-      .sort((a, b) => b.mtimeMs - a.mtimeMs).slice(0, MAX_MANIFESTS);
+      .sort((a, b) => b.mtimeMs - a.mtimeMs).slice(0, limit);
   } catch { return { manifests: [], errors: [] }; }
   const manifests: FactoryManifest[] = [];
   const errors: string[] = [];

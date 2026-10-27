@@ -263,35 +263,49 @@ export function decide(policy, manifest, gate, { run = "interactive", canAsk = r
     return askOrStop(`Spec readiness ${spec.score} is below Ready (${spec.readyAt}).`);
   }
   if (gate === "plan") return out("pass", "The plan gate is automatic.");
-  // prePr: every repo that was built has a passed review, and a passed security stage when it's on.
-  const built = latestRows(manifest, "build").filter((r) => r.status === "done").map((r) => r.repo || "");
-  const changed = built.length ? built : ((manifest && manifest.repos) || []);
+  // prePr: every repo's build finished, each has a passed review, and a passed security stage
+  // (when it's on) that's newer than the repo's last build or review: a later fix needs a new scan.
+  const builds = latestRows(manifest, "build");
+  const unbuilt = builds.filter((r) => r.status !== "done" && r.status !== "skipped").map((r) => `${r.repo || "build"} (${r.status})`);
+  if (unbuilt.length) return askOrStop(`The build hasn't finished for ${unbuilt.join(", ")}.`);
+  const changed = builds.length ? builds.filter((r) => r.status === "done").map((r) => r.repo || "") : ((manifest && manifest.repos) || []);
   if (!changed.length) return askOrStop("The pre-PR gate is automatic, but no repo's build is recorded.");
-  const missing = (stage) => {
-    const rows = new Map(latestRows(manifest, stage).map((r) => [r.repo || "", r.status]));
-    return changed.filter((repo) => rows.get(repo) !== "done").map((repo) => `${repo || stage} (${rows.get(repo) || "not run"})`);
-  };
-  const unreviewed = missing("review");
+  const rowsOf = (stage) => new Map(latestRows(manifest, stage).map((r) => [r.repo || "", r]));
+  const reviews = rowsOf("review");
+  const unreviewed = changed.filter((repo) => reviews.get(repo)?.status !== "done").map((repo) => `${repo || "review"} (${reviews.get(repo)?.status || "not run"})`);
   if (unreviewed.length) return askOrStop(`The review hasn't passed for ${unreviewed.join(", ")}.`);
   if (p.stages.find((s) => s.id === "security").on) {
-    const unscanned = missing("security");
+    const scans = rowsOf("security");
+    const builtAt = new Map(builds.map((r) => [r.repo || "", r.endedAt]));
+    const stale = (repo) => {
+      const s = scans.get(repo);
+      const last = [builtAt.get(repo), reviews.get(repo)?.endedAt].filter(Boolean).sort().at(-1);
+      return !!(s && s.endedAt && last && s.endedAt < last);
+    };
+    const unscanned = changed.filter((repo) => scans.get(repo)?.status !== "done" || stale(repo))
+      .map((repo) => `${repo || "security"} (${stale(repo) ? "older than the last change" : scans.get(repo)?.status || "not run"})`);
     if (unscanned.length) return askOrStop(`The security stage hasn't passed for ${unscanned.join(", ")}.`);
   }
-  return out("pass", "Every changed repo's review and security stage passed.");
+  return out("pass", "Every repo's build, review and security stage passed.");
 }
 
-/** Tickets in flight (started, not done) other than this one, against the policy's WIP limit. */
+/**
+ * Tickets in flight (started, not done) other than this one, against the policy's WIP limit.
+ * A ticket that's already in flight may always carry on (as the dashboard allows).
+ */
 export function wip(ws, ticket, policy) {
   const dir = path.join(ws, ".claude", "ledger", "factory");
-  let inFlight = [];
+  const same = (t) => String(t).toLowerCase() === String(ticket).toLowerCase();
+  let started = [];
   try {
-    inFlight = fs.readdirSync(dir).filter((f) => f.endsWith(".json"))
+    started = fs.readdirSync(dir).filter((f) => f.endsWith(".json"))
       .map((f) => readJson(path.join(dir, f)))
-      .filter((m) => m && m.ticket && !m.done && String(m.ticket).toLowerCase() !== String(ticket).toLowerCase() && ((m.stages || []).length || (m.gates || []).length))
-      .map((m) => m.ticket);
+      .filter((m) => m && m.ticket && !m.done && ((m.stages || []).length || (m.gates || []).length));
   } catch {}
+  const inFlight = started.filter((m) => !same(m.ticket)).map((m) => m.ticket);
+  const self = started.some((m) => same(m.ticket));
   const p = normalizePolicy(policy);
-  return { inFlight, limit: p.limits.wip, ok: !p.enabled || inFlight.length < p.limits.wip };
+  return { inFlight, limit: p.limits.wip, self, ok: !p.enabled || self || inFlight.length < p.limits.wip };
 }
 
 async function main(argv) {

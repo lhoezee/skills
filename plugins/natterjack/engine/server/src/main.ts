@@ -361,12 +361,15 @@ function mainRepos(): string[] {
   return [...out];
 }
 
-/** Runs as the Factory sees them: each with its ticket. */
-function factoryRuns(): FactoryRun[] {
+/** Runs as the Factory sees them: each with its ticket. The board shows the newest `limit`; limits are checked against all of them. */
+function factoryRuns(limit = Infinity): FactoryRun[] {
   const wsTicket = new Map(listWorkspaces().map((w) => [w.slug, w.ticketId || null]));
-  return runs.list().slice(0, 500).map((r) => ({
+  const now = Date.now();
+  return runs.list().slice(0, limit).map((r) => ({
     id: r.id, ticket: runTicket(r, wsTicket.get(r.workspace))?.id ?? null, status: r.status,
-    costUsd: r.costUsd || 0, startedAt: r.startedAt, agent: r.agent || "claude", model: r.model, durationMs: r.durationMs || 0,
+    costUsd: r.costUsd || 0, startedAt: r.startedAt, agent: r.agent || "claude", model: r.model,
+    // durationMs grows when a turn ends: a turn still going counts from when it started.
+    durationMs: (r.durationMs || 0) + (r.status === "running" && r.turnStartedAt ? Math.max(0, now - Date.parse(r.turnStartedAt)) : 0),
     implement: IMPLEMENT_PROMPT.test(String(r.prompt || "").trim()),
   }));
 }
@@ -376,7 +379,7 @@ function factoryBoard() {
   const state = factoryConfigState(!isReader());
   const { manifests, errors } = readManifests();
   if (state.error) errors.unshift(state.error);
-  return buildBoard(state.config, state.exists && !state.error, manifests, factoryRuns(), errors);
+  return buildBoard(state.config, state.exists && !state.error, manifests, factoryRuns(500), errors);
 }
 
 /** `/implement X` or a plugin's `/multirepo:implement X` (not Explain: that only reads). */
@@ -390,7 +393,7 @@ function factoryBlocker(prompt: string): string | null {
   if (!ticket) return null;
   const state = factoryConfigState(true);
   if (!state.exists || state.error || !state.config.enabled) return null;
-  return factoryLaunchBlocker(state.config, true, ticket, readManifests().manifests, factoryRuns());
+  return factoryLaunchBlocker(state.config, true, ticket, readManifests(undefined, Infinity).manifests, factoryRuns());
 }
 
 /** The worktree a run worked in (the run page's rule) and its repos, or null for a run that stayed in main. */

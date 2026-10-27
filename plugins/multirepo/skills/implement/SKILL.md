@@ -244,7 +244,7 @@ Read `references/pipeline-example.md` for concrete call shapes and `references/a
 
 Each runs only when available; none blocks the run.
 - **QA** for UI changes, when the workspace defines a browser QA agent (or CLAUDE.md describes one): `references/qa-subagent.md`. Interactive: ask first (it's token-heavy).
-- **Second opinion**: when `copilot --version` works, offer `/multirepo:copilot-review --root <WORKROOT>` before PRs (autonomous: run it). Its fixes are uncommitted; if they touch code QA exercised, offer to re-run QA.
+- **Second opinion**: when `copilot --version` works, offer `/multirepo:copilot-review --root <WORKROOT>` before PRs (autonomous: run it). Its fixes are uncommitted; if they touch code QA exercised, offer to re-run QA. Record it as `stage --stage review --repo <r>` per repo it changed, and **run the security stage again** for those repos: a scan older than the last change doesn't pass the pre-PR gate.
 - **Stack for manual testing** (interactive, when the workspace has run tooling): restart (never reuse a stale build), verify by port, then give the URLs and 2-4 things to click from the acceptance criteria.
 
 ## 9. Wrap up

@@ -75,8 +75,11 @@ test("wip counts other started tickets that aren't done, against the limit", () 
   put("ENG-3", { stages: [{ id: "build" }], done: true });
   put("ENG-4", {});
   put("ENG-9", { stages: [{ id: "plan" }] });
-  const r = wip(ws, "eng-9", { enabled: true, limits: { wip: 2 } });
-  assert.deepEqual([r.inFlight.sort(), r.limit, r.ok], [["ENG-1", "ENG-2"], 2, false]);
+  const r = wip(ws, "ENG-10", { enabled: true, limits: { wip: 2 } });
+  assert.deepEqual([r.inFlight.sort(), r.limit, r.self, r.ok], [["ENG-1", "ENG-2", "ENG-9"], 2, false, false]);
+  // A ticket already in flight carries on, even when the others fill the limit (the limit was lowered).
+  const own = wip(ws, "eng-9", { enabled: true, limits: { wip: 2 } });
+  assert.deepEqual([own.inFlight.sort(), own.self, own.ok], [["ENG-1", "ENG-2"], true, true]);
   assert.equal(wip(ws, "ENG-9", { enabled: false, limits: { wip: 2 } }).ok, true, "no limit without a policy on");
 });
 
@@ -162,7 +165,7 @@ test("secret scanning: one gitleaks run over the changed files; older gitleaks i
   const fake = (version, dirOk, scanStatus) => (cmd, args, opts) => {
     calls.push(args);
     if (args[0] === "version") return { status: 0, stdout: version };
-    if (args[1] === "--help") return { status: dirOk ? 0 : 1, stdout: "" };
+    if (args[1] === "--help") return dirOk ? { status: 0, stdout: "" } : { status: 1, stdout: "", stderr: 'Error: unknown command "dir" for "gitleaks"' };
     const report = args[args.indexOf("--report-path") + 1];
     fs.writeFileSync(report, JSON.stringify(scanStatus === 3 ? [{ File: path.join(args[1], "clé config.env") }] : []));
     return { status: scanStatus, stdout: "", stderr: scanStatus === 1 ? "boom" : "" };
@@ -174,4 +177,34 @@ test("secret scanning: one gitleaks run over the changed files; older gitleaks i
   assert.equal(calls.filter((a) => a[0] === "dir" && a[1] !== "--help").length, 1, "one gitleaks run for all the files");
   assert.equal(scanSecrets(dir, ["b.ts"], fake("8.21.0", true, 0)).status, "passed");
   assert.equal(scanSecrets(dir, ["b.ts"], fake("8.21.0", true, 1)).status, "error");
+});
+
+test("Copilot on #113: errors fail at any threshold, a broken gitleaks isn't 'not installed', names kept exactly", () => {
+  const ws = tmp("secws3-");
+  fs.writeFileSync(path.join(ws, "repos.json"), JSON.stringify({ repos: [{ name: "api", relativePath: "api" }] }));
+  repo(path.join(ws, "api"));
+  const timeout = () => ({ error: Object.assign(new Error("t"), { code: "ETIMEDOUT" }), status: null, stdout: "", stderr: "" });
+  const strict = securityScan({ root: ws, policy: { security: { failOn: "critical", secretScan: false, scanners: [{ name: "slow", command: "x", failOn: "low" }] } }, run: timeout });
+  assert.deepEqual(strict.failed, ["api"], "a scan that didn't finish fails even below the threshold");
+
+  const eacces = () => ({ error: Object.assign(new Error("spawn EACCES"), { code: "EACCES" }), status: null, stdout: "", stderr: "" });
+  assert.equal(scanSecrets(ws, ["a"], eacces).status, "error");
+  const missing = () => ({ error: Object.assign(new Error("spawn ENOENT"), { code: "ENOENT" }), status: null });
+  assert.equal(scanSecrets(ws, ["a"], missing).status, "skipped");
+
+  // Tabs and quotes can't be in Windows file names; elsewhere they're names git would C-quote.
+  const odd = process.platform === "win32" ? [" lead.env", "clé space.env"] : [" lead.env", "tab\tname.env", 'quo"te.env', "clé.env"];
+  const dir = repo(tmp("names-"), Object.fromEntries(odd.map((f) => [f, "x"])));
+  assert.deepEqual(changedFiles(dir, "main").sort(), [...odd].sort());
+});
+
+test("pre-PR: a failed build blocks, and a scan older than the last change doesn't count", () => {
+  const p = on({ prePr: "auto" });
+  const t = (n) => `2026-10-27T10:0${n}:00.000Z`;
+  const row = (id, repo, status, end) => ({ id, repo, status, endedAt: end });
+  const ok = [row("build", "api", "done", t(1)), row("review", "api", "done", t(2)), row("security", "api", "done", t(3))];
+  assert.equal(decide(p, { stages: ok }, "prePr").action, "pass");
+  assert.match(decide(p, { stages: [...ok, row("build", "web", "failed", t(1))] }, "prePr").reason, /build hasn't finished for web \(failed\)/);
+  // A second-opinion review after the scan: scan again.
+  assert.match(decide(p, { stages: [row("build", "api", "done", t(1)), row("security", "api", "done", t(3)), row("review", "api", "done", t(4))] }, "prePr").reason, /api \(older than the last change\)/);
 });

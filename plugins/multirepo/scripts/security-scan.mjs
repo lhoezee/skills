@@ -22,7 +22,7 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { defaultBranch, git, isMain, listRepos, parseArgs } from "./lib.mjs";
+import { defaultBranch, git, gitRun, isMain, listRepos, parseArgs } from "./lib.mjs";
 import { normalizePolicy, readPolicy, sourceWorkspace, update } from "./factory.mjs";
 
 const SEVERITIES = ["critical", "high", "medium", "low"];
@@ -56,13 +56,12 @@ export function runScanner(s, repoPath, run = spawnSync) {
 /** Files the branch changed in a repo (committed since the default branch, plus uncommitted and untracked), unquoted. */
 export function changedFiles(repoPath, base) {
   const out = new Set();
-  const add = (text) => String(text || "").split(/\r?\n/).map((l) => l.trim()).filter(Boolean).forEach((f) => out.add(f));
-  // core.quotePath=false: names with spaces or non-ASCII come back as they are, not C-quoted.
-  const g = (args) => git(repoPath, ["-c", "core.quotePath=false", ...args]);
-  const mergeBase = g(["merge-base", "HEAD", `origin/${base}`]) || g(["merge-base", "HEAD", base]);
-  if (mergeBase) add(g(["diff", "--name-only", "--diff-filter=ACMR", mergeBase, "HEAD"]));
-  add(g(["diff", "--name-only", "--diff-filter=ACMR", "HEAD"]));
-  add(g(["ls-files", "--others", "--exclude-standard"]));
+  // NUL-separated and untrimmed: every name exactly as it is (spaces at the ends, tabs, quotes, non-ASCII).
+  const names = (args) => { const r = gitRun(repoPath, [...args, "-z"], { trim: false }); return r.ok ? r.out.split("\0").filter(Boolean) : []; };
+  const mergeBase = git(repoPath, ["merge-base", "HEAD", `origin/${base}`]) || git(repoPath, ["merge-base", "HEAD", base]);
+  if (mergeBase) names(["diff", "--name-only", "--diff-filter=ACMR", mergeBase, "HEAD"]).forEach((f) => out.add(f));
+  names(["diff", "--name-only", "--diff-filter=ACMR", "HEAD"]).forEach((f) => out.add(f));
+  names(["ls-files", "--others", "--exclude-standard"]).forEach((f) => out.add(f));
   return [...out].filter((f) => fs.existsSync(path.join(repoPath, f)));
 }
 
@@ -72,10 +71,16 @@ export function changedFiles(repoPath, base) {
  * { status: passed|found|error|skipped, detail }.
  */
 export function scanSecrets(repoPath, files, run = spawnSync) {
-  const probe = run("gitleaks", ["version"], { encoding: "utf-8", windowsHide: true });
-  if (probe.error || probe.status !== 0) return { status: "skipped", detail: "gitleaks isn't installed, so secrets weren't scanned." };
-  const hasDir = run("gitleaks", ["dir", "--help"], { encoding: "utf-8", windowsHide: true });
-  if (hasDir.error || hasDir.status !== 0) return { status: "skipped", detail: `gitleaks ${String(probe.stdout || "").trim()} is older than 8.19 (no "dir"), so secrets weren't scanned.` };
+  // Skipped only when gitleaks really isn't there, or is too old; any other failure is an error (fails closed).
+  const opts = { encoding: "utf-8", windowsHide: true, timeout: 60_000 };
+  const probe = run("gitleaks", ["version"], opts);
+  if (probe.error && probe.error.code === "ENOENT") return { status: "skipped", detail: "gitleaks isn't installed, so secrets weren't scanned." };
+  if (probe.error || probe.status !== 0) return { status: "error", detail: `gitleaks didn't run: ${probe.error ? probe.error.message : tail(probe.stderr || probe.stdout)}` };
+  const hasDir = run("gitleaks", ["dir", "--help"], opts);
+  if (!hasDir.error && hasDir.status !== 0 && /unknown command|unknown flag|no such command/i.test(String(hasDir.stderr || "") + String(hasDir.stdout || ""))) {
+    return { status: "skipped", detail: `gitleaks ${String(probe.stdout || "").trim()} is older than 8.19 (no "dir"), so secrets weren't scanned.` };
+  }
+  if (hasDir.error || hasDir.status !== 0) return { status: "error", detail: `gitleaks didn't run: ${hasDir.error ? hasDir.error.message : tail(hasDir.stderr || hasDir.stdout)}` };
   if (!files.length) return { status: "passed", detail: "No changed files." };
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "secscan-"));
   try {
@@ -109,11 +114,12 @@ export function securityScan({ root, repos = null, policy = null, run = spawnSyn
       .map((s) => runScanner(s, r.path, run));
     const secret = sec.secretScan ? scanSecrets(r.path, changedFiles(r.path, defaultBranch(r.path, r.defaultBranch)), run) : { status: "skipped", detail: "Secret scanning is off." };
     const findings = [
-      ...ran.filter((x) => x.status === "found" || x.status === "error").map((x) => ({ severity: x.severity, what: x.status === "error" ? `${x.name} (couldn't finish)` : x.name })),
-      ...(secret.status === "found" ? [{ severity: "critical", what: "secrets" }] : []),
-      ...(secret.status === "error" ? [{ severity: "critical", what: "secret scan (couldn't finish)" }] : []),
+      ...ran.filter((x) => x.status === "found" || x.status === "error").map((x) => ({ severity: x.severity, error: x.status === "error", what: x.status === "error" ? `${x.name} (couldn't finish)` : x.name })),
+      ...(secret.status === "found" ? [{ severity: "critical", error: false, what: "secrets" }] : []),
+      ...(secret.status === "error" ? [{ severity: "critical", error: true, what: "secret scan (couldn't finish)" }] : []),
     ];
-    const blocking = findings.filter((f) => worse(f.severity, sec.failOn));
+    // A scan that didn't finish fails whatever the threshold; findings fail at it or worse.
+    const blocking = findings.filter((f) => f.error || worse(f.severity, sec.failOn));
     const status = blocking.length ? "failed" : "done";
     const parts = [ran.length ? ran.map((x) => `${x.name} ${x.status}`).join(", ") : "no scanner applies", `secrets ${secret.status}`];
     const note = `${blocking.length ? `Fails at ${sec.failOn}: ${blocking.map((f) => `${f.what} (${f.severity})`).join(", ")}. ` : ""}${parts.join("; ")}.`;
