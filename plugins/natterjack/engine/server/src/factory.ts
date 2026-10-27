@@ -225,7 +225,8 @@ export function saveFactoryConfig(body: any, dir = CONFIG_DIR): FactoryConfigSta
   let now: number | null = null;
   try { now = fs.statSync(file).mtimeMs; } catch {}
   const seen = body && body.mtimeMs != null ? Number(body.mtimeMs) : null;
-  if (now != null && seen !== now) throw bad(409, "factory.json changed since you opened it. Reload and make your change again.");
+  // Created, changed or deleted since the editor loaded it (a draft loaded without a file may create it).
+  if ((now ?? null) !== (seen ?? null)) throw bad(409, "factory.json changed since you opened it. Reload and make your change again.");
   const config = normalizeFactoryConfig(body && body.config);
   const problems = factoryConfigProblems(config);
   if (problems.length) throw bad(400, problems.join(" "));
@@ -393,6 +394,13 @@ export function placeItem(m: FactoryManifest, steps: PipelineStep[]): { column: 
   return { column: "done", state: m.prs.length ? "waiting" : "done", reason: m.prs.length ? "PR open" : null };
 }
 
+/** The newest row per repo, in first-seen order (a pipeline may append a retry instead of updating its row). */
+function latestPerRepo<T extends { repo: string | null }>(rows: T[]): T[] {
+  const by = new Map<string, T>();
+  for (const r of rows) by.set(r.repo ?? "", r);
+  return [...by.values()];
+}
+
 /** Every pipeline step for one item: its state, times, per-repo rows and gate decisions. */
 export function itemSteps(m: FactoryManifest, steps: PipelineStep[], column: string): FactoryItemStep[] {
   const colId = (s: PipelineStep) => (s.kind === "stage" ? s.id : `gate:${s.id}`);
@@ -403,7 +411,7 @@ export function itemSteps(m: FactoryManifest, steps: PipelineStep[], column: str
     const id = colId(s);
     const base = { id, kind: s.kind as FactoryItemStep["kind"], label: s.kind === "stage" ? STAGE_LABELS[s.id] : GATE_LABELS[s.id], current: id === column, repos: [] as FactoryItemStep["repos"], decisions: [] as FactoryItemStep["decisions"] };
     if (s.kind === "stage") {
-      const rows = m.stages.filter((x) => x.id === s.id);
+      const rows = latestPerRepo(m.stages.filter((x) => x.id === s.id));
       const repos = rows.map((r) => ({ repo: r.repo, status: r.status, agent: r.agent, note: r.note, startedAt: r.startedAt, endedAt: r.endedAt }));
       const st = rows.map((r) => r.status);
       const state: FactoryItemStep["state"] = !rows.length ? (laterActivity(i) || m.done ? "skipped" : "pending")

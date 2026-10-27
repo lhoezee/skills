@@ -7,7 +7,7 @@ import type {
 import { ApiService } from '../../core/api.service';
 import { ToastService } from '../../core/toast.service';
 import { PageHeaderComponent } from '../../shared/page-header.component';
-import { GATE_IDS, matchingPreset, numOrNull, pipelineSteps, splitList, withPreset } from './factory.util';
+import { GATE_IDS, matchingPreset, numOrNull, pipelineSteps, splitLines, splitList, withPreset } from './factory.util';
 
 const GATE_HELP: Record<FactoryGateId, string> = {
   spec: 'Before any planning: is this the right ticket, and is it clear enough?',
@@ -373,10 +373,10 @@ export class FactorySettingsComponent implements OnInit {
   addScanner(s: FactoryScanner | null): void { this.edit((c) => { c.security.scanners.push(s ? { ...s } : { name: '', command: '', when: null, failOn: 'high' }); }); }
   removeScanner(i: number): void { this.edit((c) => { c.security.scanners.splice(i, 1); }); }
   setGate(id: FactoryGateId, v: FactoryGateMode): void { this.edit((c) => { c.gates[id] = v; }); }
-  setChecks(text: string): void { this.edit((c) => { c.requiredChecks = splitList(text); }); }
+  setChecks(text: string): void { this.edit((c) => { c.requiredChecks = splitLines(text); }); }
   setBots(text: string): void { this.edit((c) => { c.reviewers.bots = splitList(text); }); }
   setReviewers(key: 'pipeline' | 'noUnresolved', v: boolean): void { this.edit((c) => { c.reviewers[key] = v; }); }
-  setRiskPaths(text: string): void { this.edit((c) => { c.approver.highRiskPaths = splitList(text); }); }
+  setRiskPaths(text: string): void { this.edit((c) => { c.approver.highRiskPaths = splitLines(text); }); }
   setApprover(key: keyof FactoryConfig['approver'], v: any): void {
     this.edit((c) => { (c.approver as any)[key] = key === 'mergeMethod' ? (v as MergeMethod) : v; });
   }

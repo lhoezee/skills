@@ -1,4 +1,4 @@
-import { ChangeDetectionStrategy, Component, input, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, DestroyRef, inject, input, signal } from '@angular/core';
 import { RouterLink } from '@angular/router';
 import type { FactoryItem, FactoryItemStep, FactoryStepState, FactoryStepStatus } from '../../../../../shared/api';
 import { relTime } from '../../core/util';
@@ -166,6 +166,13 @@ const STATE: Record<FactoryItem['state'], { label: string; cls: string }> = {
 export class FactoryTicketsComponent {
   readonly items = input.required<FactoryItem[]>();
   readonly open = signal<Set<string>>(new Set());
+  /** A clock for steps still going (the board only changes when something is reported). */
+  private readonly now = signal(Date.now());
+
+  constructor() {
+    const t = setInterval(() => this.now.set(Date.now()), 15_000);
+    inject(DestroyRef).onDestroy(() => clearInterval(t));
+  }
 
   toggle(ticket: string): void {
     this.open.update((s) => { const n = new Set(s); n.has(ticket) ? n.delete(ticket) : n.add(ticket); return n; });
@@ -180,7 +187,7 @@ export class FactoryTicketsComponent {
   rel(t: string): string { return relTime(t); }
   took(s: FactoryItemStep): string {
     if (s.state === 'pending' || s.state === 'skipped') return '';
-    const d = duration(s.startedAt, s.endedAt);
+    const d = duration(s.startedAt, s.endedAt, this.now());
     // A decision made the moment it was asked for has no wait worth showing.
     return d === '0s' ? '' : d;
   }

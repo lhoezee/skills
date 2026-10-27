@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { FactoryConfig, FactoryPresetPatch } from '../../../../../shared/api';
-import { checkMark, duration, matchingPreset, specLevel, numOrNull, pipelineSteps, splitList, withPreset } from './factory.util';
+import { checkMark, duration, matchingPreset, specLevel, numOrNull, pipelineSteps, splitLines, splitList, withPreset } from './factory.util';
 
 const STAGES = ['align', 'plan', 'build', 'review', 'security', 'qa', 'guide', 'pr', 'approve', 'merge'] as const;
 
@@ -72,5 +72,11 @@ describe('spec readiness', () => {
   it('names levels and marks checks', () => {
     expect([specLevel('ready').label, specLevel('needs-work').cls, specLevel('not-ready').cls]).toEqual(['Ready', 'amber', 'bad']);
     expect([checkMark(1), checkMark(0.5), checkMark(0)]).toEqual(['✓', '~', '✗']);
+  });
+});
+
+describe('splitLines', () => {
+  it('keeps commas in commands and globs', () => {
+    expect(splitLines('node -e "console.log(1, 2)"\nsrc/{auth,payments}/**\n\n')).toEqual(['node -e "console.log(1, 2)"', 'src/{auth,payments}/**']);
   });
 });

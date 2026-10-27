@@ -47,7 +47,7 @@ node "$F" done  --ticket <ID> [--error "<why it stopped>"]
 | Ticket read (step 1) | `start` with the title, URL and mode, then score the spec (below) |
 | WORKROOT is set (step 5) | `start` again with `--workroot`, `--branch` and `--repos` (it merges into what's there) |
 | Plan file written (step 4) | `stage --stage plan --status done` |
-| You ask to proceed (step 4) / the user answers | `gate --gate plan --decision pending`, then `approved` (or `rejected`, then `done`). Autonomous: `approved --by auto` |
+| You ask to proceed (step 4) / the user answers | `gate --gate plan --decision pending`, then `approved` (or `rejected`, then `done --error "plan rejected"`). Autonomous: `approved --by auto` |
 | Each subagent's implement and review (step 7) | `stage --stage build` and `--stage review`, per `--repo`: `running` when it starts, then `done` or `failed` |
 | QA, second opinion (step 8) | `stage --stage qa`, and `--stage review` for the second opinion |
 | Commit and PRs (step 9) | `gate --gate prePr --decision approved`, then `pr` per PR, `stage --stage pr --status done` |

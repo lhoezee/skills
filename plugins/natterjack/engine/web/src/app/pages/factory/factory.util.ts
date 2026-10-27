@@ -35,6 +35,11 @@ export function pipelineSteps(c: FactoryConfig): ({ kind: 'stage'; id: FactorySt
   return pipelineOrder(c) as ({ kind: 'stage'; id: FactoryStageId } | { kind: 'gate'; id: FactoryGateId })[];
 }
 
+/** One per line, commas kept (commands, globs like src/{a,b}/**). */
+export function splitLines(text: string): string[] {
+  return [...new Set(String(text || '').split(/\r?\n/).map((s) => s.trim()).filter(Boolean))];
+}
+
 /** "a, b,, c" or one per line → ['a', 'b', 'c'] (no duplicates). */
 export function splitList(text: string): string[] {
   return [...new Set(String(text || '').split(/[,\n]/).map((s) => s.trim()).filter(Boolean))];

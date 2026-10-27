@@ -233,3 +233,20 @@ test("the multirepo scripts' stages, gates and spec checks match the engine's", 
   assert.deepEqual(GATES, GATE_IDS);
   assert.deepEqual(CHECKS.map((c: any) => [c.id, c.label, c.weight]), SPEC_CHECKS.map((c) => [c.id, c.label, c.weight]));
 });
+
+test("Copilot on #112: plan gate without planning, retried rows, a deleted policy", () => {
+  const ids = (c: ReturnType<typeof defaultFactoryConfig>) => pipeline(c).map((s) => (s.kind === "gate" ? `gate:${s.id}` : s.id));
+  const noPlan = defaultFactoryConfig();
+  noPlan.stages.find((s) => s.id === "plan")!.on = false;
+  assert.deepEqual(ids(noPlan).slice(0, 3), ["gate:spec", "gate:plan", "build"]);
+
+  // An appended retry (not an in-place update) still counts: the latest row per repo decides.
+  const m = manifest({ stages: [{ id: "build", repo: "api", status: "failed" }, { id: "build", repo: "api", status: "done", endedAt: at }] });
+  const build = buildBoard(defaultFactoryConfig(), true, [m], []).items[0].steps.find((s) => s.id === "build")!;
+  assert.deepEqual([build.state, build.repos.length], ["done", 1]);
+
+  const dir = tmp();
+  const first = saveFactoryConfig({ config: defaultFactoryConfig(), mtimeMs: null }, dir);
+  fs.unlinkSync(path.join(dir, "factory.json"));
+  assert.throws(() => saveFactoryConfig({ config: first.config, mtimeMs: first.mtimeMs }, dir), (e: any) => e.status === 409);
+});

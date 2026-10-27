@@ -147,7 +147,7 @@ export class DataService {
   /** The intervals the dashboard polled on before the stream. */
   private startPolling(): void {
     if (this.polls.length) return;
-    this.loadDeck(); this.loadRuns(); this.loadOverview(); this.loadStatus(); this.loadInbox(false); this.loadJobs();
+    this.loadDeck(); this.loadRuns(); this.loadOverview(); this.loadStatus(); this.loadInbox(false); this.loadJobs(); this.loadFactory();
     this.polls = [
       setInterval(() => this.loadJobs(), 2000),
       setInterval(() => this.loadRuns(), 3000),
@@ -155,12 +155,17 @@ export class DataService {
       setInterval(() => this.loadStatus(), 5000),
       setInterval(() => this.loadDeck(), 30000),
       setInterval(() => this.loadInbox(false), 60000),
+      setInterval(() => this.loadFactory(), 5000),
     ];
   }
 
   private stopPolling(): void {
     for (const t of this.polls) clearInterval(t);
     this.polls = [];
+  }
+
+  async loadFactory(): Promise<void> {
+    try { this.factory.set(await this.api.get<FactoryBoard>('/api/factory')); } catch { /* keep the last board */ }
   }
 
   async loadDeck(): Promise<void> {

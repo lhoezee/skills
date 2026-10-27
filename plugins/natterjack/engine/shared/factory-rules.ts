@@ -9,21 +9,25 @@ export type PipelineOrderStep = { kind: 'stage'; id: string } | { kind: 'gate'; 
 
 /**
  * The pipeline in order: the stages that are on, with each gate that isn't off placed where it
- * guards: spec before planning (or building), plan right after planning, pre-PR before the PR,
- * merge before merging. A gate whose stage is off goes at the end, in that order.
+ * guards: spec before planning (or building), plan right after planning (or before building when
+ * planning is off), pre-PR before the PR, merge before merging. A gate with nothing to guard goes
+ * at the end, in that order.
  */
 export function pipelineOrder(c: PipelineConfig): PipelineOrderStep[] {
   const out: PipelineOrderStep[] = [];
   const gate = (id: string) => { if (c.gates[id] && c.gates[id] !== 'off') out.push({ kind: 'gate', id, mode: c.gates[id] }); };
-  let spec = false, prePr = false, merge = false;
+  let spec = false, plan = false, prePr = false, merge = false;
   for (const s of c.stages.filter((x) => x.on)) {
     if (!spec && (s.id === 'plan' || s.id === 'build')) { gate('spec'); spec = true; }
+    // Planning off: its gate still guards building.
+    if (!plan && s.id === 'build') { gate('plan'); plan = true; }
     if (!prePr && s.id === 'pr') { gate('prePr'); prePr = true; }
     if (!merge && s.id === 'merge') { gate('merge'); merge = true; }
     out.push({ kind: 'stage', id: s.id });
-    if (s.id === 'plan') gate('plan');
+    if (s.id === 'plan') { gate('plan'); plan = true; }
   }
   if (!spec) gate('spec');
+  if (!plan) gate('plan');
   if (!prePr) gate('prePr');
   if (!merge) gate('merge');
   return out;
