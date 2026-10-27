@@ -25,16 +25,23 @@ function fakeGh(opts: { orgs?: string[]; sha?: string } = {}) {
     calls.push(args);
     if (args[0] === "api" && args[1] === "user") return { login: "me" };
     if (args[0] === "api" && args[1] === "user/orgs") return opts.orgs || ["acme"];
+    if (args[0] === "api" && args[1] === "repos/acme/api") return { squash: true, merge: false, rebase: true, del: true };
     if (args[0] === "search" && args.includes("--review-requested=@me")) return [{ number: 1, repository: { nameWithOwner: "acme/api" } }];
     if (args[0] === "search") return SEARCH;
     if (args[0] === "pr" && args[1] === "view") {
       return { title: "Add retries", body: "Retries failed calls.", headRefOid: state.sha, files: [{ path: "src/http.ts", additions: 10, deletions: 2 }],
         number: 1, url: "u1", author: { login: "sam" }, statusCheckRollup: [{ name: "build", conclusion: "FAILURE", status: "COMPLETED" }],
-        reviewDecision: "REVIEW_REQUIRED", latestReviews: [{ author: { login: "kim" }, state: "COMMENTED", submittedAt: "2026-10-02T00:00:00Z" }] };
+        reviewDecision: "REVIEW_REQUIRED", mergeStateStatus: "BLOCKED",
+        latestReviews: [{ author: { login: "kim" }, state: "COMMENTED", submittedAt: "2026-10-02T00:00:00Z" }, { author: { login: "copilot-pull-request-reviewer" }, state: "COMMENTED", submittedAt: "2026-10-02T00:00:00Z" }] };
     }
     throw new Error(`unexpected gh ${args.join(" ")}`);
   };
-  const ghText = async (args: string[]) => { calls.push(args); return "diff --git a/src/http.ts b/src/http.ts\n+retry()"; };
+  const ghText = async (args: string[]) => {
+    calls.push(args);
+    if (args[0] === "api") return "kim\nkim\r\nsam\n";
+    if (args[0] === "pr" && args[1] === "merge") return "";
+    return "diff --git a/src/http.ts b/src/http.ts\n+retry()";
+  };
   return { gh, ghText, calls, state };
 }
 
@@ -122,7 +129,8 @@ test("the detail rolls up checks and reviews, and gives the summary only for the
   assert.equal(d.checks, "failing");
   assert.deepEqual(d.failingChecks, ["build"]);
   assert.equal(d.decision, "REVIEW_REQUIRED");
-  assert.deepEqual(d.reviews, [{ author: "kim", state: "COMMENTED", at: "2026-10-02T00:00:00Z" }]);
+  assert.deepEqual(d.reviews.map((x) => [x.author, x.comments]), [["kim", 2], ["copilot-pull-request-reviewer", 0]]);
+  assert.deepEqual([d.mergeState, d.mergeMethods, d.deletesBranch], ["BLOCKED", ["squash", "rebase"], true]);
   assert.equal(d.summary, null);
   await r.summary("acme/api", 1);
   assert.equal((await r.detail("acme/api", 1)).summary!.text, "Adds retries.");
@@ -156,4 +164,13 @@ test("params accept owner/name and positive numbers only", () => {
   assert.equal(numberParam("0"), null);
   assert.equal(numberParam("1.5"), null);
   assert.equal(numberParam("x"), null);
+});
+
+test("merge uses an allowed method and only merges the reviewed commit", async () => {
+  const f = fakeGh();
+  const r = new Reviews({ ledgerDir: ledger(), gh: f.gh, ghText: f.ghText, ask: async () => "x", codeHost: () => ({ kind: "github", orgs: ["acme"] }) });
+  assert.deepEqual(await r.merge("acme/api", 1, "squash", "abc1234"), { merged: true });
+  assert.deepEqual(f.calls.find((c) => c[1] === "merge"), ["pr", "merge", "1", "--repo", "acme/api", "--squash", "--match-head-commit", "abc1234"]);
+  await assert.rejects(r.merge("acme/api", 1, "merge", "abc1234"), /doesn't allow merge commits/);
+  await assert.rejects(r.merge("acme/api", 1, "squash", "; rm -rf"), /Which commit/);
 });

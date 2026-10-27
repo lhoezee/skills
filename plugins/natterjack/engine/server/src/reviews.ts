@@ -19,7 +19,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import type {
-  AgentId, AgentReview, ReviewDiff, ReviewEvent, ReviewGuide, ReviewList, ReviewPr, ReviewPrDetail, ReviewSubmit, ReviewSubmitted, ReviewSummary, SecurityReview,
+  AgentId, AgentReview, MergeMethod, ReviewDiff, ReviewEvent, ReviewGuide, ReviewList, ReviewPr, ReviewPrDetail, ReviewSubmit, ReviewSubmitted, ReviewSummary, SecurityReview,
 } from "../../shared/api.ts";
 import { type AgentReviewRun, agentReviewPrompt, lineOnDiff, parseAgentReview, runAgentReview, sourceFor } from "./agent-review.ts";
 import { askClaude } from "./claude.ts";
@@ -38,6 +38,8 @@ const SUMMARY_MODEL = "haiku";
 /** The guide and the security review need more judgement than a summary. */
 const GUIDE_MODEL = "sonnet";
 const GUIDE_TIMEOUT_MS = 5 * 60 * 1000;
+/** How long a repository's merge settings are kept. */
+const REPO_TTL_MS = 10 * 60 * 1000;
 /** Diffs kept in memory (by head commit), so the page and a guide don't fetch one twice. */
 const DIFF_CACHE = 20;
 /** What the summary prompt carries at most. */
@@ -124,6 +126,7 @@ export class Reviews {
   running = 0;
   store: GuideStore;
   diffs = new Map<string, ReviewDiff>();
+  repos = new Map<string, { at: number; methods: MergeMethod[]; deletesBranch: boolean }>();
 
   constructor(deps: Partial<ReviewsDeps> & { ledgerDir: string }) {
     this.deps = {
@@ -234,10 +237,34 @@ export class Reviews {
     return this.deps.gh(["pr", "view", String(number), "--repo", repo, "--json", fields]);
   }
 
+  /** The merge methods a repository allows (squash first) and whether it deletes merged branches; cached. */
+  private async repoSettings(repo: string): Promise<{ methods: MergeMethod[]; deletesBranch: boolean }> {
+    const hit = this.repos.get(repo);
+    if (hit && Date.now() - hit.at < REPO_TTL_MS) return hit;
+    const r = await this.deps.gh(["api", `repos/${repo}`, "--jq", "{squash: .allow_squash_merge, merge: .allow_merge_commit, rebase: .allow_rebase_merge, del: .delete_branch_on_merge}"]).catch(() => null);
+    // Without the settings (no admin read), offer every method and let GitHub say no.
+    const methods = (["squash", "merge", "rebase"] as MergeMethod[]).filter((m) => !r || r[m] !== false);
+    const out = { at: Date.now(), methods, deletesBranch: !!(r && r.del) };
+    this.repos.set(repo, out);
+    return out;
+  }
+
+  /** Line comments on the PR by author (bots without their "[bot]"). */
+  private async lineComments(repo: string, number: number): Promise<Map<string, number>> {
+    const out = await this.deps.ghText(["api", `repos/${repo}/pulls/${number}/comments`, "--paginate", "--jq", ".[].user.login"]).catch(() => "");
+    const n = new Map<string, number>();
+    for (const login of out.split(/\r?\n/).map((l) => l.trim().replace(/\[bot\]$/, "")).filter(Boolean)) n.set(login, (n.get(login) || 0) + 1);
+    return n;
+  }
+
   /** One PR: what changed, its checks and reviews, and its summary for this commit. */
   async detail(repo: string, number: number): Promise<ReviewPrDetail> {
-    const d = await this.view(repo, number,
-      "number,title,body,url,author,isDraft,createdAt,updatedAt,labels,baseRefName,headRefName,headRefOid,additions,deletions,changedFiles,files,statusCheckRollup,reviewDecision,latestReviews,mergeable");
+    const [d, comments, settings] = await Promise.all([
+      this.view(repo, number,
+        "number,title,body,url,author,isDraft,createdAt,updatedAt,labels,baseRefName,headRefName,headRefOid,additions,deletions,changedFiles,files,statusCheckRollup,reviewDecision,latestReviews,mergeable,mergeStateStatus,state"),
+      this.lineComments(repo, number),
+      this.repoSettings(repo),
+    ]);
     const failing = (d.statusCheckRollup || [])
       .filter((c: any) => ["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED"].includes(String(c.conclusion || c.state || "").toUpperCase()))
       .map((c: any) => c.name || c.context || "check");
@@ -246,13 +273,19 @@ export class Reviews {
       repo, number, title: d.title, url: d.url, body: d.body || "",
       author: d.author ? d.author.login : null, isDraft: !!d.isDraft, createdAt: d.createdAt, updatedAt: d.updatedAt,
       labels: (d.labels || []).map((l: any) => l.name).filter(Boolean),
-      base: d.baseRefName, head: d.headRefName, sha: d.headRefOid,
+      base: d.baseRefName, head: d.headRefName, sha: d.headRefOid, state: d.state || "OPEN",
       additions: d.additions || 0, deletions: d.deletions || 0, changedFiles: d.changedFiles || 0,
       files: (d.files || []).map((f: any) => ({ path: f.path, additions: f.additions || 0, deletions: f.deletions || 0 })),
       checks: rollupState(d.statusCheckRollup), failingChecks: failing,
       decision: d.reviewDecision || "",
-      reviews: (d.latestReviews || []).map((r: any) => ({ author: r.author ? r.author.login : "?", state: r.state, at: r.submittedAt })),
+      reviews: (d.latestReviews || []).map((r: any) => {
+        const author = r.author ? r.author.login : "?";
+        return { author, state: r.state, at: r.submittedAt, comments: comments.get(author.replace(/\[bot\]$/, "")) || 0 };
+      }),
       mergeable: d.mergeable || "",
+      mergeState: d.mergeStateStatus || "",
+      mergeMethods: settings.methods,
+      deletesBranch: settings.deletesBranch,
       summary: s && s.sha === d.headRefOid ? { text: s.text, sha: s.sha, at: s.at } : null,
     };
   }
@@ -381,6 +414,19 @@ export class Reviews {
     );
     this.cache = null;
     return { url: (res && res.html_url) || null, state: (res && res.state) || r.event, comments: comments.length, movedToBody: moved.length };
+  }
+
+  /**
+   * Merges the PR as the person, only if its head is still the commit they reviewed (sha), with
+   * one of the methods the repository allows. GitHub's rules (required reviews and checks) apply.
+   */
+  async merge(repo: string, number: number, method: MergeMethod, sha: string): Promise<{ merged: true }> {
+    const { methods } = await this.repoSettings(repo);
+    if (!methods.includes(method)) throw Object.assign(new Error(`This repository doesn't allow ${{ squash: "squash merging", merge: "merge commits", rebase: "rebase merging" }[method]}.`), { status: 400 });
+    if (!/^[0-9a-f]{7,40}$/i.test(sha)) throw Object.assign(new Error("Which commit to merge is missing."), { status: 400 });
+    await this.deps.ghText(["pr", "merge", String(number), "--repo", repo, `--${method}`, "--match-head-commit", sha]);
+    this.cache = null;
+    return { merged: true };
   }
 
   /** One job per key at a time: asking again while it runs waits for the same one. */

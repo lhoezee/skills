@@ -2074,6 +2074,14 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
     if (!status || status.problem) return sendError(res, 400, status?.problem || "That agent isn't available.");
     return sendJson(res, await reviews.agentReview(repo, number, id, status.label, body.force === true));
   }
+  if (p === "/api/reviews/merge") {
+    // Merges on GitHub as the person: only ever from their click (and confirm) on the Reviews page.
+    const repo = repoParam(body.repo);
+    const number = numberParam(body.number);
+    if (!repo || !number) return sendError(res, 400, "Invalid pull request");
+    if (!["squash", "merge", "rebase"].includes(body.method)) return sendError(res, 400, "Unknown merge method");
+    return sendJson(res, await reviews.merge(repo, number, body.method, String(body.sha ?? "")));
+  }
   if (p === "/api/reviews/submit") {
     // Posts to GitHub as the person: only ever from their click on the Reviews page.
     const repo = repoParam(body.repo);

@@ -94,7 +94,7 @@ const SUMMARY_ROWS = 40;
         </nav>
 
         @if (selected(); as s) {
-          <dash-review-detail [repo]="s.repo" [number]="s.n" [viewer]="list()!.viewer" [summary]="summaries()[s.repo + '#' + s.n] || null" (summarized)="onSummary(s.repo + '#' + s.n, $event)" (closed)="select(null)" />
+          <dash-review-detail [repo]="s.repo" [number]="s.n" [viewer]="list()!.viewer" (merged)="load(true)" [summary]="summaries()[s.repo + '#' + s.n] || null" (summarized)="onSummary(s.repo + '#' + s.n, $event)" (closed)="select(null)" />
         } @else if (rows().length) {
           <div class="panel pick"><div class="empty">Pick a pull request to see what changed, its checks and its reviews.</div></div>
         }

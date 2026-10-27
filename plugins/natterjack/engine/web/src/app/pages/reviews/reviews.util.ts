@@ -1,4 +1,4 @@
-import type { ReviewPr, ReviewSummary } from '../../../../../shared/api';
+import type { MergeMethod, ReviewPr, ReviewPrDetail, ReviewSummary } from '../../../../../shared/api';
 
 export type ReviewFilter = 'requested' | 'all' | 'mine';
 
@@ -30,6 +30,32 @@ export function authorsOf(prs: ReviewPr[]): { login: string; count: number }[] {
   const n = new Map<string, number>();
   for (const p of prs) if (p.author) n.set(p.author, (n.get(p.author) || 0) + 1);
   return [...n].map(([login, count]) => ({ login, count })).sort((a, b) => b.count - a.count || a.login.localeCompare(b.login));
+}
+
+/** The reviews worth showing: a verdict, or comments that left line comments (a bot's "looks fine" comment isn't). */
+export function shownReviews(reviews: ReviewPrDetail['reviews']): ReviewPrDetail['reviews'] {
+  return reviews.filter((r) => r.state !== 'COMMENTED' || r.comments > 0);
+}
+
+const METHODS: Record<MergeMethod, string> = { squash: 'Squash and merge', merge: 'Create a merge commit', rebase: 'Rebase and merge' };
+export function methodLabel(m: MergeMethod): string { return METHODS[m] || m; }
+
+/** Why the PR can't be merged from here, or null (GitHub still checks its own rules). */
+export function mergeBlock(d: Pick<ReviewPrDetail, 'isDraft' | 'mergeable' | 'mergeState' | 'mergeMethods'>): string | null {
+  if (d.isDraft || d.mergeState === 'DRAFT') return 'Drafts can\'t be merged.';
+  if (d.mergeable === 'CONFLICTING' || d.mergeState === 'DIRTY') return 'It has merge conflicts.';
+  if (!d.mergeMethods.length) return 'The repository allows no merge method.';
+  return null;
+}
+
+/** What GitHub's merge state says before merging, or null when nothing stands out. */
+export function mergeNote(state: string): string | null {
+  switch (state) {
+    case 'BLOCKED': return 'GitHub says it\'s blocked (required reviews or checks), so it may refuse.';
+    case 'BEHIND': return 'The branch is behind its base; the repository may require updating it first.';
+    case 'UNSTABLE': return 'Some checks are failing.';
+    default: return null;
+  }
 }
 
 /**

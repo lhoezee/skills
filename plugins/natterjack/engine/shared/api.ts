@@ -658,19 +658,29 @@ export interface ReviewList {
 }
 
 /** GET /api/reviews/pr?repo=&number= */
+export type MergeMethod = 'squash' | 'merge' | 'rebase';
+
 export interface ReviewPrDetail {
   repo: string; number: number; title: string; url: string; body: string;
   author: string | null; isDraft: boolean; createdAt: string; updatedAt: string; labels: string[];
   base: string; head: string; sha: string;
+  /** OPEN, MERGED or CLOSED. */
+  state: string;
   additions: number; deletions: number; changedFiles: number;
   files: { path: string; additions: number; deletions: number }[];
   checks: 'none' | 'failing' | 'pending' | 'passing';
   failingChecks: string[];
   /** GitHub's reviewDecision: APPROVED, CHANGES_REQUESTED, REVIEW_REQUIRED or ''. */
   decision: string;
-  /** The latest review from each reviewer. */
-  reviews: { author: string; state: string; at: string }[];
+  /** The latest review from each reviewer, with how many line comments they left on the PR. */
+  reviews: { author: string; state: string; at: string; comments: number }[];
   mergeable: string;
+  /** GitHub's mergeStateStatus: CLEAN, BLOCKED, BEHIND, DIRTY, UNSTABLE, DRAFT, HAS_HOOKS or UNKNOWN. */
+  mergeState: string;
+  /** The merge methods the repository allows, its default first. */
+  mergeMethods: MergeMethod[];
+  /** The repository deletes a PR's branch when it merges. */
+  deletesBranch: boolean;
   /** The summary for this head commit, if one has been made. */
   summary: ReviewSummary | null;
 }

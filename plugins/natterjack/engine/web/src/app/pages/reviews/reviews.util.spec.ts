@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ReviewPr } from '../../../../../shared/api';
-import { authorsOf, filterPrs, needsSummary, prKey } from './reviews.util';
+import { authorsOf, filterPrs, mergeBlock, mergeNote, needsSummary, prKey, shownReviews } from './reviews.util';
 
 function pr(over: Partial<ReviewPr> = {}): ReviewPr {
   return {
@@ -37,6 +37,24 @@ describe('filterPrs', () => {
   it('matches the author exactly', () => {
     const prs = [pr({ number: 1, author: 'sam' }), pr({ number: 2, author: 'samantha' }), pr({ number: 3, author: null })];
     expect(filterPrs(prs, { ...base, author: 'sam' }).map((p) => p.number)).toEqual([1]);
+  });
+});
+
+describe('reviews and merging', () => {
+  it('shows verdicts, and comments only when they left line comments', () => {
+    const r = (author: string, state: string, comments: number) => ({ author, state, at: '', comments });
+    expect(shownReviews([r('bot', 'COMMENTED', 0), r('kim', 'COMMENTED', 2), r('amy', 'APPROVED', 0), r('lee', 'CHANGES_REQUESTED', 0)]).map((x) => x.author)).toEqual(['kim', 'amy', 'lee']);
+  });
+
+  it('blocks drafts, conflicts and repositories with no merge method', () => {
+    const d = { isDraft: false, mergeable: 'MERGEABLE', mergeState: 'CLEAN', mergeMethods: ['squash' as const] };
+    expect(mergeBlock(d)).toBe(null);
+    expect(mergeBlock({ ...d, isDraft: true })).toMatch(/Drafts/);
+    expect(mergeBlock({ ...d, mergeState: 'DIRTY' })).toMatch(/conflicts/);
+    expect(mergeBlock({ ...d, mergeMethods: [] })).toMatch(/no merge method/);
+    expect(mergeBlock({ ...d, mergeState: 'BLOCKED' })).toBe(null);
+    expect(mergeNote('BLOCKED')).toMatch(/blocked/);
+    expect(mergeNote('CLEAN')).toBe(null);
   });
 });
 

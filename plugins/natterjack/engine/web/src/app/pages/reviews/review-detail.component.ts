@@ -1,6 +1,6 @@
 import { ChangeDetectionStrategy, Component, computed, effect, inject, input, output, signal, viewChild } from '@angular/core';
 import { FormsModule } from '@angular/forms';
-import type { AgentId, ReviewEvent, ReviewPrDetail, ReviewSubmitted, ReviewSummary } from '../../../../../shared/api';
+import type { AgentId, MergeMethod, ReviewEvent, ReviewPrDetail, ReviewSubmitted, ReviewSummary } from '../../../../../shared/api';
 import { RouterLink } from '@angular/router';
 import { usableAgents } from '../../core/agents';
 import { ApiService } from '../../core/api.service';
@@ -8,6 +8,7 @@ import { DataService } from '../../core/data.service';
 import { LaunchService } from '../../core/launch.service';
 import { relTime } from '../../core/util';
 import { AgentReviewComponent } from './agent-review.component';
+import { mergeBlock, mergeNote, methodLabel, shownReviews } from './reviews.util';
 
 /** Files listed before "Show all". */
 const FILES_SHOWN = 40;
@@ -64,6 +65,7 @@ const DECISIONS: Record<string, { label: string; cls: string }> = {
         </section>
 
         <div class="facts">
+          @if (d()!.state === 'MERGED') { <span class="tag good">Merged</span> } @else if (d()!.state === 'CLOSED') { <span class="tag">Closed</span> }
           @if (d()!.isDraft) { <span class="tag">Draft</span> }
           <span class="tag" [class]="checks().cls" [title]="d()!.failingChecks.join(', ')">{{ checks().label }}</span>
           @if (decision(); as dec) { <span class="tag" [class]="dec.cls">{{ dec.label }}</span> }
@@ -84,27 +86,43 @@ const DECISIONS: Record<string, { label: string; cls: string }> = {
           <a class="btn ghost sm" [href]="d()!.url" target="_blank" rel="noopener">Open on GitHub</a>
         </div>
 
+        @if (d()!.state === 'OPEN' || merged()) {
         <section class="yours">
           @if (verdict(); as v) {
             <label class="lbl" for="review-text">{{ v === 'APPROVE' ? 'Approve, with a comment (optional)' : 'What needs to change' }}</label>
             <textarea id="review-text" rows="3" [ngModel]="verdictText()" (ngModelChange)="verdictText.set($event)"></textarea>
-            <div class="row">
+            <div class="btns">
               <button class="btn sm" type="button" [class.primary]="v === 'APPROVE'" [class.danger]="v === 'REQUEST_CHANGES'" (click)="submitVerdict()" [disabled]="sending() || (v === 'REQUEST_CHANGES' && !verdictText().trim())">{{ sending() ? 'Sending…' : v === 'APPROVE' ? 'Approve on GitHub' : 'Request changes on GitHub' }}</button>
               <button class="btn ghost sm" type="button" (click)="verdict.set(null)" [disabled]="sending()">Cancel</button>
             </div>
-          } @else if (isMine()) {
-            <p class="faint">This is your PR: GitHub doesn't let you approve your own.</p>
-          } @else {
-            <div class="row">
-              <button class="btn sm" type="button" (click)="startVerdict('APPROVE')">Approve</button>
-              <button class="btn sm" type="button" (click)="startVerdict('REQUEST_CHANGES')">Request changes</button>
+          } @else if (merging()) {
+            <div class="btns">
+              @if (d()!.mergeMethods.length > 1) {
+                <select class="agent-sel" [ngModel]="mergeMethod()" (ngModelChange)="mergeMethod.set($event)" aria-label="Merge method">
+                  @for (m of d()!.mergeMethods; track m) { <option [value]="m">{{ methodLabel(m) }}</option> }
+                </select>
+              }
+              <button class="btn primary sm" type="button" (click)="merge()" [disabled]="sending()">{{ sending() ? 'Merging…' : 'Confirm ' + methodLabel(mergeMethod()).toLowerCase() }}</button>
+              <button class="btn ghost sm" type="button" (click)="merging.set(false)" [disabled]="sending()">Cancel</button>
+            </div>
+            <p class="faint">Merges commit <span class="mono">{{ d()!.sha.slice(0, 7) }}</span> into {{ d()!.base }} on GitHub{{ d()!.deletesBranch ? ', and GitHub deletes the branch' : '' }}.@if (mergeNote(); as n) { {{ ' ' + n }} }</p>
+          } @else if (!merged()) {
+            <div class="btns">
+              @if (!isMine()) {
+                <button class="btn sm" type="button" (click)="startVerdict('APPROVE')">Approve</button>
+                <button class="btn sm" type="button" (click)="startVerdict('REQUEST_CHANGES')">Request changes</button>
+              }
+              <button class="btn sm" type="button" (click)="startMerge()" [disabled]="!!mergeBlock()" [title]="mergeBlock() || ''">Merge…</button>
+              @if (mergeBlock(); as b) { <span class="faint">{{ b }}</span> }
             </div>
           }
           @if (verdictErr()) { <p class="err-note">{{ verdictErr() }}</p> }
           @if (verdictDone(); as v) {
             <p class="ok">{{ v.state === 'APPROVED' ? 'Approved' : 'Changes requested' }} on GitHub. @if (v.url) { <a [href]="v.url" target="_blank" rel="noopener">View</a> }</p>
           }
+          @if (merged()) { <p class="ok">Merged into {{ d()!.base }}. <a [href]="d()!.url" target="_blank" rel="noopener">View on GitHub</a></p> }
         </section>
+        }
 
         <dash-agent-review [repo]="repo()" [number]="number()" [mine]="isMine()" (submitted)="refresh()" />
 
@@ -112,12 +130,14 @@ const DECISIONS: Record<string, { label: string; cls: string }> = {
           <p class="failing">Failing: {{ d()!.failingChecks.join(', ') }}</p>
         }
 
-        @if (d()!.reviews.length) {
+        @if (shownReviews().length) {
           <section>
             <h3>Reviews</h3>
             <ul class="reviews">
-              @for (r of d()!.reviews; track r.author) {
-                <li><b>{{ r.author }}</b> <span class="tag" [class.good]="r.state === 'APPROVED'" [class.bad]="r.state === 'CHANGES_REQUESTED'">{{ stateLabel(r.state) }}</span> <span class="faint">{{ rel(r.at) }}</span></li>
+              @for (r of shownReviews(); track r.author) {
+                <li><b>{{ r.author }}</b> <span class="tag" [class.good]="r.state === 'APPROVED'" [class.bad]="r.state === 'CHANGES_REQUESTED'">{{ stateLabel(r.state) }}</span>
+                  @if (r.comments) { <span class="faint">{{ r.comments }} line {{ r.comments === 1 ? 'comment' : 'comments' }}</span> }
+                  <span class="faint">{{ rel(r.at) }}</span></li>
               }
             </ul>
           </section>
@@ -157,7 +177,7 @@ const DECISIONS: Record<string, { label: string; cls: string }> = {
     .diffstat { font-size: 12px; color: var(--ink-soft); }
     .add { color: var(--green); font-family: var(--font-mono); font-size: 11.5px; }
     .del { color: var(--red); font-family: var(--font-mono); font-size: 11.5px; }
-    .actions, .yours .row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+    .actions, .yours .btns { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
     .ask { display: inline-flex; align-items: center; gap: 6px; }
     .agent-sel { font: inherit; font-size: 12.5px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 8px; background: #fff; color: var(--ink); }
     .yours { display: flex; flex-direction: column; gap: 6px; }
@@ -186,6 +206,8 @@ export class ReviewDetailComponent {
   readonly summary = input<ReviewSummary | null>(null);
   readonly summarized = output<ReviewSummary>();
   readonly closed = output<void>();
+  /** The PR merged: the list should drop it. */
+  readonly merged$ = output<void>({ alias: 'merged' });
 
   readonly d = signal<ReviewPrDetail | null>(null);
   readonly err = signal<string | null>(null);
@@ -204,6 +226,13 @@ export class ReviewDetailComponent {
   readonly sending = signal(false);
   readonly verdictErr = signal<string | null>(null);
   readonly verdictDone = signal<ReviewSubmitted | null>(null);
+  readonly merging = signal(false);
+  readonly merged = signal(false);
+  readonly mergeMethod = signal<MergeMethod>('squash');
+  readonly shownReviews = computed(() => shownReviews(this.d()?.reviews || []));
+  readonly mergeBlock = computed(() => { const d = this.d(); return d ? mergeBlock(d) : null; });
+  readonly mergeNote = computed(() => mergeNote(this.d()?.mergeState || ''));
+  readonly methodLabel = methodLabel;
   readonly isMine = computed(() => { const v = this.viewer(); const d = this.d(); return !!v && !!d && d.author === v; });
   /** Bumped per PR, so an answer for the previous one is dropped. */
   private gen = 0;
@@ -236,6 +265,8 @@ export class ReviewDetailComponent {
     this.verdictText.set('');
     this.verdictErr.set(null);
     this.verdictDone.set(null);
+    this.merging.set(false);
+    this.merged.set(false);
     try {
       const d = await this.api.get<ReviewPrDetail>(`/api/reviews/pr?repo=${encodeURIComponent(repo)}&number=${n}`);
       if (gen !== this.gen) return;
@@ -257,6 +288,33 @@ export class ReviewDetailComponent {
     this.verdict.set(v);
     this.verdictErr.set(null);
     this.verdictDone.set(null);
+    this.merging.set(false);
+  }
+
+  startMerge(): void {
+    this.mergeMethod.set(this.d()?.mergeMethods[0] || 'squash');
+    this.verdict.set(null);
+    this.verdictErr.set(null);
+    this.merging.set(true);
+  }
+
+  async merge(): Promise<void> {
+    const d = this.d();
+    if (!d) return;
+    const gen = this.gen;
+    this.sending.set(true);
+    this.verdictErr.set(null);
+    try {
+      await this.api.post('/api/reviews/merge', { repo: this.repo(), number: this.number(), method: this.mergeMethod(), sha: d.sha });
+      if (gen !== this.gen) return;
+      this.merging.set(false);
+      this.merged.set(true);
+      this.merged$.emit();
+    } catch (e) {
+      if (gen === this.gen) this.verdictErr.set((e as Error).message);
+    } finally {
+      if (gen === this.gen) this.sending.set(false);
+    }
   }
 
   async submitVerdict(): Promise<void> {
