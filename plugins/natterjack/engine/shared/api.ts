@@ -636,6 +636,45 @@ export interface InboxItem { kind: string; severity: 'alert' | 'action' | 'info'
 /** GET /api/inbox[?force=1] */
 export interface Inbox { items: InboxItem[]; ciHealth: { repo: string; state: string; url: string; title?: string }[]; errors?: string[] }
 
+// ---------------------------------------------------------------- reviews
+
+/** An open pull request on the Reviews page. requested: a review is requested from you (or a team of yours); mine: you opened it. */
+export interface ReviewPr {
+  repo: string; number: number; title: string; url: string;
+  author: string | null; authorIsBot: boolean; isDraft: boolean;
+  createdAt: string; updatedAt: string; labels: string[]; comments: number;
+  requested: boolean; mine: boolean;
+  /** The last summary made for it (maybe for an older commit); null = none yet. */
+  summary: ReviewSummary | null;
+}
+
+/** A PR's short summary, made for one head commit. */
+export interface ReviewSummary { text: string; sha: string; at: string }
+
+/** GET /api/reviews[?force=1]. orgs: the owners searched; truncated: the search hit its cap. */
+export interface ReviewList {
+  host: string; viewer: string | null; orgs: string[]; prs: ReviewPr[];
+  truncated: boolean; fetchedAt: number; errors: string[];
+}
+
+/** GET /api/reviews/pr?repo=&number= */
+export interface ReviewPrDetail {
+  repo: string; number: number; title: string; url: string; body: string;
+  author: string | null; isDraft: boolean; createdAt: string; updatedAt: string; labels: string[];
+  base: string; head: string; sha: string;
+  additions: number; deletions: number; changedFiles: number;
+  files: { path: string; additions: number; deletions: number }[];
+  checks: 'none' | 'failing' | 'pending' | 'passing';
+  failingChecks: string[];
+  /** GitHub's reviewDecision: APPROVED, CHANGES_REQUESTED, REVIEW_REQUIRED or ''. */
+  decision: string;
+  /** The latest review from each reviewer. */
+  reviews: { author: string; state: string; at: string }[];
+  mergeable: string;
+  /** The summary for this head commit, if one has been made. */
+  summary: ReviewSummary | null;
+}
+
 // ---------------------------------------------------------------- apps / workspaces
 
 export interface AppStatus {

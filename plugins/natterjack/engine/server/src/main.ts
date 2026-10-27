@@ -41,6 +41,7 @@ for (const key of CLAUDE_SESSION_ENV) delete process.env[key];
 import { RunManager, httpError, runLabel } from "./runs.ts";
 import { Deck, Scheduler } from "./deck.ts";
 import { Inbox } from "./inbox.ts";
+import { Reviews, numberParam, repoParam } from "./reviews.ts";
 import { Watcher } from "./watches.ts";
 import { Usage } from "./usage.ts";
 import { UsageHistory } from "./usage-history.ts";
@@ -515,6 +516,7 @@ function cleanupAttachments() {
 cleanupAttachments();
 setInterval(cleanupAttachments, 6 * 3600 * 1000).unref();
 const inbox = new Inbox(runs);
+const reviews = new Reviews({ ledgerDir: LEDGER_DIR });
 // Connect to Atlassian: Jira and Confluence read as the person who signed in. Hosted, sign-in comes back to the dashboard's own address.
 const atlassian = new Atlassian(LEDGER_DIR, { hosted: !!HOSTED, publicOrigin: HOSTED ? HOSTED.publicOrigin : null });
 const atlassianAuth = () => atlassian.get();
@@ -1571,6 +1573,13 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
     if (p === "/api/status") return sendJson(res, await sharedStatus());
     if (p === "/api/overview") return sendJson(res, await getOverview());
     if (p === "/api/inbox") return sendJson(res, await inbox.get(force));
+    if (p === "/api/reviews") return sendJson(res, await reviews.list(force));
+    if (p === "/api/reviews/pr") {
+      const repo = repoParam(q("repo"));
+      const number = numberParam(q("number"));
+      if (!repo || !number) return sendError(res, 400, "Invalid pull request");
+      return sendJson(res, await reviews.detail(repo, number));
+    }
     if (p === "/api/usage") return sendJson(res, await usage.get(force));
     if (p === "/api/usage/history") {
       const days = Math.min(Math.max(parseInt(q("days") || "", 10) || 30, 7), 90);
@@ -2022,6 +2031,13 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
       ...(isAgentId(body.agent) ? { agent: body.agent } : {}),
     }, "explain");
     return sendJson(res, { run }, 201);
+  }
+  if (p === "/api/reviews/summary") {
+    // Spends Claude usage (a small model), like a manual run: no full-access gate.
+    const repo = repoParam(body.repo);
+    const number = numberParam(body.number);
+    if (!repo || !number) return sendError(res, 400, "Invalid pull request");
+    return sendJson(res, await reviews.summary(repo, number, body.force === true));
   }
   if (p.startsWith("/api/meetings/")) {
     const what = p.slice("/api/meetings/".length);
