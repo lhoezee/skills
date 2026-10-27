@@ -1,6 +1,6 @@
 import { Injectable, computed, inject, signal } from '@angular/core';
 import type {
-  AgentInfo, ConnectionsResponse, DeckResponse, DocSite, DocsResponse, KnowledgeArea, Inbox, Job, JobsResponse, MachineReport, ModelsView, Overview, PresetStats,
+  AgentInfo, ConnectionsResponse, DeckResponse, DocSite, DocsResponse, FactoryBoard, KnowledgeArea, Inbox, Job, JobsResponse, MachineReport, ModelsView, Overview, PresetStats,
   RemoteLinkLive, RunMeta, RunsResponse, Stack, StatusResponse,
 } from '../../../../shared/api';
 import { linkLive, mergeRuns, stampLinks, upsertRunSplit } from '../runs/remote';
@@ -60,6 +60,8 @@ export class DataService {
   readonly agents = signal<AgentInfo[] | null>(null);
   /** Local and team open models (Models page); null until the stream sends it. */
   readonly models = signal<ModelsView | null>(null);
+  /** The Factory board (live topic `factory`); null until it arrives. */
+  readonly factory = signal<FactoryBoard | null>(null);
   /** MCP servers (Connections page and its sidebar count). */
   readonly connections = signal<ConnectionsResponse | null>(null);
   readonly docSites = signal<DocSite[]>([]);
@@ -121,6 +123,7 @@ export class DataService {
     on<DeckResponse>('deck', (d) => { this.deck.set(d); this.deckError.set(null); });
     on<Inbox>('inbox', (d) => { this.inbox.set(d); this.inboxError.set(null); });
     on<ModelsView>('models', (d) => this.applyModels(d));
+    on<FactoryBoard>('factory', (d) => this.factory.set(d));
     es.onopen = () => { if (this.es === es) { this.api.connected.set(true); this.stopPolling(); } };
     es.onerror = () => {
       if (this.es !== es) return;
