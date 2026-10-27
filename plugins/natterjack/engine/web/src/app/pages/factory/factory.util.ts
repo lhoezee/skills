@@ -53,7 +53,8 @@ export function gateName(id: FactoryGateId): string { return GATE_NAMES[id] || i
 export function approverVerdict(a: FactoryAssessment): { label: string; cls: string } {
   if (a.enforced && a.action === 'pass') return { label: 'Approved', cls: 'good' };
   if (a.wouldApprove && a.sampled) return { label: 'Sampled for a person', cls: 'amber' };
-  if (a.wouldApprove) return { label: a.enforced ? 'Approved' : 'Would have approved', cls: 'good' };
+  // Enforced but not passed (it stopped partway): a person has it.
+  if (a.wouldApprove && !a.enforced) return { label: 'Would have approved', cls: 'good' };
   return { label: 'Needs a person', cls: 'amber' };
 }
 

@@ -101,6 +101,7 @@ describe('the Approver', () => {
     expect(approverVerdict(a({ wouldApprove: true }))).toEqual({ label: 'Would have approved', cls: 'good' });
     expect(approverVerdict(a({ wouldApprove: true, sampled: true }))).toEqual({ label: 'Sampled for a person', cls: 'amber' });
     expect(approverVerdict(a({}))).toEqual({ label: 'Needs a person', cls: 'amber' });
+    expect(approverVerdict(a({ enforced: true, wouldApprove: true, action: 'handoff' }))).toEqual({ label: 'Needs a person', cls: 'amber' });
     expect(gateName('prePr')).toBe('pre-PR');
   });
 });

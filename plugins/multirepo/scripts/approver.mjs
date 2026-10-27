@@ -36,6 +36,7 @@
  *       { level, rules: [{ id, level, detail }], stats }: level null when no rule trips (could be low)
  *   node approver.mjs assess --ticket <id> --gate spec|plan|prePr|merge --root <WORKROOT> [--labels a,b]
  *                            [--risk low|medium|high --rationale "..." --concern "..." (repeat it, or ;-separate)]
+ *                            [--judged <sha>[,<sha>]]  the merge gate: each PR's head commit the judgement read
  *                            [--run interactive|autonomous] [--can-ask yes|no]
  *       records the assessment and returns it with { action: pass|ask|stop|handoff, reason }
  * Exits 2 on a usage error, 1 on any other failure.
@@ -75,13 +76,18 @@ export function globRegex(glob) {
   return new RegExp(`^${re}$`);
 }
 
-/** The repo's changes since it left its default branch, uncommitted and untracked included: [{ path, lines }]. */
+/**
+ * The repo's changes since it left its default branch, uncommitted and untracked included:
+ * { mergeBase, files: [{ path, lines }], failed }. `failed`: git couldn't list them (they're unknown).
+ */
 export function repoChanges(repoPath, base) {
   const mergeBase = git(repoPath, ["merge-base", "HEAD", `origin/${base}`]) || git(repoPath, ["merge-base", "HEAD", base]);
   const out = [];
+  let failed = false;
   if (mergeBase) {
     // -z: "added\tdeleted\tpath\0", or for a rename "added\tdeleted\t\0old\0new\0"; binary files count "-".
     const r = gitRun(repoPath, ["diff", "--numstat", "-z", "-M", mergeBase], { trim: false });
+    if (!r.ok) failed = true;
     const parts = r.ok ? r.out.split("\0") : [];
     for (let i = 0; i < parts.length; i++) {
       const m = /^(-|\d+)\t(-|\d+)\t(.*)$/s.exec(parts[i]);
@@ -92,12 +98,13 @@ export function repoChanges(repoPath, base) {
     }
   }
   const untracked = gitRun(repoPath, ["ls-files", "--others", "--exclude-standard", "-z"], { trim: false });
+  if (!untracked.ok) failed = true;
   for (const p of untracked.ok ? untracked.out.split("\0").filter(Boolean) : []) {
     let lines = 0;
     try { const t = fs.readFileSync(path.join(repoPath, p), "utf-8"); lines = t ? t.split("\n").length - (t.endsWith("\n") ? 1 : 0) : 0; } catch {}
     out.push({ path: p, lines });
   }
-  return { mergeBase: mergeBase || null, files: out };
+  return { mergeBase: mergeBase || null, files: out, failed };
 }
 
 /** Dependency names a manifest file declares (package.json, requirements*.txt, go.mod, *.csproj), or null for other files. */
@@ -162,7 +169,7 @@ export function evaluateRules(approver, { repos = [], labels = [], securityFaile
   const wanted = new Set(approver.highRiskLabels.map((l) => l.toLowerCase()));
   for (const l of labels) if (wanted.has(String(l).toLowerCase())) rules.push({ id: "label", level: "high", detail: `The ticket is labelled ${l}` });
   for (const repo of securityFailed) rules.push({ id: "security", level: "high", detail: `The security stage failed for ${repo}` });
-  for (const r of repos) if (r.unknown) rules.push({ id: "unknown", level: "high", detail: `Couldn't tell what changed in ${r.name} (no merge base with its default branch)` });
+  for (const r of repos) if (r.unknown) rules.push({ id: "unknown", level: "high", detail: `Couldn't tell what changed in ${r.name} (${typeof r.unknown === "string" ? r.unknown : "no merge base with its default branch"})` });
   const files = repos.reduce((n, r) => n + r.files.length, 0);
   const lines = repos.reduce((n, r) => n + r.files.reduce((m, f) => m + f.lines, 0), 0);
   const touched = repos.filter((r) => r.files.length).length;
@@ -188,8 +195,8 @@ const pending = (c) => !c.conclusion && !["SUCCESS", "FAILURE", "ERROR"].include
 
 /** A check's name in the rollup. */
 const checkName = (c) => c.name || c.context || "check";
-/** When a check last ran (its newest run decides). */
-const checkTime = (c) => String(c.completedAt || c.startedAt || "");
+/** When a check's run started (the newest run decides, finished or not). */
+const checkTime = (c) => String(c.startedAt || c.completedAt || "");
 
 /** Whether a review login is the policy's bot: exactly it, its GitHub App ("<bot>[bot]"), or its review app ("<bot>-pull-request-reviewer"). */
 export function isBot(login, bot) {
@@ -224,8 +231,10 @@ export function prBlockers(policy, pr, identity) {
   const reviews = Array.isArray(pr.reviews) ? pr.reviews : [];
   for (const bot of policy.reviewers.bots) {
     const theirs = reviews.filter((r) => isBot(r.author?.login, bot));
+    // A comment later doesn't withdraw a request for changes: its newest approve/request/dismiss decides.
+    const standing = theirs.filter((r) => ["APPROVED", "CHANGES_REQUESTED", "DISMISSED"].includes(r.state)).at(-1);
     if (!theirs.length) out.push(`${name}: ${bot} hasn't reviewed`);
-    else if (theirs.at(-1).state === "CHANGES_REQUESTED") out.push(`${name}: ${bot} requested changes`);
+    else if (standing && standing.state === "CHANGES_REQUESTED") out.push(`${name}: ${bot} requested changes`);
   }
   if (policy.reviewers.noUnresolved && pr.unresolved > 0) out.push(`${name}: ${pr.unresolved} unresolved review thread${pr.unresolved === 1 ? "" : "s"}`);
   const author = pr.author?.login || "";
@@ -250,7 +259,7 @@ export function sampledFor(pct, key) {
  * `prs` are the merge gate's PRs (see prBlockers); `ghUser` is the account this runs as;
  * `sampleKey` decides the sample (the ticket, gate and commit).
  */
-export function assess(rawPolicy, manifest, gate, { rules, risk = null, rationale = null, concerns = [], prs = [], ghUser = null, sampleKey = "", run = "interactive", canAsk = run === "interactive" } = {}) {
+export function assess(rawPolicy, manifest, gate, { rules, risk = null, rationale = null, concerns = [], prs = [], judgedShas = [], ghUser = null, sampleKey = "", run = "interactive", canAsk = run === "interactive" } = {}) {
   if (!GATES.includes(gate)) throw usage(`--gate must be one of ${GATES.join(", ")}`);
   const policy = normalizePolicy(rawPolicy);
   const ap = policy.approver;
@@ -259,14 +268,24 @@ export function assess(rawPolicy, manifest, gate, { rules, risk = null, rational
   const blockers = [];
   if (level !== "low") blockers.push(rules.level ? `The risk rules say ${rules.level}: ${rules.rules.slice(0, 3).map((r) => r.detail).join("; ")}` : judged ? `The Approver rated it ${level} risk` : "No judgement was given, so it counts as medium risk");
   if ((gate === "merge" || gate === "prePr") && policy.reviewers.pipeline) {
-    const rows = latestRows(manifest, "review");
-    const unreviewed = rows.filter((r) => r.status !== "done").map((r) => r.repo || "review");
-    if (!rows.length) blockers.push("The pipeline's review hasn't run");
+    // Every repo the change built (else every repo the ticket names) needs a passed review.
+    const reviews = new Map(latestRows(manifest, "review").map((r) => [r.repo || "", r.status]));
+    const built = latestRows(manifest, "build").filter((r) => r.status === "done").map((r) => r.repo || "");
+    const named = (manifest && manifest.repos) || [];
+    const changed = built.length ? built : named.length ? named : [...reviews.keys()];
+    const unreviewed = changed.filter((repo) => reviews.get(repo) !== "done").map((repo) => repo || "review");
+    if (!changed.length) blockers.push("The pipeline's review hasn't run");
     else if (unreviewed.length) blockers.push(`The pipeline's review hasn't passed for ${unreviewed.join(", ")}`);
   }
   if (gate === "merge") {
     if (!prs.length) blockers.push("There's no open PR to approve");
     for (const pr of prs) blockers.push(...prBlockers(policy, pr, ap.identity));
+    // The judgement must be of each PR as it is now: a judged risk of other code proves nothing.
+    if (judgedShas.length || LEVELS.includes(risk)) {
+      for (const pr of prs) {
+        if (!judgedShas.some((s) => s && String(pr.headRefOid || "").toLowerCase().startsWith(String(s).toLowerCase()))) blockers.push(`The judgement wasn't of ${pr.url.replace(/^https?:\/\/[^/]+\//, "")} at ${String(pr.headRefOid || "?").slice(0, 7)} (pass --judged with the commits read)`);
+      }
+    }
   }
   const enforced = policy.enabled && ap.enabled && ap.enforce && policy.gates[gate] === "approver";
   if (enforced && !ap.identity) blockers.push("The policy names no identity for the Approver to act as");
@@ -301,35 +320,53 @@ function gh(args, input) {
 /** The changes under a WORKROOT, per repo, with their new dependencies. */
 function workrootChanges(root, only) {
   return listRepos(root).filter((r) => r.exists && (!only || only.includes(r.name))).map((r) => {
-    const { mergeBase, files } = repoChanges(r.path, defaultBranch(r.path, r.defaultBranch));
-    return { name: r.name, files, unknown: !mergeBase, newDeps: newDependencies(r.path, mergeBase, files) };
+    const { mergeBase, files, failed } = repoChanges(r.path, defaultBranch(r.path, r.defaultBranch));
+    return { name: r.name, files, unknown: !mergeBase ? true : failed ? "git couldn't list them" : false, newDeps: newDependencies(r.path, mergeBase, files) };
   });
 }
 
-/** A file's text at a commit of a GitHub repo, or "" when it isn't there. */
+/** A file's text at a commit of a GitHub repo, "" when it isn't there; throws when it can't be read. */
 function fileAt(repo, file, ref) {
-  try { return gh(["api", `repos/${repo}/contents/${file.split("/").map(encodeURIComponent).join("/")}?ref=${encodeURIComponent(ref)}`, "-H", "Accept: application/vnd.github.raw+json"]); } catch { return ""; }
+  try { return gh(["api", `repos/${repo}/contents/${file.split("/").map(encodeURIComponent).join("/")}?ref=${encodeURIComponent(ref)}`, "-H", "Accept: application/vnd.github.raw+json"]); }
+  catch (e) {
+    if (/HTTP 404|Not Found/i.test(String(e.stderr || e.message))) return "";
+    throw e;
+  }
+}
+
+/** A PR's unresolved review threads, every page of them. */
+function unresolvedThreads(owner, name, number) {
+  const q = "query($o:String!,$n:String!,$p:Int!,$after:String){repository(owner:$o,name:$n){pullRequest(number:$p){reviewThreads(first:100,after:$after){nodes{isResolved} pageInfo{hasNextPage endCursor}}}}}";
+  let unresolved = 0;
+  let after = null;
+  for (let page = 0; page < 50; page++) {
+    const r = JSON.parse(gh(["api", "graphql", "-f", `query=${q}`, "-F", `o=${owner}`, "-F", `n=${name}`, "-F", `p=${number}`, ...(after ? ["-f", `after=${after}`] : [])]));
+    const t = r.data?.repository?.pullRequest?.reviewThreads;
+    unresolved += (t?.nodes || []).filter((x) => !x.isResolved).length;
+    if (!t?.pageInfo?.hasNextPage) return unresolved;
+    after = t.pageInfo.endCursor;
+  }
+  throw new Error("Too many review threads to read");
 }
 
 /** A PR's state for the conditions and its changes for the rules, read with gh at its current head. */
 function prState(url) {
   const pr = JSON.parse(gh(["pr", "view", url, "--json", "url,number,state,author,isDraft,headRefOid,baseRefOid,statusCheckRollup,reviews,files"]));
   const m = /github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/.exec(url);
-  let unresolved = 0;
-  if (m) {
-    const q = "query($o:String!,$n:String!,$p:Int!){repository(owner:$o,name:$n){pullRequest(number:$p){reviewThreads(first:100){nodes{isResolved}}}}}";
-    const r = JSON.parse(gh(["api", "graphql", "-f", `query=${q}`, "-F", `o=${m[1]}`, "-F", `n=${m[2]}`, "-F", `p=${m[3]}`]));
-    unresolved = (r.data?.repository?.pullRequest?.reviewThreads?.nodes || []).filter((t) => !t.isResolved).length;
-  }
+  const unresolved = m ? unresolvedThreads(m[1], m[2], m[3]) : 0;
   const repo = m ? `${m[1]}/${m[2]}` : null;
   const files = (pr.files || []).map((f) => ({ path: f.path, lines: (f.additions || 0) + (f.deletions || 0) }));
   const newDeps = [];
+  let unknown = repo ? false : "not a GitHub PR";
   for (const f of files) {
     if (!repo || dependencies(f.path, "") === null) continue;
-    const was = dependencies(f.path, fileAt(repo, f.path, pr.baseRefOid));
-    for (const d of dependencies(f.path, fileAt(repo, f.path, pr.headRefOid))) if (!was.has(d)) newDeps.push({ file: f.path, name: d });
+    // A dependency file that can't be read leaves what it adds unknown (never "nothing new").
+    try {
+      const was = dependencies(f.path, fileAt(repo, f.path, pr.baseRefOid));
+      for (const d of dependencies(f.path, fileAt(repo, f.path, pr.headRefOid))) if (!was.has(d)) newDeps.push({ file: f.path, name: d });
+    } catch (e) { unknown = `couldn't read ${f.path}: ${String(e.stderr || e.message).trim().split("\n")[0]}`; }
   }
-  return { ...pr, repo, unresolved, changes: { name: repo || url, files, newDeps } };
+  return { ...pr, repo, unresolved, changes: { name: repo || url, files, newDeps, unknown } };
 }
 
 /** Repeated flags (`--concern a --concern b`), each value kept. */
@@ -396,8 +433,9 @@ async function main(argv) {
     const concerns = all(argv, "concern").flatMap((c) => c.split(";"));
     const canAsk = args["can-ask"] === undefined ? undefined : args["can-ask"] !== "no";
     const sha = prs.map((p) => p.headRefOid).filter(Boolean).join(",") || null;
+    const judgedShas = all(argv, "judged").flatMap((s) => s.split(",")).map((s) => s.trim()).filter(Boolean);
     const a = assess(rawPolicy, manifest, gate, {
-      rules, risk: args.risk, rationale: args.rationale, concerns, prs, ghUser, sampleKey: `${ticket}|${gate}|${sha || (manifest && manifest.roundStartedAt) || ""}`,
+      rules, risk: args.risk, rationale: args.rationale, concerns, prs, judgedShas, ghUser, sampleKey: `${ticket}|${gate}|${sha || (manifest && manifest.roundStartedAt) || ""}`,
       run: args.run === "autonomous" ? "autonomous" : "interactive", ...(canAsk === undefined ? {} : { canAsk }),
     });
     let acted = null;

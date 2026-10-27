@@ -72,10 +72,10 @@ test("a PR's conditions: checks, review bots, threads, drafts and the Approver's
 const RULES_NONE = { level: null, rules: [], stats: { files: 1, lines: 2, repos: 1 } };
 const policy = (approver, gates = { plan: "approver", merge: "approver" }) => ({ enabled: true, gates, approver: { enabled: true, ...approver } });
 const reviewed = { stages: [{ id: "review", repo: "api", status: "done" }] };
-const goodPr = { url: "https://github.com/acme/api/pull/7", author: { login: "sam" }, isDraft: false, unresolved: 0, statusCheckRollup: [], reviews: [] };
+const goodPr = { url: "https://github.com/acme/api/pull/7", headRefOid: "abc1234ffff", author: { login: "sam" }, isDraft: false, unresolved: 0, statusCheckRollup: [], reviews: [] };
 
 test("assess: advisory unless enforced, and says what it would have done", () => {
-  const a = assess(policy({}), reviewed, "merge", { rules: RULES_NONE, risk: "low", rationale: "Small.", prs: [goodPr], ghUser: "sam" });
+  const a = assess(policy({}), reviewed, "merge", { rules: RULES_NONE, risk: "low", rationale: "Small.", prs: [goodPr], judgedShas: ["abc1234"], ghUser: "sam" });
   assert.equal(a.level, "low");
   assert.equal(a.wouldApprove, true);
   assert.equal(a.enforced, false);
@@ -88,7 +88,7 @@ test("assess: advisory unless enforced, and says what it would have done", () =>
 
 test("assess: the rules outrank the judgement, and no judgement is medium", () => {
   const tripped = { level: "high", rules: [{ id: "path", level: "high", detail: "db/migrations/1.sql matches **/migrations/**" }], stats: null };
-  const a = assess(policy({}), reviewed, "merge", { rules: tripped, risk: "low", prs: [goodPr] });
+  const a = assess(policy({}), reviewed, "merge", { rules: tripped, risk: "low", prs: [goodPr], judgedShas: ["abc1234"] });
   assert.equal(a.level, "high");
   assert.match(a.blockers[0], /The risk rules say high: db\/migrations/);
   assert.equal(assess(policy({}), null, "plan", { rules: RULES_NONE }).level, "medium");
@@ -96,16 +96,16 @@ test("assess: the rules outrank the judgement, and no judgement is medium", () =
 
 test("assess: enforced, it passes only as its identity, with every condition met, outside the sample", () => {
   const enforce = policy({ enforce: true, identity: "approver-bot", mergeAction: "auto-merge", samplingPct: 10 });
-  const pass = assess(enforce, reviewed, "merge", { rules: RULES_NONE, risk: "low", prs: [goodPr], ghUser: "Approver-Bot", sampleKey: "k0" });
+  const pass = assess(enforce, reviewed, "merge", { rules: RULES_NONE, risk: "low", prs: [goodPr], judgedShas: ["abc1234"], ghUser: "Approver-Bot", sampleKey: "k0" });
   assert.equal(pass.action, "pass");
   assert.equal(pass.enforced, true);
   assert.equal(pass.mergeAction, "auto-merge");
-  const sampled = assess(enforce, reviewed, "merge", { rules: RULES_NONE, risk: "low", prs: [goodPr], ghUser: "approver-bot", sampleKey: "k1" });
+  const sampled = assess(enforce, reviewed, "merge", { rules: RULES_NONE, risk: "low", prs: [goodPr], judgedShas: ["abc1234"], ghUser: "approver-bot", sampleKey: "k1" });
   assert.equal(sampled.sampled, true);
   assert.equal(sampled.wouldApprove, true);
   assert.equal(sampled.action, "handoff");
   assert.match(sampled.reason, /Sampled for a person \(10%/);
-  const asSam = assess(enforce, reviewed, "merge", { rules: RULES_NONE, risk: "low", prs: [goodPr], ghUser: "sam", sampleKey: "k0" });
+  const asSam = assess(enforce, reviewed, "merge", { rules: RULES_NONE, risk: "low", prs: [goodPr], judgedShas: ["abc1234"], ghUser: "sam", sampleKey: "k0" });
   assert.equal(asSam.action, "handoff");
   assert.match(asSam.blockers[0], /runs as sam, but the Approver acts only as approver-bot/);
   const noId = assess(policy({ enforce: true }), reviewed, "plan", { rules: RULES_NONE, risk: "low", ghUser: "sam", canAsk: true });
@@ -177,7 +177,7 @@ test("the review's fixes: exact bots, a check's newest run, closed PRs, no revie
   assert.match(prBlockers(p, pr({ statusCheckRollup: runs }), null)[0], /required check build is not green/);
   assert.deepEqual(prBlockers(p, pr({ statusCheckRollup: [...runs].reverse().map((r, i) => ({ ...r, conclusion: i ? "FAILURE" : "SUCCESS", completedAt: i ? "2026-10-27T10:00:00Z" : "2026-10-27T12:00:00Z" })) }), null), []);
   assert.match(prBlockers(p, pr({ state: "CLOSED", statusCheckRollup: runs.slice(0, 1) }), null)[0], /is closed/);
-  const a = assess({ enabled: true, gates: { merge: "approver" }, approver: { enabled: true } }, { stages: [] }, "merge", { rules: RULES_NONE, risk: "low", prs: [goodPr] });
+  const a = assess({ enabled: true, gates: { merge: "approver" }, approver: { enabled: true } }, { stages: [] }, "merge", { rules: RULES_NONE, risk: "low", prs: [goodPr], judgedShas: ["abc1234"] });
   assert.ok(a.blockers.includes("The pipeline's review hasn't run"));
   const unknown = evaluateRules(AP, { repos: [{ name: "api", files: [], unknown: true }] });
   assert.equal(unknown.level, "high");
@@ -185,4 +185,23 @@ test("the review's fixes: exact bots, a check's newest run, closed PRs, no revie
   assert.equal(sampledFor(10, "same"), sampledFor(10, "same"));
   assert.equal(sampledFor(0, "k1"), false);
   assert.equal(sampledFor(100, "k0"), true);
+});
+
+test("Copilot's fixes: judged commits, a bot's standing request, a check's newest start, a review per changed repo", () => {
+  const enforce = policy({ enforce: true, identity: "approver-bot" });
+  const other = assess(enforce, reviewed, "merge", { rules: RULES_NONE, risk: "low", prs: [goodPr], judgedShas: ["0000000"], ghUser: "approver-bot", sampleKey: "k0" });
+  assert.equal(other.action, "handoff");
+  assert.match(other.blockers[0], /The judgement wasn't of acme\/api\/pull\/7 at abc1234/);
+  assert.match(assess(enforce, reviewed, "merge", { rules: RULES_NONE, risk: "low", prs: [goodPr], ghUser: "approver-bot", sampleKey: "k0" }).blockers[0], /pass --judged/);
+  const p = normalizePolicy({ reviewers: { bots: ["copilot"] } });
+  const pr = (reviews, checks = []) => ({ url: "https://github.com/acme/api/pull/7", state: "OPEN", author: { login: "sam" }, unresolved: 0, statusCheckRollup: checks, reviews });
+  const bot = (state) => ({ author: { login: "copilot-pull-request-reviewer" }, state });
+  assert.match(prBlockers(p, pr([bot("CHANGES_REQUESTED"), bot("COMMENTED")]), null)[0], /requested changes/, "a comment doesn't withdraw it");
+  assert.deepEqual(prBlockers(p, pr([bot("CHANGES_REQUESTED"), bot("APPROVED"), bot("COMMENTED")]), null), []);
+  const checks = [{ name: "build", conclusion: "SUCCESS", startedAt: "2026-10-27T10:00:00Z", completedAt: "2026-10-27T11:00:00Z" }, { name: "build", status: "IN_PROGRESS", startedAt: "2026-10-27T10:30:00Z" }];
+  assert.match(prBlockers(normalizePolicy({ requiredChecks: ["build"] }), pr([], checks), null)[0], /build is still running/, "the newer run, by start, decides");
+  const twoRepos = { repos: ["api", "web"], stages: [{ id: "build", repo: "api", status: "done" }, { id: "build", repo: "web", status: "done" }, { id: "review", repo: "api", status: "done" }] };
+  assert.ok(assess(policy({}), twoRepos, "prePr", { rules: RULES_NONE, risk: "low" }).blockers.includes("The pipeline's review hasn't passed for web"));
+  const unknown = evaluateRules(AP, { repos: [{ name: "api", files: [], unknown: "couldn't read package.json: HTTP 502" }] });
+  assert.match(unknown.rules[0].detail, /Couldn't tell what changed in api \(couldn't read package\.json: HTTP 502\)/);
 });
