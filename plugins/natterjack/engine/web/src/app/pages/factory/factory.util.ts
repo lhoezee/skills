@@ -81,7 +81,11 @@ export function lineLanes(columns: FactoryColumn[], items: FactoryItem[]): { lan
   const merging = lane('merging', 'Waiting to merge', 'done');
   const byId = new Map(lanes.map((l) => [l.id, l]));
   for (const it of items) {
-    if (it.column === 'done') { if (it.state === 'waiting') merging.waiting.push({ ticket: it.ticket, reason: it.reason }); continue; }
+    // Finished, but a PR still open (the run reports done once it opens them): waiting to merge.
+    if (it.column === 'done') {
+      if (it.state === 'waiting' || it.prs.some((p) => p.state !== 'merged' && p.state !== 'closed')) merging.waiting.push({ ticket: it.ticket, reason: it.reason || 'PR open' });
+      continue;
+    }
     const l = byId.get(it.column);
     if (!l) continue;
     if (it.state === 'failing') l.failing.push({ ticket: it.ticket, reason: it.reason });

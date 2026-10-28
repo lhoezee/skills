@@ -28,6 +28,8 @@
  *                          what to do at a gate by the policy: { action: own-rules|skip|pass|ask|stop|handoff|approver, reason }
  *   node factory.mjs wip   --ticket <id>       other tickets in flight vs the policy's WIP limit: { inFlight, limit, ok }
  *   node factory.mjs stage-on --stage <stage>   whether the policy runs a stage: { policy, on } (on: null with no policy on)
+ *   node factory.mjs intake --ticket <id> [--record]  whether intake may take it: { ok, why } (not in the
+ *                          factory, never pulled before: the dashboard's history too); --record: it's taken
  *
  * Stages: align plan build review security qa guide pr approve merge. A stage is one row per
  * repo (updated in place); a gate decision is appended (the history is the audit log).
@@ -239,6 +241,7 @@ export function normalizePolicy(raw) {
     intake: {
       states: strs(r.intake && r.intake.states) ?? [], labels: strs(r.intake && r.intake.labels) ?? [],
       auto: !!(r.intake && r.intake.auto === true), everyMinutes: Math.round(num(r.intake && r.intake.everyMinutes, 30, 5, 1440)),
+      unassigned: !!(r.intake && r.intake.unassigned === true),
     },
     requiredChecks: strs(r.requiredChecks) ?? [],
     reviewers: { bots: strs(rev.bots) ?? [], pipeline: rev.pipeline !== false, noUnresolved: rev.noUnresolved !== false },
@@ -372,6 +375,27 @@ export function decide(policy, manifest, gate, { run = "interactive", canAsk = r
 }
 
 /**
+ * Whether intake may take a ticket: not in the factory (any progress file, done or not) and never
+ * pulled in before, by this or the dashboard (one history: <ledger>/factory-intake.json).
+ * `record`: note that it's been taken, when it may be.
+ */
+export function intakeCheck(ws, ticket, { record = false, now = new Date().toISOString() } = {}) {
+  const file = manifestPath(ws, ticket);
+  if (!file) return { ok: false, why: "This workspace has no Natterjack dashboard, so there's no factory to take it into." };
+  if (fs.existsSync(file)) return { ok: false, why: `${ticket} is already in the factory.` };
+  const history = path.join(ws, ".claude", "ledger", "factory-intake.json");
+  const pulled = readJson(history) || {};
+  if (pulled[ticket.toLowerCase()]) return { ok: false, why: `${ticket} was pulled in before (${pulled[ticket.toLowerCase()]}); a person decides whether to try again.` };
+  if (record) {
+    withFileLock(history, () => {
+      const fresh = { ...(readJson(history) || {}), [ticket.toLowerCase()]: now };
+      write(history, fresh);
+    });
+  }
+  return { ok: true, why: null };
+}
+
+/**
  * Tickets in flight (started, not done) other than this one, against the policy's WIP limit.
  * A ticket that's already in flight may always carry on (as the dashboard allows).
  */
@@ -405,6 +429,12 @@ async function main(argv) {
     const policy = readPolicy(sourceWorkspace(start));
     const enabled = normalizePolicy(policy).enabled;
     process.stdout.write(JSON.stringify({ stage: args.stage, policy: enabled, on: enabled ? stageOn(policy, args.stage) : null }, null, 2) + "\n");
+    return;
+  }
+  if (command === "intake") {
+    if (typeof args.ticket !== "string" || !args.ticket.trim()) throw usage("--ticket is required");
+    const ws = sourceWorkspace(start);
+    process.stdout.write(JSON.stringify(intakeCheck(ws, args.ticket.trim(), { record: args.record === true }), null, 2) + "\n");
     return;
   }
   if (command === "decide" || command === "wip") {

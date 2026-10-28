@@ -107,16 +107,17 @@ describe('the Approver', () => {
 });
 
 describe('the Line view and the throughput strip', () => {
-  const item = (ticket: string, column: string, state: string, repos: object[] = []) => ({ ticket, column, state, title: null, reason: state === 'waiting' ? 'Waiting on you' : null, repos }) as any;
+  const item = (ticket: string, column: string, state: string, repos: object[] = []) => ({ ticket, column, state, title: null, reason: state === 'waiting' ? 'Waiting on you' : null, repos, prs: [] }) as any;
   const cols = [{ id: 'queued', label: 'Queued', kind: 'queued' }, { id: 'build', label: 'Building', kind: 'stage' }, { id: 'gate:prePr', label: 'Pre-PR gate', kind: 'gate' }, { id: 'done', label: 'Done', kind: 'done' }] as any;
   it('puts each item in its lane by state, and marks where the most waits', () => {
     const { lanes, bottleneck } = lineLanes(cols, [
       item('A-1', 'build', 'moving', [{ repo: 'api', status: 'running', stage: 'build' }, { repo: 'web', status: 'done', stage: 'build' }]),
       item('A-2', 'gate:prePr', 'waiting'), item('A-3', 'gate:prePr', 'idle'), item('A-4', 'build', 'failing'), item('A-5', 'done', 'done'),
       item('A-6', 'done', 'waiting'), item('A-7', 'done', 'waiting'), item('A-8', 'build', 'idle'), item('A-9', 'build', 'idle'),
+      { ...item('A-10', 'done', 'done'), prs: [{ url: 'u', state: 'open' }] }, { ...item('A-11', 'done', 'done'), prs: [{ url: 'u', state: 'merged' }] },
     ]);
     expect(lanes.map((l) => l.id)).toEqual(['build', 'gate:prePr', 'merging']);
-    expect(lanes[2].waiting.map((x) => x.ticket)).toEqual(['A-6', 'A-7']);
+    expect(lanes[2].waiting.map((x) => x.ticket)).toEqual(['A-6', 'A-7', 'A-10']);
     expect(lanes[0].idle.map((x) => x.ticket)).toEqual(['A-8', 'A-9']);
     expect(lanes[0].working).toEqual([{ ticket: 'A-1', title: null, repos: ['api'] }]);
     expect(lanes[0].failing.map((x) => x.ticket)).toEqual(['A-4']);

@@ -794,9 +794,11 @@ export interface FactoryConfig {
   /** Which tickets the factory takes: tracker states and/or labels (empty: only ones sent by hand). */
   /**
    * Which tracker tickets the factory pulls in (by state and/or label; neither: only by hand), and
-   * whether the dashboard pulls them in on its own every `everyMinutes`, up to the WIP limit.
+   * whether the dashboard pulls them in on its own every `everyMinutes`, up to the WIP limit. Each
+   * person's dashboard takes the ones assigned to them on the tracker; `unassigned`: unassigned ones
+   * too, each claimed (assigned to them) before it starts, so two dashboards never take the same one.
    */
-  intake: { states: string[]; labels: string[]; auto: boolean; everyMinutes: number };
+  intake: { states: string[]; labels: string[]; auto: boolean; everyMinutes: number; unassigned: boolean };
   limits: {
     /** Items in flight at once. */
     wip: number;
@@ -1004,7 +1006,8 @@ export interface FactoryIntake {
   configured: boolean;
   /** Free WIP slots. */
   free: number;
-  candidates: { ticket: string; title: string; url: string | null; state: string | null }[];
+  /** unassigned: it's claimed (assigned to this person) before it starts. */
+  candidates: { ticket: string; title: string; url: string | null; state: string | null; unassigned: boolean }[];
   note: string | null;
   error: string | null;
 }

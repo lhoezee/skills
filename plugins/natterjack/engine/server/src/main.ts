@@ -40,9 +40,9 @@ for (const key of CLAUDE_SESSION_ENV) delete process.env[key];
 
 import { RunManager, httpError, runLabel } from "./runs.ts";
 import { Deck, Scheduler } from "./deck.ts";
-import { Inbox } from "./inbox.ts";
+import { Inbox, gh as ghJson } from "./inbox.ts";
 import { Reviews, askChangePrompt, numberParam, repoParam } from "./reviews.ts";
-import { type FactoryRun, buildBoard, factoryConfigState, factoryLaunchBlocker, inFlightTickets, intakeCandidates, manifestFile, normalizeManifest, overrideGateDecision, rateAssessment, readManifests, readPlan, recordGateDecision, saveFactoryConfig } from "./factory.ts";
+import { type FactoryRun, setPrStates, buildBoard, factoryConfigState, factoryLaunchBlocker, inFlightTickets, intakeCandidates, manifestFile, normalizeManifest, overrideGateDecision, rateAssessment, readManifests, readPlan, recordGateDecision, saveFactoryConfig } from "./factory.ts";
 import { Watcher } from "./watches.ts";
 import { Usage } from "./usage.ts";
 import { UsageHistory } from "./usage-history.ts";
@@ -379,8 +379,35 @@ function factoryBoard() {
   const state = factoryConfigState(!isReader());
   const { manifests, errors } = readManifests();
   if (state.error) errors.unshift(state.error);
-  return buildBoard(state.config, state.exists && !state.error, manifests, factoryRuns(500), errors, !isReader());
+  // The board shows the newest; its metrics and the Approver's record count every one.
+  return buildBoard(state.config, state.exists && !state.error, manifests, factoryRuns(500), errors, !isReader(),
+    { manifests: readManifests(undefined, Infinity).manifests, runs: factoryRuns() });
 }
+
+/**
+ * Factory PRs' states from GitHub, every few minutes: the pipeline records a PR when it opens it,
+ * and nothing else would notice it merging (or closing). Only open rows are checked.
+ */
+let reconciling = false;
+async function reconcileFactoryPrs(): Promise<void> {
+  if (reconciling || HOSTED || workspaceConfig().codeHost.kind !== "github") return;
+  reconciling = true;
+  try {
+    for (const m of readManifests(undefined, Infinity).manifests) {
+      const open = m.prs.filter((p) => p.state !== "merged" && p.state !== "closed" && /^https:\/\/github\.com\//.test(p.url));
+      if (!open.length) continue;
+      const states: Record<string, "open" | "merged" | "closed"> = {};
+      for (const p of open) {
+        const v = await ghJson(["pr", "view", p.url, "--json", "state"]).catch(() => null);
+        const s = v && String(v.state).toLowerCase();
+        if (s === "merged" || s === "closed") states[p.url] = s;
+      }
+      if (Object.keys(states).length) await setPrStates(m.ticket, states).catch(() => {});
+    }
+    live.refresh("factory");
+  } finally { reconciling = false; }
+}
+setInterval(() => { void reconcileFactoryPrs(); }, 5 * 60_000).unref();
 
 /**
  * Who decides, for the gate audit trail: the signed-in person on a hosted dashboard; else the
@@ -433,9 +460,11 @@ async function factoryIntake(): Promise<FactoryIntake> {
   if (!configured) return { configured, free, candidates: [], note: "Intake has no states or labels: tickets come in only when sent by hand.", error: null };
   try {
     const tracker = trackers.get();
-    const data = await tracker.issues({ ...deck.config().issues, states: cfg.intake.states, query: "" });
+    // This person's tickets (and unassigned ones, when the policy says), asked of the tracker itself.
+    const data = await tracker.issues({ ...deck.config().issues, states: cfg.intake.states, labels: cfg.intake.labels, open: true, query: "", assigned: cfg.intake.unassigned ? "me-or-none" : "me" });
     if (!data.connected) return { configured, free, candidates: [], note: "The tracker isn't connected (Issues).", error: data.error || null };
-    return { configured, free, candidates: intakeCandidates(cfg, data.issues || [], manifests, runs, new Set(Object.keys(pulledTickets()))), note: null, error: data.error || null };
+    const candidates = intakeCandidates(cfg, data.issues || [], manifests, runs, new Set(Object.keys(pulledTickets())));
+    return { configured, free, candidates, note: null, error: data.error || null };
   } catch (e) { return { configured, free, candidates: [], note: null, error: (e as Error).message }; }
 }
 
@@ -467,7 +496,15 @@ async function pullIntake(max = Infinity, trigger = "factory"): Promise<{ starte
     const cfg = factoryConfigState(true).config;
     const take = Math.min(intake.free, max);
     const left = () => intake.candidates.length - started.length;
-    for (const c of intake.candidates.slice(0, take)) {
+    const skipped: string[] = [];
+    const tracker = trackers.get();
+    for (const c of intake.candidates) {
+      if (started.length >= take) break;
+      // An unassigned one is claimed on the tracker first: other people's dashboards see it's taken and leave it be.
+      if (c.unassigned) {
+        const claim = tracker.claim ? await tracker.claim(c.ticket).catch((e) => ({ ok: false, why: (e as Error).message })) : { ok: false, why: "this tracker can't assign tickets" };
+        if (!claim.ok) { skipped.push(`${c.ticket} (${claim.why || "not claimed"})`); notePulled(c.ticket); continue; }
+      }
       try {
         const run = launchRun({ presetId: deck.config().issues.implementPreset, args: { ticket: c.ticket }, options: { auto: cfg.mode === "autonomous" } }, trigger);
         notePulled(c.ticket);
@@ -478,8 +515,10 @@ async function pullIntake(max = Infinity, trigger = "factory"): Promise<{ starte
       }
     }
     live.refresh("factory");
-    if (!left()) return { started, stopped: null };
-    return { started, stopped: `${left()} more ${left() === 1 ? "waits" : "wait"}: ${take < max ? "the WIP limit is full" : `only ${max} asked for`}.` };
+    const also = skipped.length ? ` Not claimed: ${skipped.join(", ")}.` : "";
+    const waiting = left() - skipped.length;
+    if (waiting <= 0) return { started, stopped: also.trim() || null };
+    return { started, stopped: `${waiting} more ${waiting === 1 ? "waits" : "wait"}: ${take < max ? "the WIP limit is full" : `only ${max} asked for`}.${also}` };
   } finally { pulling = false; }
 }
 

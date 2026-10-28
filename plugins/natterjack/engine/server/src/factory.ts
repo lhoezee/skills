@@ -66,7 +66,7 @@ export function defaultFactoryConfig(): FactoryConfig {
     enabled: false,
     preset: "supervised",
     mode: "interactive",
-    intake: { states: [], labels: [], auto: false, everyMinutes: 30 },
+    intake: { states: [], labels: [], auto: false, everyMinutes: 30, unassigned: false },
     limits: { wip: 3, itemBudgetUsd: null, dayBudgetUsd: null, itemHours: null },
     stages: STAGE_IDS.map((id) => stage(id, !["align", "qa", "approve"].includes(id))),
     security: { agentReview: true, secretScan: true, scanners: SUGGESTED_SCANNERS.filter((s) => s.when).map((s) => ({ ...s })), failOn: "high" },
@@ -164,6 +164,7 @@ export function normalizeFactoryConfig(raw: any): FactoryConfig {
     intake: {
       states: strs(raw.intake?.states) ?? [], labels: strs(raw.intake?.labels) ?? [],
       auto: raw.intake?.auto === true, everyMinutes: Math.round(num(raw.intake?.everyMinutes, d.intake.everyMinutes, 5, 1440)),
+      unassigned: raw.intake?.unassigned === true,
     },
     limits: {
       wip: Math.round(num(lim.wip, d.limits.wip, 1, 50)),
@@ -515,6 +516,19 @@ export async function rateAssessment(ticket: string, assessmentAt: string, ratin
   });
 }
 
+/**
+ * The code host's word on a ticket's PRs (url → open, merged or closed), written to its manifest:
+ * nothing else updates a PR row once it's opened, and Merged, the retro and the metrics go by them.
+ */
+export async function setPrStates(ticket: string, states: Record<string, "open" | "merged" | "closed">,
+  { dir = manifestDir(), now = new Date().toISOString() }: { dir?: string; now?: string } = {}): Promise<FactoryManifest> {
+  return updateManifest(ticket, dir, now, (raw) => {
+    for (const p of Array.isArray(raw.prs) ? raw.prs : []) if (p && states[p.url]) p.state = states[p.url];
+    // Every PR merged and the run long gone: it's finished then, if nothing said so.
+    if (!raw.finishedAt && (raw.prs || []).length && raw.prs.every((p: any) => p.state === "merged")) raw.finishedAt = now;
+  });
+}
+
 /** The newest rating of an assessment (each person's newest counts; the newest of those wins). */
 export function ratingOf(m: FactoryManifest, a: FactoryAssessment | null): FactoryRating | null {
   return a ? m.ratings.filter((r) => r.assessmentAt === a.at).at(-1) || null : null;
@@ -699,7 +713,9 @@ export function itemSteps(m: FactoryManifest, steps: PipelineStep[], column: str
 }
 
 /** The Factory board: every manifest placed in its column, joined with its ticket's runs. */
-export function buildBoard(cfg: FactoryConfig, configured: boolean, manifests: FactoryManifest[], runs: FactoryRun[], errors: string[] = [], canDecide = false): FactoryBoard {
+export function buildBoard(cfg: FactoryConfig, configured: boolean, manifests: FactoryManifest[], runs: FactoryRun[], errors: string[] = [], canDecide = false,
+  /** The metrics' data when the board's own lists are capped for display: every manifest and run. */
+  all: { manifests: FactoryManifest[]; runs: FactoryRun[] } = { manifests, runs }): FactoryBoard {
   const steps = pipeline(cfg);
   const order = new Map(steps.map((s, i) => [s.kind === "stage" ? s.id : `gate:${s.id}`, i]));
   const items = manifests.map((m): FactoryItem => {
@@ -754,8 +770,8 @@ export function buildBoard(cfg: FactoryConfig, configured: boolean, manifests: F
     wip: { inFlight: items.filter((i) => i.column !== "done" && i.column !== "queued").length, limit: cfg.limits.wip },
     errors,
     canDecide,
-    approverStats: approverStats(manifests),
-    metrics: factoryMetrics(manifests, runs),
+    approverStats: approverStats(all.manifests),
+    metrics: factoryMetrics(all.manifests, all.runs),
   };
 }
 
@@ -768,15 +784,17 @@ const share = (hits: number, n: number) => (n ? { rate: Math.round((hits / n) * 
  */
 export function factoryMetrics(manifests: FactoryManifest[], runs: FactoryRun[], now = Date.now()): FactoryMetrics {
   const since = now - 30 * 86_400_000;
-  const recent = manifests.filter((m) => Date.parse(m.updatedAt) >= since);
   const merged = (m: FactoryManifest) => m.prs.length > 0 && m.prs.every((p) => p.state === "merged");
-  // When it finished (recorded by done, a rejection or an override); older manifests: their last write.
+  // Each figure by its own stable time (a later retro or rating rewrites updatedAt): when it finished
+  // (done, a rejection or an override), when a review ended, when an assessment was made. Older
+  // manifests without them: their last write.
   const end = (m: FactoryManifest) => Date.parse(m.finishedAt || m.updatedAt);
   const finished = manifests.filter((m) => ((m.done && !m.error) || merged(m)) && end(m) >= since);
-  const reviews = recent.flatMap((m) => latestPerRepo(m.stages.filter((s) => s.id === "review")).filter((s) => s.status === "done" || s.status === "failed"));
+  const reviews = manifests.flatMap((m) => latestPerRepo(m.stages.filter((s) => s.id === "review"))
+    .filter((s) => (s.status === "done" || s.status === "failed") && Date.parse(s.endedAt || m.updatedAt) >= since));
   // Only where it was allowed to decide: advisory calls never approve alone.
-  const assessments = recent.flatMap((m) => m.assessments.filter((a) => a.enforced && Date.parse(a.at) >= since));
-  const mergedItems = recent.filter(merged);
+  const assessments = manifests.flatMap((m) => m.assessments.filter((a) => a.enforced && Date.parse(a.at) >= since));
+  const mergedItems = manifests.filter((m) => merged(m) && end(m) >= since);
   const cost = (m: FactoryManifest) => runs.filter((r) => sameTicket(r.ticket, m.ticket)).reduce((s, r) => s + (r.costUsd || 0), 0);
   const lead = median(finished.map((m) => (end(m) - Date.parse(m.startedAt)) / 3_600_000).filter((h) => h >= 0));
   return {
@@ -797,7 +815,8 @@ const CLOSED_STATE = /^(done|closed|complete(d)?|cancel(l)?ed|canceled|resolved|
  * any state that isn't a finished one) and with an intake label (when labels are set), not already
  * in the factory (any progress file: a rejected one isn't retried on its own), never pulled in
  * before (`pulled`: a run that ended before reporting isn't retried on its own either) and with no
- * run going. Neither states nor labels: none (only tickets sent by hand).
+ * run going. `issues` are already this person's (and, with intake.unassigned, unassigned ones:
+ * marked, to be claimed first). Neither states nor labels: none (only tickets sent by hand).
  */
 export function intakeCandidates(cfg: FactoryConfig, issues: any[], manifests: FactoryManifest[], runs: FactoryRun[], pulled: Set<string> = new Set()): FactoryIntake["candidates"] {
   const { states, labels } = cfg.intake;
@@ -808,10 +827,13 @@ export function intakeCandidates(cfg: FactoryConfig, issues: any[], manifests: F
   const going = new Set(runs.filter((r) => r.ticket && (r.status === "running" || r.status === "waiting")).map((r) => r.ticket!.toLowerCase()));
   return issues
     .filter((i) => i && typeof i.id === "string")
+    // The tracker's own idea of finished (Linear's state types) wins; else the usual names.
+    .filter((i) => !["completed", "canceled"].includes(String(i.stateType || "")))
     .filter((i) => (st.size ? st.has(String(i.state || "").toLowerCase()) : !CLOSED_STATE.test(String(i.state || "").trim())))
     .filter((i) => !lb.size || (Array.isArray(i.labels) ? i.labels : []).some((l: any) => lb.has(String(typeof l === "string" ? l : l?.name || "").toLowerCase())))
     .filter((i) => !known.has(i.id.toLowerCase()) && !going.has(i.id.toLowerCase()) && !pulled.has(i.id.toLowerCase()))
-    .map((i) => ({ ticket: i.id, title: String(i.title || ""), url: typeof i.url === "string" ? i.url : null, state: i.state ? String(i.state) : null }));
+    .filter((i) => cfg.intake.unassigned || !!i.assignee)
+    .map((i) => ({ ticket: i.id, title: String(i.title || ""), url: typeof i.url === "string" ? i.url : null, state: i.state ? String(i.state) : null, unassigned: !i.assignee }));
 }
 
 /**

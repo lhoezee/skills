@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { manifestPath, sourceWorkspace, ticketFile, update } from "../factory.mjs";
+import { intakeCheck, manifestPath, sourceWorkspace, ticketFile, update } from "../factory.mjs";
 
 const SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "factory.mjs");
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), "factory-mjs-"));
@@ -116,4 +116,16 @@ test("a stage's failures are counted, and a retro is recorded", () => {
   assert.deepEqual({ ...r, at: undefined }, { caught: ["a race", "missing index"], wrong: ["the API was paged"], approver: "held up", proposals: [], at: undefined });
   assert.ok(run("done", {}).manifest.finishedAt, "done records when it finished");
   assert.equal(run("start", {}).manifest.finishedAt, null, "picked up again: not finished");
+});
+
+test("intake: a ticket in the factory, or pulled in before (by the dashboard too), isn't taken again", () => {
+  const { ws } = workspace();
+  assert.deepEqual(intakeCheck(ws, "ENG-20"), { ok: true, why: null });
+  assert.deepEqual(intakeCheck(ws, "ENG-20", { record: true, now: "2026-10-27T10:00:00.000Z" }), { ok: true, why: null });
+  assert.match(intakeCheck(ws, "eng-20").why, /pulled in before \(2026-10-27T10:00:00\.000Z\)/);
+  // The dashboard's history is the same file.
+  fs.writeFileSync(path.join(ws, ".claude", "ledger", "factory-intake.json"), JSON.stringify({ "eng-21": "2026-10-27T11:00:00.000Z", "eng-20": "x" }));
+  assert.equal(intakeCheck(ws, "ENG-21").ok, false);
+  update("stage", { ticket: "ENG-22", stage: "plan", status: "done" }, { start: ws });
+  assert.match(intakeCheck(ws, "ENG-22").why, /already in the factory/);
 });

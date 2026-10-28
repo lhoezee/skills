@@ -64,7 +64,7 @@ const STATE: Record<FactoryItem['state'], { label: string; cls: string }> = {
         <div class="intake">
           @if (!intake()) {
             <button class="btn sm" type="button" (click)="previewIntake()" [disabled]="pulling()">{{ pulling() ? 'Looking…' : 'Pull work in' }}</button>
-            <span class="faint">The policy's intake tickets, up to the free WIP slots.</span>
+            <span class="faint">The policy's intake tickets assigned to you, up to the free WIP slots.</span>
           } @else {
             @let i = intake()!;
             @if (i.error) { <span class="err-note">{{ i.error }}</span> }
