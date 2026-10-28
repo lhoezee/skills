@@ -249,6 +249,8 @@ export class ReviewGuideComponent {
   /** Line comments not posted yet, kept in this browser per PR. */
   readonly drafts = signal<DraftComment[]>([]);
   readonly composing = signal<string | null>(null);
+  /** The commit whose diff the open comment was started on. */
+  private composeSha: string | null = null;
   composeText = '';
   readonly posting = signal(false);
   readonly asking = signal(false);
@@ -277,13 +279,14 @@ export class ReviewGuideComponent {
 
   compose(path: string, line: number): void {
     const k = lineKey(path, line);
-    if (this.composing() !== k) this.composeText = '';
+    if (this.composing() !== k) { this.composeText = ''; this.composeSha = this.diff()?.sha ?? null; }
     this.composing.set(k);
   }
 
   addDraft(path: string, line: number): void {
     const body = this.composeText.trim();
-    const sha = this.diff()?.sha;
+    // Stamped with the commit it was started on: a refresh while typing makes it a stale draft to check.
+    const sha = this.composeSha || this.diff()?.sha;
     if (!body || !sha) return;
     this.saveDrafts([...this.drafts(), { path, line, body, sha }]);
     this.composeText = '';
@@ -300,9 +303,11 @@ export class ReviewGuideComponent {
     if (!sha || !this.drafts().length || this.staleDrafts()) return;
     this.posting.set(true);
     try {
-      const comments = this.drafts().map(({ path, line, body }) => ({ path, line, body }));
+      // A review takes at most 100; the rest stay for the next one. Only the ones sent are removed.
+      const batch = this.drafts().slice(0, 100);
+      const comments = batch.map(({ path, line, body }) => ({ path, line, body }));
       const r = await this.api.post<ReviewSubmitted>('/api/reviews/submit', { repo: this.repo(), number: this.number(), event: 'COMMENT', body: '', sha, comments });
-      this.saveDrafts([]);
+      this.saveDrafts(this.drafts().filter((d) => !batch.includes(d)));
       this.toast.show(`Posted ${r.comments} line ${r.comments === 1 ? 'comment' : 'comments'}${r.movedToBody ? ` (${r.movedToBody} in the review's text: their lines aren't in the diff)` : ''}.`);
     } catch (e) { this.toast.error(`Couldn't post: ${(e as Error).message}`); }
     finally { this.posting.set(false); }
@@ -313,6 +318,11 @@ export class ReviewGuideComponent {
     const body = this.composeText.trim();
     const sha = this.diff()?.sha;
     if (!body || !sha) return;
+    if (this.composeSha && this.composeSha !== sha) {
+      this.composeSha = sha;
+      this.toast.error('The PR got new commits while you were writing: check that line is still the one you mean, then ask again.');
+      return;
+    }
     this.asking.set(true);
     try {
       const r = await this.api.post<{ run: RunMeta | null; launchError: string | null }>('/api/reviews/ask-change', { repo: this.repo(), number: this.number(), sha, path, line, body });
@@ -363,12 +373,17 @@ export class ReviewGuideComponent {
       this.done.set({});
       this.loadDrafts();
     }
+    // A guide or security review being written was for the old load: its result is dropped, so it stops "writing".
+    this.makingGuide.set(false); this.makingSec.set(false);
     this.diffErr.set(null); this.guideErr.set(null); this.secErr.set(null);
     const q = `repo=${encodeURIComponent(repo)}&number=${n}`;
     this.api.get<ReviewPrDetail>(`/api/reviews/pr?${q}`).then((d) => { if (gen === this.gen) { this.detail.set(d); this.loadProgress(d.sha); } }).catch(() => {});
     // On a refresh, the new commit's (or none yet) replaces the old one when it arrives.
-    this.api.get<ReviewGuide | null>(`/api/reviews/guide?${q}`).then((g) => { if (gen === this.gen && (g || refresh)) this.guide.set(g); }).catch(() => {});
-    this.api.get<SecurityReview | null>(`/api/reviews/security?${q}`).then((s) => { if (gen === this.gen && (s || refresh)) this.security.set(s); }).catch(() => {});
+    // A failed read on a refresh clears the old commit's result rather than leaving it against new code.
+    this.api.get<ReviewGuide | null>(`/api/reviews/guide?${q}`).then((g) => { if (gen === this.gen && (g || refresh)) this.guide.set(g); })
+      .catch(() => { if (gen === this.gen && refresh) this.guide.set(null); });
+    this.api.get<SecurityReview | null>(`/api/reviews/security?${q}`).then((s) => { if (gen === this.gen && (s || refresh)) this.security.set(s); })
+      .catch(() => { if (gen === this.gen && refresh) this.security.set(null); });
     try {
       const d = await this.api.get<ReviewDiff>(`/api/reviews/diff?${q}`);
       if (gen === this.gen) this.diff.set(d);

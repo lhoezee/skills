@@ -467,3 +467,22 @@ test("overridableGate: the gate's latest row this round, pending ones included, 
   assert.equal(overridableGate(m([{ ...auto, at: "2026-10-27T09:00:00.000Z" }])), null, "an earlier round's");
   assert.equal(overridableGate(m([auto], { done: true })), null, "a finished ticket");
 });
+
+test("approverStats: an override counts against the assessment only when it reversed that gate's Approver approval", () => {
+  const a = { gate: "merge", level: "low", wouldApprove: true, enforced: true, action: "handoff", at: "2026-10-27T10:00:00.000Z" };
+  const plan = normalizeManifest({ ticket: "S-1", startedAt: at, assessments: [a], gates: [
+    { id: "plan", decision: "approved", by: "auto", at: "2026-10-27T09:00:00.000Z" },
+    { id: "plan", decision: "rejected", by: "sam", override: true, at: "2026-10-27T11:00:00.000Z" }] })!;
+  assert.deepEqual(approverStats([plan]), { assessed: 1, judged: 0, tooLenient: 0, tooStrict: 0 }, "another gate's automatic approval");
+  const merge = normalizeManifest({ ticket: "S-2", startedAt: at, assessments: [a], gates: [
+    { id: "merge", decision: "approved", by: "approver", at: "2026-10-27T10:00:00.000Z" },
+    { id: "merge", decision: "rejected", by: "sam", override: true, at: "2026-10-27T11:00:00.000Z" }] })!;
+  assert.deepEqual(approverStats([merge]), { assessed: 1, judged: 1, tooLenient: 1, tooStrict: 0 });
+});
+
+test("readManifests returns as many as asked for (the board's cap is only its default)", () => {
+  const dir = tmp();
+  for (let i = 0; i < 3; i++) fs.writeFileSync(path.join(dir, `L-${i}.json`), JSON.stringify({ ticket: `L-${i}`, startedAt: at, updatedAt: at }));
+  assert.equal(readManifests(dir, 2).manifests.length, 2);
+  assert.equal(readManifests(dir, Infinity).manifests.length, 3);
+});

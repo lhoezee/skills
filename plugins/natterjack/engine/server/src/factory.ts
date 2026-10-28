@@ -366,7 +366,7 @@ export function readManifests(dir = manifestDir(), limit = MAX_MANIFESTS): { man
     if (hit.error) errors.push(hit.error);
   }
   manifests.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-  return { manifests: manifests.slice(0, MAX_MANIFESTS), errors };
+  return { manifests: manifests.slice(0, limit), errors };
 }
 
 // ------------------------------------------------------------------ decisions from the dashboard
@@ -753,7 +753,9 @@ export function approverStats(manifests: FactoryManifest[]): FactoryBoard["appro
     if (!a) continue;
     assessed++;
     const r = ratingOf(m, a);
-    const overridden = m.gates.some((g) => g.override && g.at >= a.at);
+    // An override counts against it only when it reversed this gate's Approver approval.
+    const overridden = m.gates.some((g, i) => g.override && g.id === a.gate && g.at >= a.at
+      && m.gates.slice(0, i).filter((x) => x.id === g.id).at(-1)?.by === "approver");
     if (!r && !overridden) continue;
     judged++;
     if (r ? r.rating === "should-have-asked" : overridden) tooLenient++;

@@ -409,6 +409,10 @@ function factoryTicketParam(v: unknown): string | null {
 /** Tickets whose gate decision is being recorded (one at a time per ticket). */
 const deciding = new Set<string>();
 
+/** PRs ("owner/name#n") an "Ask agent to change this" is posting for, and the run each last started: one writer per branch. */
+const changing = new Set<string>();
+const changeRuns = new Map<string, string>();
+
 /** `/implement X` or a plugin's `/multirepo:implement X` (not Explain: that only reads). */
 const IMPLEMENT_PROMPT = /^\/(?:[\w.-]+:)?implement\s+\S/;
 
@@ -2226,26 +2230,39 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
     if (!text) return sendError(res, 400, "Say what to change.");
     if (typeof body.path !== "string" || !body.path || !Number.isInteger(line) || line < 1) return sendError(res, 400, "Which line is missing.");
     // Everything that could refuse comes before posting, so a refusal never leaves a comment without its run.
-    const head = await reviews.head(repo, number);
-    const same = (u: string) => u.replace(/\/+$/, "").toLowerCase();
-    // A factory ticket's PR (any ticket, not only the newest): its work folder and ticket, so the change lands where the work is.
-    const item = readManifests(undefined, Infinity).manifests.find((m) => m.prs.some((x) => same(x.url) === same(head.url)));
-    if (item) {
-      // Its own run may be pushing to the same branch right now: two agents on one branch collide.
-      const going = factoryRuns().find((r) => r.implement && r.ticket && r.ticket.toLowerCase() === item.ticket.toLowerCase() && (r.status === "running" || r.status === "waiting"));
-      if (going) return sendError(res, 409, `${item.ticket}'s implement run is still going on this branch: ask it there (Activity), or wait for it to finish.`);
-    }
-    const posted = await reviews.submit({ repo, number, event: "COMMENT", body: "", sha: String(body.sha ?? ""), comments: [{ path: body.path, line, body: text }] });
-    // A line that isn't in the diff went into the review's text instead: the run is told so.
-    const onLine = posted.comments === 1;
-    let run = null, launchError = null;
+    // One writer per PR: an earlier change run for it that's still going, or a request in flight, refuses this one.
+    const key = `${repo}#${number}`.toLowerCase();
+    const earlier = changeRuns.get(key);
+    const earlierRun = earlier ? factoryRuns().find((r) => r.id === earlier) : null;
+    if (changing.has(key) || (earlierRun && (earlierRun.status === "running" || earlierRun.status === "waiting")))
+      return sendError(res, 409, `An agent is already making a change on ${repo}#${number}: wait for it (Activity), then ask again.`);
+    const agentId = deck.config().defaults.agent ?? "claude";
+    const blocked = launchBlocker(agentId, agentId === "claude" ? deck.config().defaults.model : null);
+    if (blocked) return sendError(res, 429, blocked);
+    changing.add(key);
     try {
-      run = launchRun({
-        prompt: askChangePrompt({ url: head.url, branch: head.branch, sha: String(body.sha), path: body.path, line, body: text, commentUrl: posted.url, onLine, workroot: item?.workroot ?? null, ticket: item?.ticket ?? null }),
-        label: `Change on ${repo}#${number}`,
-      }, "review");
-    } catch (e) { launchError = (e as Error).message; }
-    return sendJson(res, { posted, run, launchError });
+      const head = await reviews.head(repo, number);
+      const same = (u: string) => u.replace(/\/+$/, "").toLowerCase();
+      // A factory ticket's PR (any ticket, not only the newest): its work folder and ticket, so the change lands where the work is.
+      const item = readManifests(undefined, Infinity).manifests.find((m) => m.prs.some((x) => same(x.url) === same(head.url)));
+      if (item) {
+        // Its own run may be pushing to the same branch right now: two agents on one branch collide.
+        const going = factoryRuns().find((r) => r.implement && r.ticket && r.ticket.toLowerCase() === item.ticket.toLowerCase() && (r.status === "running" || r.status === "waiting"));
+        if (going) return sendError(res, 409, `${item.ticket}'s implement run is still going on this branch: ask it there (Activity), or wait for it to finish.`);
+      }
+      const posted = await reviews.submit({ repo, number, event: "COMMENT", body: "", sha: String(body.sha ?? ""), comments: [{ path: body.path, line, body: text }] });
+      // A line that isn't in the diff went into the review's text instead: the run is told so.
+      const onLine = posted.comments === 1;
+      let run = null, launchError = null;
+      try {
+        run = launchRun({
+          prompt: askChangePrompt({ url: head.url, branch: head.branch, sha: String(body.sha), path: body.path, line, body: text, commentUrl: posted.url, onLine, workroot: item?.workroot ?? null, ticket: item?.ticket ?? null }),
+          label: `Change on ${repo}#${number}`,
+        }, "review");
+      } catch (e) { launchError = (e as Error).message; }
+      if (run) changeRuns.set(key, run.id);
+      return sendJson(res, { posted, run, launchError });
+    } finally { changing.delete(key); }
   }
   if (p === "/api/reviews/submit") {
     // Posts to GitHub as the person: only ever from their click on the Reviews page.
