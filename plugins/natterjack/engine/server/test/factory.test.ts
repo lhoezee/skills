@@ -7,7 +7,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   applyPreset, boardColumns, buildBoard, defaultFactoryConfig, factoryConfigProblems, factoryConfigState, normalizeFactoryConfig,
-  GATE_IDS, SPEC_CHECKS, STAGE_IDS, factoryLaunchBlocker, manifestFile, normalizeManifest, readPlan, recordGateDecision, ticketFile, pipeline, placeItem, readManifests, saveFactoryConfig,
+  GATE_IDS, SPEC_CHECKS, STAGE_IDS, approverStats, factoryLaunchBlocker, manifestFile, normalizeManifest, overridableGate, overrideGateDecision, rateAssessment, readPlan, recordGateDecision, ticketFile, pipeline, placeItem, readManifests, saveFactoryConfig,
 } from "../src/factory.ts";
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), "factory-"));
@@ -429,4 +429,41 @@ test("an enforced Approver needs an identity", () => {
   const c = normalizeFactoryConfig({ approver: { enabled: true, enforce: true } });
   assert.ok(factoryConfigProblems(c).some((p) => /name its identity/.test(p)));
   assert.ok(!factoryConfigProblems(normalizeFactoryConfig({ approver: { enabled: true, enforce: true, identity: "bot" } })).some((p) => /identity/.test(p)));
+});
+
+test("a person overrides an automatic approval (with why), and rates the Approver's calls", async () => {
+  const dir = tmp();
+  const file = path.join(dir, "T-11.json");
+  const assessment = { gate: "plan", level: "low", rules: [], concerns: [], wouldApprove: true, blockers: [], sampled: false, enforced: true, action: "pass", reason: "ok", at: "2026-10-27T10:05:00.000Z" };
+  fs.writeFileSync(file, JSON.stringify({ ticket: "T-11", startedAt: at, roundStartedAt: at, stages: [{ id: "plan", status: "done" }],
+    gates: [{ id: "spec", decision: "approved", by: "sam", at }, { id: "plan", decision: "approved", by: "approver", mode: "approver", risk: "low", at: "2026-10-27T10:05:00.000Z" }],
+    assessments: [assessment] }));
+  const item = () => buildBoard(defaultFactoryConfig(), true, readManifests(dir).manifests, []).items[0];
+  assert.deepEqual(item().overridable, { gate: "plan", by: "approver", at: "2026-10-27T10:05:00.000Z" });
+  await assert.rejects(overrideGateDecision("T-11", "plan", "sam", "  ", { dir }), /Say why/);
+  await assert.rejects(overrideGateDecision("T-11", "spec", "sam", "no", { dir }), /isn't an automatic approval/, "a person's approval isn't overridden here");
+  // Rating first: right, then someone else says it should have asked; the newest counts.
+  await rateAssessment("T-11", assessment.at, "right", "ann", null, { dir, now: "2026-10-27T11:00:00.000Z" });
+  await rateAssessment("T-11", assessment.at, "should-have-asked", "sam", " touches billing ", { dir, now: "2026-10-27T11:01:00.000Z" });
+  await assert.rejects(rateAssessment("T-11", "2020-01-01T00:00:00.000Z", "right", "sam", null, { dir }), /isn't there/);
+  await assert.rejects(rateAssessment("T-11", assessment.at, "meh" as any, "sam", null, { dir }), /Rate it/);
+  assert.deepEqual({ ...item().approverRating, at: undefined }, { assessmentAt: assessment.at, gate: "plan", level: "low", wouldApprove: true, rating: "should-have-asked", by: "sam", note: "touches billing", at: undefined });
+  const m = await overrideGateDecision("T-11", "plan", "sam", "touches billing", { dir, now: "2026-10-27T11:02:00.000Z" });
+  assert.equal(m.done, true);
+  assert.match(m.error!, /sam overrode the Approver's approval: touches billing/);
+  assert.deepEqual(m.gates.at(-1), { id: "plan", mode: "human", decision: "rejected", by: "sam", risk: "low", rationale: "Overrode the Approver's approval: touches billing", sha: null, at: "2026-10-27T11:02:00.000Z", override: true });
+  assert.equal(item().overridable, null, "a stopped ticket has nothing to override");
+  assert.equal(item().state, "failing");
+  await assert.rejects(overrideGateDecision("T-11", "plan", "sam", "again", { dir }), /finished/);
+  assert.deepEqual(approverStats(readManifests(dir).manifests), { assessed: 1, judged: 1, tooLenient: 1, tooStrict: 0 });
+});
+
+test("overridableGate: the gate's latest row this round, pending ones included, must be an automatic approval", () => {
+  const m = (gates: object[], extra = {}) => normalizeManifest({ ticket: "T-12", startedAt: at, roundStartedAt: at, gates, ...extra })!;
+  const auto = { id: "prePr", decision: "approved", by: "auto", at: "2026-10-27T10:10:00.000Z" };
+  assert.equal(overridableGate(m([auto]))!.id, "prePr");
+  assert.equal(overridableGate(m([auto, { id: "prePr", decision: "pending", at: "2026-10-27T10:20:00.000Z" }])), null, "asked again since");
+  assert.equal(overridableGate(m([{ ...auto, by: "sam" }])), null, "a person's approval");
+  assert.equal(overridableGate(m([{ ...auto, at: "2026-10-27T09:00:00.000Z" }])), null, "an earlier round's");
+  assert.equal(overridableGate(m([auto], { done: true })), null, "a finished ticket");
 });
