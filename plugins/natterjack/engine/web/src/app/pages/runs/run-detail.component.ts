@@ -78,6 +78,8 @@ export class RunDetailComponent implements OnDestroy {
   readonly renaming = signal(false);
 
   private readonly box = viewChild<ElementRef<HTMLElement>>('transcript');
+  private readonly top = viewChild<ElementRef<HTMLElement>>('top');
+  private readonly composer = viewChild(RunComposerComponent, { read: ElementRef });
   private readonly titleInput = viewChild<ElementRef<HTMLInputElement>>('titleInput');
   private es: EventSource | null = null;
   /** This run's stream has connected at least once (its replay carries the events). */
@@ -232,6 +234,23 @@ export class RunDetailComponent implements OnDestroy {
     effect(() => {
       const t = this.ticket();
       if (t) untracked(() => this.loadIssue(t.id));
+    });
+    // The sticky top block and the composer change height (prompt, notes, questions, an open strip):
+    // their heights go to CSS, so the transcript box fits between them and nothing hides under the top.
+    effect((onCleanup) => {
+      const top = this.top()?.nativeElement;
+      const composer = this.composer()?.nativeElement as HTMLElement | undefined;
+      const detail = top?.parentElement;
+      if (!top || !detail) return;
+      const set = () => {
+        detail.style.setProperty('--run-top-h', top.offsetHeight + 'px');
+        if (composer) detail.style.setProperty('--composer-h', composer.offsetHeight + 'px');
+      };
+      set();
+      const ro = new ResizeObserver(set);
+      ro.observe(top);
+      if (composer) ro.observe(composer);
+      onCleanup(() => ro.disconnect());
     });
   }
 
