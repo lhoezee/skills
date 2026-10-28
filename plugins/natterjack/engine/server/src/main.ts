@@ -1388,13 +1388,17 @@ async function getIssues(force: boolean) {
   }
   // No states/teams configured: show whatever the tracker returned, in the order first seen.
   const seen = (key: string) => [...new Set(list.map((i) => i[key]).filter(Boolean))] as string[];
-  const implementTeams: string[] = cfg.implementTeams || [];
+  // Configured team names as the issues carry them (a GitHub repo may be written owner/name).
+  const named = (teams: string[] | undefined) => (teams || []).map((t) => (tracker.teamName && tracker.teamName(t)) || t);
+  const unknownTeams = tracker.teamName ? (cfg.teams || []).filter((t) => tracker.teamName!(t) === null) : [];
+  const implementTeams = named(cfg.implementTeams);
   return {
     ...data,
+    teamsWarning: unknownTeams.length ? `deck.json issues.teams has ${unknownTeams.map((t) => `"${t}"`).join(", ")}, which matches nothing this workspace reads from ${tcfg.label}, so the board shows none of its issues.` : null,
     tracker: { kind: tcfg.kind, label: tcfg.label, configured: tcfg.configured, supported: tcfg.supported },
     connect: data.connected ? null : tracker.connectHelp(),
     states: cfg.states && cfg.states.length ? cfg.states : seen("state"),
-    teams: cfg.teams && cfg.teams.length ? cfg.teams : seen("team"),
+    teams: cfg.teams && cfg.teams.length ? [...new Set(named(cfg.teams))] : seen("team"),
     viewer: tracker.status().viewer,
     keySource: tracker.status().source,
     query: queryHelp ? { value: query, ...queryHelp } : null,

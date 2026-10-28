@@ -379,6 +379,14 @@ export function validate(root) {
   if (deck) {
     const presetIds = (deck.presets || []).map((p) => p.id);
     for (const r of deck.routines || []) if (!presetIds.includes(r.preset)) err("deck.json", `routine "${r.id}" uses preset "${r.preset}", which doesn't exist`);
+    // GitHub teams are the configured repos (owner/name or the short name), so a typo is checkable here.
+    const ghRepos = ws && ws.issues && ws.issues.kind === "github" ? [].concat(ws.issues.repos || ws.issues.repo || []).map((r) => String(r).toLowerCase()) : null;
+    if (ghRepos && ghRepos.length) for (const key of ["teams", "implementTeams"]) {
+      for (const t of (deck.issues && deck.issues[key]) || []) {
+        const name = String(t).toLowerCase();
+        if (!ghRepos.some((r) => r === name || r.split("/")[1] === name)) warn("deck.json", `issues.${key} "${t}" isn't one of workspace.json issues.repos (${ghRepos.join(", ")}), so ${key === "teams" ? "the board shows nothing from it" : "it gets no Implement button"}`);
+      }
+    }
     if (deck.issues && deck.issues.implementPreset && !presetIds.includes(deck.issues.implementPreset)) warn("deck.json", `issues.implementPreset "${deck.issues.implementPreset}" isn't a preset, so Implement buttons won't show`);
   }
 

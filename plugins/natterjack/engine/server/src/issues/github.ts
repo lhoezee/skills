@@ -68,6 +68,15 @@ export function repoList(cfg: any): string[] {
   return list.filter((r: unknown) => typeof r === "string" && /^[\w.-]+\/[\w.-]+$/.test(r as string));
 }
 
+/**
+ * The configured repo a board team (deck.json issues.teams / implementTeams) names: its owner/name
+ * or its short name, in any case. Undefined when none matches.
+ */
+export function repoForTeam(repos: string[], team: string): string | undefined {
+  const t = String(team || "").trim().toLowerCase();
+  return repos.find((r) => r.toLowerCase() === t) || repos.find((r) => r.split("/")[1].toLowerCase() === t);
+}
+
 /** The board column for an issue: the first `states` entry whose labels it has, else Open/Closed. */
 export function stateOf(labels: string[], closed: boolean, states: Record<string, string[]>): string {
   if (closed) return "Closed";
@@ -94,6 +103,9 @@ class GitHubTracker implements IssueTracker {
   constructor(cfg: IssuesConfig) { this.cfg = cfg as any; }
 
   get repos() { return repoList(this.cfg); }
+  /** Issues carry the repo's short name as their team, whichever way the config names it. */
+  teamName(team: string) { const r = repoForTeam(this.repos, team); return r ? r.split("/")[1] : null; }
+
   get states(): Record<string, string[]> { return this.cfg.states && typeof this.cfg.states === "object" ? this.cfg.states : {}; }
 
   status(): TrackerStatus {
@@ -147,17 +159,17 @@ class GitHubTracker implements IssueTracker {
       this.inflightKey = key;
       this.inflight = (async () => {
         try {
-          if (!this.viewer) this.viewer = await gh(["api", "user", "--jq", "{login: .login}"]).then((u) => u.login);
+          if (!this.viewer) this.viewer = await this.gh(["api", "user", "--jq", "{login: .login}"]).then((u) => u.login);
           this.authed = true;
         } catch (e) {
           this.authed = false;
           this.cache = { connected: false, issues: [], fetchedAt: Date.now(), error: e.message };
           return;
         }
-        const repos = filter.teams && filter.teams.length ? this.repos.filter((r) => filter.teams.includes(r.split("/")[1])) : this.repos;
+        const repos = filter.teams && filter.teams.length ? this.repos.filter((r) => filter.teams.some((t) => repoForTeam([r], t))) : this.repos;
         const errors: string[] = [];
         const lists = await Promise.all(repos.map((repo) =>
-          gh(["issue", "list", "--repo", repo, "--state", "open", "--limit", String(LIMIT), ...searchArgs(filter.query),
+          this.gh(["issue", "list", "--repo", repo, "--state", "open", "--limit", String(LIMIT), ...searchArgs(filter.query),
             ...(filter.assigned === "me" ? ["--assignee", "@me"] : []),
             // Any of the labels: one label is a filter; several, a search (a comma means "or" there).
             ...(filter.labels && filter.labels.length === 1 && !filter.query ? ["--label", filter.labels[0]] : []),
