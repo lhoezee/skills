@@ -803,7 +803,7 @@ const standup = new Standup({
   ledgerDir: LEDGER_DIR,
   tracker: () => { const c = trackers.config(); return c.configured && c.supported ? { tracker: trackers.get(), label: c.label } : null; },
   codeHost: () => workspaceConfig().codeHost,
-  inbox: () => inbox.get(false),
+  inbox: (force) => inbox.get(force),
   gh: ghJson,
   runs: () => runs.list(),
   meetings: () => meetings.get(),

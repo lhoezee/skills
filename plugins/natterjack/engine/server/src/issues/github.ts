@@ -20,6 +20,8 @@ import { ACTIVITY_LIMIT, type AssignedIssue, type IssueChange, type TrackerActiv
 
 const CACHE_TTL_MS = 60 * 1000;
 const LIMIT = 200;
+/** Pages of 100 read from a repo's issue events or comments, at most, to reach the Standup window's start. */
+const ACTIVITY_PAGES = 5;
 
 /**
  * GitHub search allows 256 characters of search terms (qualifiers like repo: don't count)
@@ -204,19 +206,24 @@ class GitHubTracker implements IssueTracker {
     const repoArgs = repos.flatMap((r) => ["--repo", r]);
     const at = searchTime(since);
     const fields = "number,title,url,repository,labels,state,createdAt,updatedAt";
+    // Each part on its own: one unreadable repo or a rate-limited search leaves the rest.
+    const errors: string[] = [];
+    const part = (what: string, p: Promise<any>) => p.catch((e) => { errors.push(`${what}: ${e.message}`); return []; });
+    const search = (what: string, args: string[]) => part(what, this.gh(["search", "issues", ...repoArgs, ...args, "--limit", String(ACTIVITY_LIMIT), "--json", fields]));
     const [opened, commented, assigned, perRepo] = await Promise.all([
-      this.gh(["search", "issues", ...repoArgs, "--author=@me", "--created", `>=${at}`, "--limit", String(ACTIVITY_LIMIT), "--json", fields]),
+      search("issues you opened", ["--author=@me", "--created", `>=${at}`]),
       // Only for the titles: the comments below say which issues, and when.
-      this.gh(["search", "issues", ...repoArgs, "--commenter=@me", "--updated", `>=${at}`, "--limit", String(ACTIVITY_LIMIT), "--json", fields]),
-      this.gh(["search", "issues", ...repoArgs, "--assignee=@me", "--state=open", "--limit", String(ACTIVITY_LIMIT), "--json", fields]),
+      search("issues you commented on", ["--commenter=@me", "--updated", `>=${at}`]),
+      search("issues assigned to you", ["--assignee=@me", "--state=open"]),
       Promise.all(repos.map(async (repo) => {
         const [events, comments] = await Promise.all([
-          this.gh(["api", `repos/${repo}/issues/events?per_page=100`]),
-          this.gh(["api", `repos/${repo}/issues/comments?since=${encodeURIComponent(at)}&per_page=100`]),
+          part(`${repo} issue events`, this.pagesSince(`repos/${repo}/issues/events`, since)),
+          part(`${repo} comments`, this.pagesSince(`repos/${repo}/issues/comments?since=${encodeURIComponent(at)}&sort=created&direction=desc`, since)),
         ]);
         return { repo, events, comments };
       })),
     ]);
+    if (errors.length && errors.length === 3 + repos.length * 2) throw new Error(errors[0]);
     const changes = new Map<string, IssueChange>();
     const short = (n: any) => String(n.repository?.nameWithOwner || n.repository?.name || "").split("/").pop() || "";
     const labelNames = (n: any) => (n.labels || []).map((l: any) => (typeof l === "string" ? l : l.name)).filter(Boolean);
@@ -251,7 +258,19 @@ class GitHubTracker implements IssueTracker {
       return { id: `${short(n)}#${n.number}`, title: n.title || "", url: n.url || "", state, priority: 0, priorityLabel: "", blocked: isBlocked(state, labels), updatedAt: n.updatedAt || "" };
     });
     open.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-    return { changed: changesOf(changes), assigned: open };
+    return { changed: changesOf(changes), assigned: open, ...(errors.length ? { errors } : {}) };
+  }
+
+  /** A newest-first list endpoint, page by page until it goes past `since` (or ACTIVITY_PAGES pages). */
+  async pagesSince(endpoint: string, since: string): Promise<any[]> {
+    const out: any[] = [];
+    for (let page = 1; page <= ACTIVITY_PAGES; page++) {
+      const rows = await this.gh(["api", `${endpoint}${endpoint.includes("?") ? "&" : "?"}per_page=100&page=${page}`]);
+      if (!Array.isArray(rows)) break;
+      out.push(...rows);
+      if (rows.length < 100 || !isSince(rows[rows.length - 1].created_at, since)) break;
+    }
+    return out;
   }
 
   toIssue(repo: string, n: any) {

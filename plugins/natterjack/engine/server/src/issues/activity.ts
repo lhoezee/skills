@@ -9,14 +9,15 @@ export interface IssueChange { id: string; title: string; url: string; state: st
 /** An open issue assigned to the viewer. priority: the tracker's rank (1 highest, 0 none). blocked: its state or a label says so. */
 export interface AssignedIssue { id: string; title: string; url: string; state: string; priority: number; priorityLabel: string; blocked: boolean; updatedAt: string }
 
-export interface TrackerActivity { changed: IssueChange[]; assigned: AssignedIssue[] }
+/** errors: parts that couldn't be read (e.g. one repository); the rest is still there. */
+export interface TrackerActivity { changed: IssueChange[]; assigned: AssignedIssue[]; errors?: string[] }
 
 /** Issues each activity query asks for. */
 export const ACTIVITY_LIMIT = 50;
 
-/** Whether an issue reads as blocked: its state or one of its labels says "blocked" (or "blocker"). */
+/** Whether an issue reads as blocked: its state or one of its labels says "blocked" ("blocking" and "blocker" mean it holds others up). */
 export function isBlocked(state: string, labels: string[]): boolean {
-  return [state, ...labels].some((s) => /\bblock(ed|er|ing)?\b/i.test(String(s || "")));
+  return [state, ...labels].some((s) => /\bblocked\b/i.test(String(s || "")));
 }
 
 /** Assigned issues by priority (1 first, none last), then most recently updated. */

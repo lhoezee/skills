@@ -130,7 +130,7 @@ function fakeGh() {
 test("code host: PRs you opened, merged, updated or reviewed since, once each; Today and Blockers from the inbox", async () => {
   const f = fakeGh();
   const inbox = async () => ({
-    errors: ["acme/web CI: nope"],
+    errors: ["acme/web CI: nope", "review requests: rate limited"],
     items: [
       { kind: "review-requested", severity: "action", title: "Bump", detail: "acme/web#9 by kim", url: "https://github.com/acme/web/pull/9", at: "2026-10-26T10:00:00Z" },
       { kind: "pr-failing", severity: "alert", title: "Old", detail: "acme/api#3 · checks failing", url: "https://github.com/acme/api/pull/3", at: "2026-10-24T00:00:00Z" },
@@ -146,7 +146,7 @@ test("code host: PRs you opened, merged, updated or reviewed since, once each; T
   assert.ok(!f.calls.some((a) => a[1]?.includes("pulls/2/reviews")), "your own PRs aren't checked for your reviews");
   assert.deepEqual(c.next.map((i) => i.title), ["Bump", "Old", "New"]);
   assert.deepEqual(c.blockers.map((i) => i.title), ["Old"], "failing for over a day");
-  assert.equal(c.error, "acme/web CI: nope");
+  assert.equal(c.error, "review requests: rate limited", "the inbox's CI checks aren't this page's");
 
   const other = await standup({ codeHost: () => ({ kind: "gitlab" }) }).get(SINCE);
   assert.match(other.sources[0].error!, /gitlab/);
@@ -224,8 +224,8 @@ test("the draft prompt caps each section and says when there's nothing", () => {
 
 test("activity helpers: blocked by state or label, priority order, minutes for JQL", () => {
   assert.equal(isBlocked("Blocked", []), true);
-  assert.equal(isBlocked("In Progress", ["blocker"]), true);
-  assert.equal(isBlocked("In Progress", ["unblock-me-not", "backend"]), false);
+  assert.equal(isBlocked("In Progress", ["Blocked"]), true);
+  assert.equal(isBlocked("In Progress", ["blocking", "blocker", "backend"]), false, "it holds others up");
   const i = (id: string, priority: number, updatedAt: string) => ({ id, title: "", url: "", state: "", priority, priorityLabel: "", blocked: false, updatedAt });
   assert.deepEqual([i("a", 0, "2"), i("b", 3, "1"), i("c", 1, "1"), i("d", 3, "2")].sort(byPriority).map((x) => x.id), ["c", "d", "b", "a"]);
   assert.equal(minutesAgo("2026-10-26T14:00:00Z", NOW), 60);
@@ -300,7 +300,7 @@ test("github: opened, closed and moved by you (events), commented (comments), as
     if (args[0] === "search" && args.includes("--author=@me")) return [{ number: 1, title: "New bug", url: "https://github.com/acme/api/issues/1", repository: { nameWithOwner: "acme/api" }, labels: [], state: "open", createdAt: "2026-10-24T00:00:00Z", updatedAt: "2026-10-24T00:00:00Z" }];
     if (args[0] === "search" && args.includes("--commenter=@me")) return [{ number: 4, title: "Question", url: "https://github.com/acme/api/issues/4", repository: { nameWithOwner: "acme/api" }, labels: [], state: "open" }];
     if (args[0] === "search" && args.includes("--assignee=@me")) return [{ number: 2, title: "Mine", url: "https://github.com/acme/api/issues/2", repository: { nameWithOwner: "acme/api" }, labels: [{ name: "doing" }], state: "open", updatedAt: "2026-10-25T00:00:00Z" }];
-    if (args[1] === "repos/acme/api/issues/events?per_page=100") {
+    if (args[1] === "repos/acme/api/issues/events?per_page=100&page=1") {
       return [
         { event: "closed", actor: { login: "me" }, created_at: "2026-10-25T00:00:00Z", issue: { number: 3, title: "Old bug", html_url: "https://github.com/acme/api/issues/3", state: "closed", labels: [] } },
         { event: "labeled", actor: { login: "me" }, label: { name: "Doing" }, created_at: "2026-10-25T01:00:00Z", issue: { number: 2, title: "Mine", html_url: "https://github.com/acme/api/issues/2", state: "open", labels: [{ name: "doing" }] } },
@@ -318,7 +318,8 @@ test("github: opened, closed and moved by you (events), commented (comments), as
     throw new Error(`unexpected gh ${args.join(" ")}`);
   };
   const a = await t.activity(SINCE);
-  assert.ok(calls.some((c) => c[1] === `repos/acme/api/issues/comments?since=${encodeURIComponent("2026-10-23T00:00:00Z")}&per_page=100`));
+  assert.ok(calls.some((c) => c[1] === `repos/acme/api/issues/comments?since=${encodeURIComponent("2026-10-23T00:00:00Z")}&sort=created&direction=desc&per_page=100&page=1`));
+  assert.equal(a.errors, undefined);
   assert.deepEqual(a.changed.map((c) => [c.id, c.title, c.what]), [
     ["api#2", "Mine", ["moved to In progress"]],
     ["api#3", "Old bug", ["closed"]],
@@ -327,4 +328,73 @@ test("github: opened, closed and moved by you (events), commented (comments), as
   ]);
   assert.equal(a.changed.find((c) => c.id === "api#3")!.state, "Closed");
   assert.deepEqual(a.assigned.map((i) => [i.id, i.state]), [["api#2", "In progress"]]);
+});
+
+test("github: pages events back to since; one part failing leaves the rest, with the error", async () => {
+  const t = new GitHubTracker({ kind: "github", repos: ["acme/api", "acme/gone"] } as any);
+  t.viewer = "me";
+  const pages: string[] = [];
+  const ev = (number: number, at: string) => ({ event: "closed", actor: { login: "me" }, created_at: at, issue: { number, title: `#${number}`, html_url: "u", state: "closed", labels: [] } });
+  t.gh = async (args: string[]) => {
+    if (args[0] === "search") return [];
+    if (args[1].startsWith("repos/acme/gone/")) throw new Error("HTTP 404");
+    if (args[1].startsWith("repos/acme/api/issues/events")) {
+      pages.push(args[1]);
+      // Page 1 is full and still inside the window; page 2 goes past it.
+      return args[1].endsWith("page=1") ? Array.from({ length: 100 }, (_, i) => ev(i + 1, "2026-10-25T00:00:00Z")) : [ev(500, "2026-10-24T00:00:00Z"), ev(501, "2026-10-01T00:00:00Z")];
+    }
+    return [];
+  };
+  const a = await t.activity(SINCE);
+  assert.equal(pages.length, 2);
+  assert.ok(a.changed.some((c) => c.id === "api#500"));
+  assert.ok(!a.changed.some((c) => c.id === "api#501"));
+  assert.deepEqual(a.errors, ["acme/gone issue events: HTTP 404", "acme/gone comments: HTTP 404"]);
+
+  const r = await standup({ tracker: () => ({ tracker: t, label: "GitHub Issues" }) }).get(SINCE);
+  assert.match(r.sources[0].error!, /^GitHub Issues: acme\/gone issue events: HTTP 404/);
+  assert.ok(r.sources[0].done.length > 100);
+});
+
+test("jira: a changelog longer than search returns is read again for its newest page", async () => {
+  const t = new JiraTracker(TMP, { kind: "jira", site: "acme.atlassian.net", projects: [] } as any);
+  t._auth = () => ({ kind: "token", cred: "a@b:token123456" });
+  const paths: string[] = [];
+  t._get = async (_c: any, p: string, body?: any) => {
+    paths.push(p);
+    if (p === "/rest/api/3/myself") return { accountId: "me1" };
+    if (p.startsWith("/rest/api/3/issue/ENG-1/changelog")) return { values: [{ author: { accountId: "me1" }, created: "2026-10-25T00:00:00.000+0000", items: [{ field: "status", fromString: "To Do", toString: "In Review" }] }] };
+    if (/updatedBy/.test(body.jql)) return { issues: [{ key: "ENG-1", fields: { summary: "Long", status: { name: "In Review" } }, changelog: { total: 250, histories: [{ author: { accountId: "me1" }, created: "2025-01-01T00:00:00.000+0000", items: [] }] } }] };
+    return { issues: [] };
+  };
+  const a = await t.activity(SINCE);
+  assert.ok(paths.includes("/rest/api/3/issue/ENG-1/changelog?startAt=150&maxResults=100"));
+  assert.deepEqual(a.changed.map((c) => c.what), [["moved To Do → In Review"]]);
+});
+
+test("Refresh reads the inbox again too; the answer is as old as its oldest cached part", async () => {
+  let now = NOW;
+  const forced: boolean[] = [];
+  const s = standup({
+    now: () => now, codeHost: () => ({ kind: "github" }), gh: async (args: string[]) => (args[1] === "user" ? { login: "me" } : []),
+    inbox: async (force: boolean) => { forced.push(force); return { items: [], errors: [] }; },
+  });
+  const first = await s.get(SINCE);
+  now += 60_000;
+  const second = await s.get(SINCE);
+  assert.equal(second.fetchedAt, first.fetchedAt, "served from the cache");
+  await s.get(SINCE, true);
+  assert.deepEqual(forced, [false, true]);
+});
+
+test("code host: when gh can't say who you are, reviews aren't guessed and the page says why", async () => {
+  const s = standup({ codeHost: () => ({ kind: "github" }), gh: async (args: string[]) => {
+    if (args[1] === "user") throw new Error("rate limited");
+    if (args[0] === "search" && args.includes("--reviewed-by=@me")) return [{ number: 5, title: "x", repository: { nameWithOwner: "acme/api" }, url: "u", author: { login: "kim" } }];
+    if (args[0] === "search") return [];
+    throw new Error(`unexpected gh ${args.join(" ")}`);
+  } });
+  const c = (await s.get(SINCE)).sources.find((x) => x.id === "code")!;
+  assert.deepEqual(c.done, []);
+  assert.match(c.error!, /who you are .*rate limited/);
 });

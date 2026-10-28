@@ -47,8 +47,8 @@ export interface StandupDeps {
   tracker: () => { tracker: IssueTracker; label: string } | null;
   /** workspace.json codeHost. */
   codeHost: () => { kind: string };
-  /** The Needs-you inbox (inbox.ts), whose code-host items "Today" shares; it keeps its own cache. */
-  inbox: () => Promise<{ items: any[]; errors: string[] }>;
+  /** The Needs-you inbox (inbox.ts), whose code-host items "Today" shares; it keeps its own cache (force reads again). */
+  inbox: (force: boolean) => Promise<{ items: any[]; errors: string[] }>;
   gh: (args: string[]) => Promise<any>;
   runs: () => RunMeta[];
   /** The meeting tool; null without meetings.json. */
@@ -169,7 +169,9 @@ export class Standup {
   deps: StandupDeps;
   /** "<source>|<since>" → its answer. */
   cache = new Map<string, Cached>();
-  inflight = new Map<string, Promise<StandupSource | null>>();
+  inflight = new Map<string, Promise<Cached>>();
+  /** Your code-host login, once known. */
+  login: string | null = null;
   drafts = new Map<string, StandupDraft>();
   making = new Map<string, Promise<StandupDraft>>();
 
@@ -209,23 +211,24 @@ export class Standup {
     for (const [k, c] of this.cache) if (now - c.at > SOURCE_TTL_MS) this.cache.delete(k);
     const [tracker, code, meetings] = await Promise.all([
       this.cached("tracker", since, force, () => this.trackerSource(since)),
-      this.cached("code", since, force, () => this.codeSource(since)),
+      this.cached("code", since, force, () => this.codeSource(since, force)),
       this.cached("meetings", since, force, () => this.meetingsSource(since)),
     ]);
     // The ledger is local: always as it is now.
-    const sources = [tracker, code, runsSource(this.deps.runs(), since), meetings].filter((s): s is StandupSource => !!s);
-    return { since, sources, fetchedAt: now };
+    const sources = [tracker.value, code.value, runsSource(this.deps.runs(), since), meetings.value].filter((s): s is StandupSource => !!s);
+    // As old as the oldest cached answer.
+    return { since, sources, fetchedAt: Math.min(tracker.at, code.at, meetings.at) };
   }
 
-  private cached(id: string, since: string, force: boolean, load: () => Promise<StandupSource | null>): Promise<StandupSource | null> {
+  private cached(id: string, since: string, force: boolean, load: () => Promise<StandupSource | null>): Promise<Cached> {
     const key = `${id}|${since}`;
     const hit = this.cache.get(key);
-    if (hit && !force && this.deps.now() - hit.at < SOURCE_TTL_MS) return Promise.resolve(hit.value);
+    if (hit && !force && this.deps.now() - hit.at < SOURCE_TTL_MS) return Promise.resolve(hit);
     const busy = this.inflight.get(key);
     if (busy) return busy;
     const job = load()
       .catch((e): StandupSource => ({ id: id as StandupSource["id"], label: LABELS[id] || id, done: [], next: [], blockers: [], error: e.message }))
-      .then((value) => { this.cache.set(key, { at: this.deps.now(), value }); return value; })
+      .then((value) => { const c = { at: this.deps.now(), value }; this.cache.set(key, c); return c; })
       .finally(() => this.inflight.delete(key));
     this.inflight.set(key, job);
     return job;
@@ -239,10 +242,11 @@ export class Standup {
     if (!t.tracker.status().connected) return { ...src, error: `${t.label} isn't connected: connect it on the Issues page.` };
     const a = await t.tracker.activity(since).catch((e) => { src.error = `${t.label}: ${e.message}`; return null; });
     if (!a) return src;
+    if (a.errors && a.errors.length) src.error = `${t.label}: ${a.errors.join("; ")}`;
     src.done = a.changed.map((c) => ({ title: `${c.id} ${c.title}`.trim(), detail: c.what.join(", "), url: c.url || null, at: c.at }));
     for (const i of a.assigned) {
       const item = { title: `${i.id} ${i.title}`.trim(), detail: [i.state, i.priorityLabel].filter(Boolean).join(" · "), url: i.url || null, at: i.updatedAt };
-      if (i.blocked) src.blockers.push({ ...item, detail: `${i.state || "Blocked"} in ${t.label}` });
+      if (i.blocked) src.blockers.push({ ...item, detail: `${i.state} · marked blocked in ${t.label}` });
       else src.next.push(item);
     }
     return src;
@@ -253,7 +257,7 @@ export class Standup {
    * "Today" is the Needs-you inbox's PR items (review requests, and your PRs failing, with changes
    * requested, conflicting or ready to merge); a PR failing for over a day with nothing new is a blocker.
    */
-  private async codeSource(since: string): Promise<StandupSource | null> {
+  private async codeSource(since: string, force: boolean): Promise<StandupSource | null> {
     const kind = this.deps.codeHost().kind;
     if (kind === "none") return null;
     const src: StandupSource = { id: "code", label: "Pull requests", done: [], next: [], blockers: [], error: null };
@@ -264,12 +268,13 @@ export class Standup {
     const search = (what: string, args: string[]) => this.deps.gh(["search", "prs", ...args, "--limit", "50", "--json", fields])
       .catch((e) => { errors.push(`${what}: ${e.message}`); return []; });
     const [viewer, opened, merged, updated, reviewed, inbox] = await Promise.all([
-      this.deps.gh(["api", "user", "--jq", "{login: .login}"]).then((u) => (u && u.login) || null).catch(() => null),
+      this.login ? this.login : this.deps.gh(["api", "user", "--jq", "{login: .login}"]).then((u) => (this.login = (u && u.login) || null))
+        .catch((e) => { errors.push(`who you are (so your reviews can't be checked): ${e.message}`); return null; }),
       search("PRs you opened", ["--author=@me", "--created", `>=${at}`]),
       search("PRs you merged", ["--author=@me", "--merged-at", `>=${at}`]),
       search("PRs you updated", ["--author=@me", "--state=open", "--updated", `>=${at}`]),
       search("PRs you reviewed", ["--reviewed-by=@me", "--updated", `>=${at}`]),
-      this.deps.inbox().catch((e) => { errors.push(e.message); return { items: [], errors: [] }; }),
+      this.deps.inbox(force).catch((e) => { errors.push(e.message); return { items: [], errors: [] }; }),
     ]);
     const prs = new Map<string, { pr: any; what: string[]; at: string }>();
     const note = (pr: any, what: string, when: string) => {
@@ -284,7 +289,7 @@ export class Standup {
     // Open and updated since, but not opened since: new commits or discussion.
     for (const pr of updated || []) if (!isSince(pr.createdAt, since)) note(pr, "updated", pr.updatedAt);
     // Reviewed-by matches a review at any time: check each PR's reviews for yours since `since`.
-    const others = (reviewed || []).filter((pr: any) => !viewer || !pr.author || pr.author.login !== viewer).slice(0, MAX_REVIEW_LOOKUPS);
+    const others = viewer ? (reviewed || []).filter((pr: any) => !pr.author || pr.author.login !== viewer).slice(0, MAX_REVIEW_LOOKUPS) : [];
     const checked = await Promise.all(others.map((pr: any) =>
       this.deps.gh(["api", `repos/${pr.repository.nameWithOwner}/pulls/${pr.number}/reviews?per_page=100`, "--jq", "[.[] | {login: .user.login, at: .submitted_at}]"])
         .then((list) => ({ pr, at: (list || []).filter((r: any) => r && r.login === viewer && isSince(r.at, since)).map((r: any) => r.at).sort().pop() || null }))
@@ -303,7 +308,8 @@ export class Standup {
         if (i.at && now - Date.parse(i.at) > STUCK_MS) src.blockers.push({ ...item, detail: `${i.detail} for over a day` });
       }
     }
-    errors.push(...(inbox.errors || []));
+    // Only the inbox's PR searches: its default-branch CI checks aren't part of this page.
+    errors.push(...(inbox.errors || []).filter((e: string) => /^(my PRs|review requests):/.test(e)));
     src.error = errors.length ? errors.join("; ") : null;
     return src;
   }

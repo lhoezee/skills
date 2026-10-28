@@ -30,6 +30,8 @@ import { ACTIVITY_LIMIT, type AssignedIssue, type IssueChange, type TrackerActiv
 
 const CACHE_TTL_MS = 60 * 1000;
 const LIMIT = 200;
+/** Issues whose long changelog is read again for its newest page (one request each). */
+const MAX_CHANGELOG_LOOKUPS = 10;
 const FIELDS = ["summary", "status", "priority", "assignee", "labels", "updated", "project", "issuetype", "sprint", "fixVersions"];
 // Jira status categories carry a color name, not a hex.
 const CATEGORY_COLOR: Record<string, string> = { "blue-gray": "#8993a4", yellow: "#f5a623", green: "#36b37e", "medium-gray": "#8993a4" };
@@ -391,6 +393,13 @@ class JiraTracker implements IssueTracker {
       this._get(cred, "/rest/api/3/search/jql", { jql: q.changed, fields: ["summary", "status", "created", "reporter", "comment"], expand: "changelog", maxResults: ACTIVITY_LIMIT }),
       this._get(cred, "/rest/api/3/search/jql", { jql: q.assigned, fields: FIELDS, maxResults: ACTIVITY_LIMIT }),
     ]);
+    // Search embeds at most a page of each issue's changelog, oldest first: a long one's newest page is read on its own.
+    const cut = (changed.issues || []).filter((n) => n.changelog && n.changelog.total > (n.changelog.histories || []).length).slice(0, MAX_CHANGELOG_LOOKUPS);
+    await Promise.all(cut.map(async (n) => {
+      const start = Math.max(0, n.changelog.total - 100);
+      const page = await this._get(cred, `/rest/api/3/issue/${encodeURIComponent(n.key)}/changelog?startAt=${start}&maxResults=100`).catch(() => null);
+      if (page && Array.isArray(page.values)) n.changelog.histories = page.values;
+    }));
     const mine = (u: any) => !!u && !!accountId && u.accountId === accountId;
     const changes = new Map<string, IssueChange>();
     for (const n of changed.issues || []) {

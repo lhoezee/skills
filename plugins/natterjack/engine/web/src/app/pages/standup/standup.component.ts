@@ -81,7 +81,7 @@ const WINDOW_KEY = 'standup.window';
         </div>
         @if (draftErr()) { <div class="err-note">{{ draftErr() }}</div> }
         @if (draftText()) {
-          <textarea [ngModel]="draftText()" (ngModelChange)="draftText.set($event)" rows="12" aria-label="Standup draft"></textarea>
+          <textarea [ngModel]="draftText()" (ngModelChange)="edit($event)" rows="12" aria-label="Standup draft"></textarea>
           <div class="hint">Yesterday, Today and Blockers from the items above, written by a small model. Edit it here, then copy it into Slack or Teams.</div>
         } @else if (!drafting()) {
           <div class="hint">A few bullets each for Yesterday, Today and Blockers, written by a small model from the items above. It's kept for today; nothing is posted.</div>
@@ -137,6 +137,9 @@ export class StandupComponent implements OnInit {
   readonly draftAt = signal<string | null>(null);
   readonly drafting = signal(false);
   readonly draftErr = signal<string | null>(null);
+  /** The window the draft on the page is for, and whether it was edited here (Refresh keeps an edited one). */
+  private draftSince = '';
+  private edited = false;
   /** Bumps on every load, so an older answer can't land over a newer window's. */
   private seq = 0;
 
@@ -182,8 +185,12 @@ export class StandupComponent implements OnInit {
       if (n !== this.seq) return;
       this.data.set(d);
       this.error.set(null);
-      this.draftText.set(saved ? saved.text : '');
-      this.draftAt.set(saved ? saved.at : null);
+      if (!this.edited || this.draftSince !== since) {
+        this.draftText.set(saved ? saved.text : '');
+        this.draftAt.set(saved ? saved.at : null);
+        this.draftSince = since;
+        this.edited = false;
+      }
       this.draftErr.set(null);
     } catch (e) {
       if (n === this.seq) this.error.set((e as Error).message);
@@ -201,11 +208,18 @@ export class StandupComponent implements OnInit {
       if (n !== this.seq) return;
       this.draftText.set(d.text);
       this.draftAt.set(d.at);
+      this.draftSince = this.sinceDate().toISOString();
+      this.edited = false;
     } catch (e) {
       if (n === this.seq) this.draftErr.set((e as Error).message);
     } finally {
       this.drafting.set(false);
     }
+  }
+
+  edit(text: string): void {
+    this.draftText.set(text);
+    this.edited = true;
   }
 
   async copy(): Promise<void> {

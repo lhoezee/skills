@@ -97,14 +97,14 @@ query StandupActivity($changed: IssueFilter, $assigned: IssueFilter, $comments: 
 }`;
 
 /**
- * The Standup query's filters: issues assigned to or created by the viewer and updated since
- * `since`; their own comments since then; and their open issues that are started or up next
+ * The Standup query's filters: issues assigned to, created by, subscribed to or commented on by
+ * the viewer (moving an issue subscribes you) and updated since `since`; their own comments since then; and their open issues that are started or up next
  * (Linear's "started" and "unstarted" state types, so not the backlog or triage).
  */
 export function activityFilters(since: string) {
   const me = { isMe: { eq: true } };
   return {
-    changed: { updatedAt: { gte: since }, or: [{ assignee: me }, { creator: me }] },
+    changed: { updatedAt: { gte: since }, or: [{ assignee: me }, { creator: me }, { subscribers: { some: me } }, { comments: { some: { user: me } } }] },
     comments: { createdAt: { gte: since }, user: me },
     assigned: { assignee: me, state: { type: { in: ["started", "unstarted"] } } },
   };
