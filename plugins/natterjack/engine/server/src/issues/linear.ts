@@ -89,6 +89,8 @@ class LinearTracker implements IssueTracker {
   cache: any;
   inflight: any;
   viewer: any;
+  inflightKey = "";
+  cacheKey = "";
 
   constructor(ledgerDir, cfg: IssuesConfig) {
     this.org = cfg.org || null;
@@ -159,9 +161,13 @@ class LinearTracker implements IssueTracker {
   async issues({ teams, states }, force = false) {
     const key = this._key();
     if (!key) return { connected: false, issues: [] };
-    const fresh = this.cache && Date.now() - this.cache.fetchedAt < CACHE_TTL_MS;
+    // Cached per filter: the Factory's intake asks for other states than the Issues page.
+    const filterKey = JSON.stringify([teams || [], states || []]);
+    if (this.inflight && this.inflightKey !== filterKey) await this.inflight;
+    const fresh = this.cache && this.cacheKey === filterKey && Date.now() - this.cache.fetchedAt < CACHE_TTL_MS;
     if (fresh && !force) return this.cache;
     if (!this.inflight) {
+      this.inflightKey = filterKey;
       // An empty teams/states list means "all" rather than "none".
       const filter: any = {};
       if (teams && teams.length) filter.team = { name: { in: teams } };
@@ -169,6 +175,7 @@ class LinearTracker implements IssueTracker {
       this.inflight = gql(key, ISSUES_QUERY, { filter, first: ISSUE_LIMIT })
         .then((data) => {
           this.viewer = data.viewer ? data.viewer.displayName || data.viewer.name : null;
+          this.cacheKey = filterKey;
           this.cache = {
             connected: true,
             fetchedAt: Date.now(),
@@ -191,7 +198,8 @@ class LinearTracker implements IssueTracker {
           };
         })
         .catch((e) => {
-          // Keep showing the last good list, flagged with the error.
+          // Keep showing the last good list (for this filter), flagged with the error.
+          if (this.cacheKey !== filterKey) { this.cache = null; this.cacheKey = filterKey; }
           this.cache = { ...(this.cache || { issues: [] }), connected: true, fetchedAt: Date.now(), error: e.message };
         })
         .finally(() => { this.inflight = null; });

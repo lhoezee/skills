@@ -14,7 +14,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import type {
-  AgentId, FactoryAssessment, FactoryBoard, FactoryRating, FactoryRatingValue, FactoryColumn, FactoryConfig, FactoryConfigState, FactoryGateId, FactoryGateMode, FactoryItem,
+  AgentId, FactoryAssessment, FactoryBoard, FactoryIntake, FactoryMetrics, FactoryRating, FactoryRatingValue, FactoryColumn, FactoryConfig, FactoryConfigState, FactoryGateId, FactoryGateMode, FactoryItem,
   FactoryItemStep, FactoryManifest, FactoryPreset, FactoryPresetPatch, FactoryRiskRule, FactoryScanner, FactorySpec, FactoryStageConfig, FactoryStageId, FactoryStepStatus, MergeMethod, RunStatus, Severity, SpecCheckId,
 } from "../../shared/api.ts";
 import { pipelineOrder, withPresetPatch } from "../../shared/factory-rules.ts";
@@ -66,7 +66,7 @@ export function defaultFactoryConfig(): FactoryConfig {
     enabled: false,
     preset: "supervised",
     mode: "interactive",
-    intake: { states: [], labels: [] },
+    intake: { states: [], labels: [], auto: false, everyMinutes: 30 },
     limits: { wip: 3, itemBudgetUsd: null, dayBudgetUsd: null, itemHours: null },
     stages: STAGE_IDS.map((id) => stage(id, !["align", "qa", "approve"].includes(id))),
     security: { agentReview: true, secretScan: true, scanners: SUGGESTED_SCANNERS.filter((s) => s.when).map((s) => ({ ...s })), failOn: "high" },
@@ -161,7 +161,10 @@ export function normalizeFactoryConfig(raw: any): FactoryConfig {
     enabled: raw.enabled === true,
     preset: pick(raw.preset, PRESETS, "custom"),
     mode: pick(raw.mode, ["interactive", "autonomous"] as const, d.mode),
-    intake: { states: strs(raw.intake?.states) ?? [], labels: strs(raw.intake?.labels) ?? [] },
+    intake: {
+      states: strs(raw.intake?.states) ?? [], labels: strs(raw.intake?.labels) ?? [],
+      auto: raw.intake?.auto === true, everyMinutes: Math.round(num(raw.intake?.everyMinutes, d.intake.everyMinutes, 5, 1440)),
+    },
     limits: {
       wip: Math.round(num(lim.wip, d.limits.wip, 1, 50)),
       itemBudgetUsd: numOrNull(lim.itemBudgetUsd, 0.01, 100_000),
@@ -286,6 +289,7 @@ export function normalizeManifest(raw: any): FactoryManifest | null {
     stages: (Array.isArray(raw.stages) ? raw.stages : []).filter((s: any) => s && STAGE_IDS.includes(s.id)).slice(0, 500).map((s: any) => ({
       id: s.id, repo: optStr(s.repo), agent: optStr(s.agent), status: pick(s.status, STEP, "pending"),
       startedAt: iso(s.startedAt), endedAt: iso(s.endedAt), note: typeof s.note === "string" ? s.note.slice(0, 4000) : null,
+      ...(Number.isInteger(s.failures) && s.failures > 0 ? { failures: s.failures } : {}),
     })),
     gates: (Array.isArray(raw.gates) ? raw.gates : []).filter((g: any) => g && GATE_IDS.includes(g.id)).slice(0, 200).map((g: any) => ({
       id: g.id, mode: GATE_MODES.includes(g.mode) ? g.mode : null,
@@ -304,6 +308,11 @@ export function normalizeManifest(raw: any): FactoryManifest | null {
       assessmentAt: iso(r.assessmentAt)!, gate: r.gate, level: pick(r.level, RISK_LEVELS, "medium"), wouldApprove: r.wouldApprove === true,
       rating: r.rating, by: optStr(r.by) || "someone", note: typeof r.note === "string" ? r.note.slice(0, 1000) : null, at: iso(r.at) || started,
     })),
+    finishedAt: iso(raw.finishedAt),
+    retro: raw.retro && typeof raw.retro === "object" ? {
+      caught: texts(raw.retro.caught, 20), wrong: texts(raw.retro.wrong, 20), approver: typeof raw.retro.approver === "string" && raw.retro.approver.trim() ? raw.retro.approver.trim().slice(0, 1000) : null,
+      proposals: texts(raw.retro.proposals, 20), at: iso(raw.retro.at) || started,
+    } : null,
     done: raw.done === true,
     error: optStr(raw.error),
   };
@@ -457,7 +466,7 @@ export async function recordGateDecision(ticket: string, gate: FactoryGateId, de
     guard?.();
     const why = note && note.trim() ? note.trim().slice(0, 2000) : null;
     appendGate(raw, { id: gate, mode: last.mode ?? null, decision, by, risk: null, rationale: why, sha: null, at: now });
-    if (decision === "rejected") { raw.done = true; raw.error = `${GATE_LABELS[gate]} rejected by ${by}${why ? `: ${why}` : ""}`; }
+    if (decision === "rejected") { raw.done = true; raw.finishedAt = now; raw.error = `${GATE_LABELS[gate]} rejected by ${by}${why ? `: ${why}` : ""}`; }
   });
 }
 
@@ -489,6 +498,7 @@ export async function overrideGateDecision(ticket: string, gate: FactoryGateId, 
     const what = last.by === "auto" ? "its checks'" : "the Approver's";
     appendGate(raw, { id: gate, mode: "human", decision: "rejected", by, risk: last.risk, rationale: `Overrode ${what} approval: ${why}`, sha: last.sha, at: now, override: true });
     raw.done = true;
+    raw.finishedAt = now;
     raw.error = `${GATE_LABELS[gate]}: ${by} overrode ${what} approval: ${why}`;
   });
 }
@@ -615,6 +625,14 @@ function latestPerRepo<T extends { repo: string | null }>(rows: T[]): T[] {
 const sameTicket = (a: string | null | undefined, b: string | null | undefined) => !!a && !!b && a.toLowerCase() === b.toLowerCase();
 const money = (n: number) => `$${n.toFixed(2)}`;
 
+/** Tickets in flight (lower-cased id → id): a manifest that has started and isn't done, or an implement run that's going. */
+export function inFlightTickets(manifests: FactoryManifest[], runs: FactoryRun[]): Map<string, string> {
+  const inFlight = new Map<string, string>();
+  for (const m of manifests) if (!m.done && (m.stages.length > 0 || m.gates.length > 0)) inFlight.set(m.ticket.toLowerCase(), m.ticket);
+  for (const r of runs) if (r.implement && r.ticket && (r.status === "running" || r.status === "waiting")) inFlight.set(r.ticket.toLowerCase(), r.ticket);
+  return inFlight;
+}
+
 /**
  * Why the factory won't start another run for a ticket, or null. Only with the factory on:
  * the ticket's budget or agent hours are used up, the day's factory budget is spent (runs of
@@ -637,11 +655,7 @@ export function factoryLaunchBlocker(cfg: FactoryConfig, configured: boolean, ti
     const today = runs.filter((r) => Date.parse(r.startedAt) >= day.getTime() && onBoard(r.ticket)).reduce((s, r) => s + (r.costUsd || 0), 0);
     if (today >= dayBudgetUsd) return `The factory has spent ${money(today)} of its ${money(dayBudgetUsd)} budget today (Factory policy).`;
   }
-  const started = (m: FactoryManifest) => !m.done && (m.stages.length > 0 || m.gates.length > 0);
-  const going = (r: FactoryRun) => !!r.implement && !!r.ticket && (r.status === "running" || r.status === "waiting");
-  const inFlight = new Map<string, string>();
-  for (const m of manifests) if (started(m)) inFlight.set(m.ticket.toLowerCase(), m.ticket);
-  for (const r of runs) if (going(r)) inFlight.set(r.ticket!.toLowerCase(), r.ticket!);
+  const inFlight = inFlightTickets(manifests, runs);
   if (!inFlight.has(ticket.toLowerCase())) {
     const others = [...inFlight.values()];
     if (others.length >= wip) return `${others.length} ${others.length === 1 ? "ticket is" : "tickets are"} already in the factory (WIP limit ${wip}): ${others.slice(0, 5).join(", ")}. Finish one first, or raise the limit on Factory → Policy.`;
@@ -727,6 +741,8 @@ export function buildBoard(cfg: FactoryConfig, configured: boolean, manifests: F
       steps: itemStepList,
       waitingGate: waitingGate(m, itemStepList),
       mode: m.mode, spec: m.spec, plan: m.plan, error: m.error,
+      merged: m.prs.length > 0 && m.prs.every((p) => p.state === "merged"),
+      retro: m.retro,
     };
   });
   return {
@@ -739,7 +755,63 @@ export function buildBoard(cfg: FactoryConfig, configured: boolean, manifests: F
     errors,
     canDecide,
     approverStats: approverStats(manifests),
+    metrics: factoryMetrics(manifests, runs),
   };
+}
+
+const median = (xs: number[]) => { if (!xs.length) return null; const s = [...xs].sort((a, b) => a - b); const m = Math.floor(s.length / 2); return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
+const share = (hits: number, n: number) => (n ? { rate: Math.round((hits / n) * 100) / 100, n } : null);
+
+/**
+ * The line's throughput from the manifests (and runs, for cost), over the last 30 days: items
+ * finished, lead time, first-pass review, how much the Approver approved alone, cost per merged item.
+ */
+export function factoryMetrics(manifests: FactoryManifest[], runs: FactoryRun[], now = Date.now()): FactoryMetrics {
+  const since = now - 30 * 86_400_000;
+  const recent = manifests.filter((m) => Date.parse(m.updatedAt) >= since);
+  const merged = (m: FactoryManifest) => m.prs.length > 0 && m.prs.every((p) => p.state === "merged");
+  // When it finished (recorded by done, a rejection or an override); older manifests: their last write.
+  const end = (m: FactoryManifest) => Date.parse(m.finishedAt || m.updatedAt);
+  const finished = manifests.filter((m) => ((m.done && !m.error) || merged(m)) && end(m) >= since);
+  const reviews = recent.flatMap((m) => latestPerRepo(m.stages.filter((s) => s.id === "review")).filter((s) => s.status === "done" || s.status === "failed"));
+  // Only where it was allowed to decide: advisory calls never approve alone.
+  const assessments = recent.flatMap((m) => m.assessments.filter((a) => a.enforced && Date.parse(a.at) >= since));
+  const mergedItems = recent.filter(merged);
+  const cost = (m: FactoryManifest) => runs.filter((r) => sameTicket(r.ticket, m.ticket)).reduce((s, r) => s + (r.costUsd || 0), 0);
+  const lead = median(finished.map((m) => (end(m) - Date.parse(m.startedAt)) / 3_600_000).filter((h) => h >= 0));
+  return {
+    done7d: finished.filter((m) => end(m) >= now - 7 * 86_400_000).length,
+    leadTimeHours: lead == null ? null : Math.round(lead * 10) / 10,
+    firstPassReview: share(reviews.filter((s) => s.status === "done" && !s.failures).length, reviews.length),
+    autoApproved: share(assessments.filter((a) => a.action === "pass").length, assessments.length),
+    costPerMergedUsd: mergedItems.length ? Math.round((mergedItems.reduce((s, m) => s + cost(m), 0) / mergedItems.length) * 100) / 100 : null,
+    merged: mergedItems.length,
+  };
+}
+
+/** States that mean a ticket is finished, on any tracker (used when the intake names no states). */
+const CLOSED_STATE = /^(done|closed|complete(d)?|cancel(l)?ed|canceled|resolved|merged|released|won'?t (do|fix)|duplicate)$/i;
+
+/**
+ * The tracker tickets the factory would pull in: in an intake state (when states are set; else
+ * any state that isn't a finished one) and with an intake label (when labels are set), not already
+ * in the factory (any progress file: a rejected one isn't retried on its own), never pulled in
+ * before (`pulled`: a run that ended before reporting isn't retried on its own either) and with no
+ * run going. Neither states nor labels: none (only tickets sent by hand).
+ */
+export function intakeCandidates(cfg: FactoryConfig, issues: any[], manifests: FactoryManifest[], runs: FactoryRun[], pulled: Set<string> = new Set()): FactoryIntake["candidates"] {
+  const { states, labels } = cfg.intake;
+  if (!states.length && !labels.length) return [];
+  const want = (list: string[]) => new Set(list.map((s) => s.toLowerCase()));
+  const st = want(states), lb = want(labels);
+  const known = new Set(manifests.map((m) => m.ticket.toLowerCase()));
+  const going = new Set(runs.filter((r) => r.ticket && (r.status === "running" || r.status === "waiting")).map((r) => r.ticket!.toLowerCase()));
+  return issues
+    .filter((i) => i && typeof i.id === "string")
+    .filter((i) => (st.size ? st.has(String(i.state || "").toLowerCase()) : !CLOSED_STATE.test(String(i.state || "").trim())))
+    .filter((i) => !lb.size || (Array.isArray(i.labels) ? i.labels : []).some((l: any) => lb.has(String(typeof l === "string" ? l : l?.name || "").toLowerCase())))
+    .filter((i) => !known.has(i.id.toLowerCase()) && !going.has(i.id.toLowerCase()) && !pulled.has(i.id.toLowerCase()))
+    .map((i) => ({ ticket: i.id, title: String(i.title || ""), url: typeof i.url === "string" ? i.url : null, state: i.state ? String(i.state) : null }));
 }
 
 /**

@@ -18,6 +18,8 @@
  *                          [--by who] [--mode human|approver|auto] [--risk low|medium|high] [--rationale "..."] [--sha s]
  *   node factory.mjs pr    --ticket <id> --url <pr url> [--repo r] [--number n] [--state open|merged|closed]
  *   node factory.mjs done  --ticket <id> [--error "why it stopped"]
+ *   node factory.mjs retro --ticket <id> [--caught "a;b"] [--wrong "a;b"] [--approver "..."] [--proposals "a;b"]
+ *                          what was learned once its PRs merged (the retro skill)
  *   (the Approver's assessments are recorded by approver.mjs assess --ticket <id>)
  *   (spec readiness is recorded by spec-check.mjs --ticket <id>)
  *   node factory.mjs show  --ticket <id>
@@ -122,7 +124,7 @@ function apply(command, args, m, policy, now) {
     if (list(args.labels).length) m.labels = [...new Set([...(m.labels || []), ...list(args.labels)])];
     m.policy = policy ? { preset: policy.preset ?? null, updatedAt: policy.updatedAt } : m.policy;
     // Picking up a finished (or rejected) ticket again starts a new round: earlier gate decisions no longer stand.
-    if (m.done) m.roundStartedAt = now;
+    if (m.done) { m.roundStartedAt = now; m.finishedAt = null; }
     else if (!m.roundStartedAt) m.roundStartedAt = m.startedAt || now; // written before rounds existed
     m.done = false;
     m.error = null;
@@ -132,6 +134,8 @@ function apply(command, args, m, policy, now) {
     const repo = str(args.repo);
     let row = m.stages.find((s) => s.id === args.stage && (s.repo ?? null) === repo);
     if (!row) { row = { id: args.stage, repo, agent: null, status: "pending", startedAt: null, endedAt: null, note: null }; m.stages.push(row); }
+    // A failure counts, so the board can tell a first-pass review from one that took a correction.
+    if (args.status === "failed" && row.status !== "failed") row.failures = (row.failures || 0) + 1;
     row.status = args.status;
     if (str(args.agent)) row.agent = str(args.agent);
     if (str(args.note)) row.note = str(args.note);
@@ -170,8 +174,12 @@ function apply(command, args, m, policy, now) {
     const a = args.assessment;
     if (!a || typeof a !== "object" || !GATES.includes(a.gate) || !RISKS.includes(a.level)) throw usage("assess needs approver.mjs's assessment");
     (m.assessments ||= []).push({ ...a, at: now });
+  } else if (command === "retro") {
+    const items = (v) => (typeof v === "string" ? v.split(";").map((s) => s.trim()).filter(Boolean) : []);
+    m.retro = { caught: items(args.caught), wrong: items(args.wrong), approver: str(args.approver), proposals: items(args.proposals), at: now };
   } else if (command === "done") {
     m.done = true;
+    m.finishedAt = now;
     m.error = str(args.error);
   } else {
     throw usage(`Unknown command "${command}". Use start, stage, gate, pr, done, show or policy.`);
@@ -197,8 +205,8 @@ export const DEFAULT_SCANNERS = [
 
 /**
  * factory.json as the dashboard reads it (engine factory.ts normalizeFactoryConfig), for the
- * parts the pipeline acts on: enabled, gates, stages, the WIP limit, the security stage, the
- * required checks, the reviewers and the Approver. The engine's tests check the two agree.
+ * parts the pipeline acts on: enabled, gates, stages, intake, the WIP limit, the security stage,
+ * the required checks, the reviewers and the Approver. The engine's tests check the two agree.
  */
 export function normalizePolicy(raw) {
   const r = raw && typeof raw === "object" ? raw : {};
@@ -227,6 +235,10 @@ export function normalizePolicy(raw) {
           failOn: SEVERITIES.includes(s.failOn) ? s.failOn : "high",
         }))
         : DEFAULT_SCANNERS.map((s) => ({ ...s })),
+    },
+    intake: {
+      states: strs(r.intake && r.intake.states) ?? [], labels: strs(r.intake && r.intake.labels) ?? [],
+      auto: !!(r.intake && r.intake.auto === true), everyMinutes: Math.round(num(r.intake && r.intake.everyMinutes, 30, 5, 1440)),
     },
     requiredChecks: strs(r.requiredChecks) ?? [],
     reviewers: { bots: strs(rev.bots) ?? [], pipeline: rev.pipeline !== false, noUnresolved: rev.noUnresolved !== false },

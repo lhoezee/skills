@@ -102,3 +102,18 @@ test("reports made at the same moment (one subagent per repo) are all kept", asy
   assert.deepEqual(m.stages.map((s) => s.repo).sort(), repos);
   assert.equal(fs.existsSync(path.join(ws, ".claude", "ledger", "factory", "ENG-1.json.lock")), false);
 });
+
+test("a stage's failures are counted, and a retro is recorded", () => {
+  const { ws } = workspace();
+  const run = (cmd, args) => update(cmd, { ticket: "ENG-9", ...args }, { start: ws });
+  run("stage", { stage: "review", repo: "api", status: "running" });
+  run("stage", { stage: "review", repo: "api", status: "failed" });
+  run("stage", { stage: "review", repo: "api", status: "failed" });
+  run("stage", { stage: "review", repo: "api", status: "running" });
+  const m = run("stage", { stage: "review", repo: "api", status: "done" }).manifest;
+  assert.equal(m.stages[0].failures, 1, "failing twice in a row is one failure");
+  const r = run("retro", { caught: "a race; missing index ", wrong: "the API was paged", approver: "held up", proposals: "" }).manifest.retro;
+  assert.deepEqual({ ...r, at: undefined }, { caught: ["a race", "missing index"], wrong: ["the API was paged"], approver: "held up", proposals: [], at: undefined });
+  assert.ok(run("done", {}).manifest.finishedAt, "done records when it finished");
+  assert.equal(run("start", {}).manifest.finishedAt, null, "picked up again: not finished");
+});
