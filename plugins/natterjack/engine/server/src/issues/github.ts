@@ -69,12 +69,21 @@ export function repoList(cfg: any): string[] {
 }
 
 /**
- * The configured repo a board team (deck.json issues.teams / implementTeams) names: its owner/name
- * or its short name, in any case. Undefined when none matches.
+ * The configured repo a board team (deck.json issues.teams / implementTeams) names, in any case:
+ * its owner/name, or its short name when only one configured repo has it. Undefined otherwise.
  */
 export function repoForTeam(repos: string[], team: string): string | undefined {
   const t = String(team || "").trim().toLowerCase();
-  return repos.find((r) => r.toLowerCase() === t) || repos.find((r) => r.split("/")[1].toLowerCase() === t);
+  const full = repos.find((r) => r.toLowerCase() === t);
+  if (full) return full;
+  const short = repos.filter((r) => r.split("/")[1].toLowerCase() === t);
+  return short.length === 1 ? short[0] : undefined;
+}
+
+/** A repo's team on the board: its short name, or owner/name when another configured repo shares it. */
+export function teamOfRepo(repos: string[], repo: string): string {
+  const short = repo.split("/")[1];
+  return repos.filter((r) => r.split("/")[1].toLowerCase() === short.toLowerCase()).length > 1 ? repo : short;
 }
 
 /** The board column for an issue: the first `states` entry whose labels it has, else Open/Closed. */
@@ -103,8 +112,8 @@ class GitHubTracker implements IssueTracker {
   constructor(cfg: IssuesConfig) { this.cfg = cfg as any; }
 
   get repos() { return repoList(this.cfg); }
-  /** Issues carry the repo's short name as their team, whichever way the config names it. */
-  teamName(team: string) { const r = repoForTeam(this.repos, team); return r ? r.split("/")[1] : null; }
+  /** The team issues of the repo a configured team names carry (teamOfRepo); null when it names none, or several. */
+  teamName(team: string) { const repos = this.repos; const r = repoForTeam(repos, team); return r ? teamOfRepo(repos, r) : null; }
 
   get states(): Record<string, string[]> { return this.cfg.states && typeof this.cfg.states === "object" ? this.cfg.states : {}; }
 
@@ -166,7 +175,9 @@ class GitHubTracker implements IssueTracker {
           this.cache = { connected: false, issues: [], fetchedAt: Date.now(), error: e.message };
           return;
         }
-        const repos = filter.teams && filter.teams.length ? this.repos.filter((r) => filter.teams.some((t) => repoForTeam([r], t))) : this.repos;
+        const configured = this.repos;
+        const picked = filter.teams && filter.teams.length ? new Set(filter.teams.map((t) => repoForTeam(configured, t))) : null;
+        const repos = picked ? configured.filter((r) => picked.has(r)) : configured;
         const errors: string[] = [];
         const lists = await Promise.all(repos.map((repo) =>
           this.gh(["issue", "list", "--repo", repo, "--state", "open", "--limit", String(LIMIT), ...searchArgs(filter.query),
@@ -177,7 +188,7 @@ class GitHubTracker implements IssueTracker {
             "--json", "number,title,url,labels,assignees,updatedAt,milestone"])
             // gh has no "mine or nobody's": the open ones, then by login (exact on GitHub).
             .then((rows) => rows.filter((n) => filter.assigned !== "me-or-none" || !(n.assignees || []).length || (n.assignees || []).some((a) => String(a.login).toLowerCase() === String(this.viewer).toLowerCase())))
-            .then((rows) => rows.map((n) => this.toIssue(repo, n)))
+            .then((rows) => { const team = teamOfRepo(configured, repo); return rows.map((n) => this.toIssue(repo, n, team)); })
             .catch((e) => { errors.push(`${repo}: ${e.message}`); return []; })));
         const all = lists.flat().filter((i) => !filter.states || !filter.states.length || filter.states.includes(i.state));
         all.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
@@ -285,7 +296,7 @@ class GitHubTracker implements IssueTracker {
     return out;
   }
 
-  toIssue(repo: string, n: any) {
+  toIssue(repo: string, n: any, team = teamOfRepo(this.repos, repo)) {
     const labels = (n.labels || []).map((l) => ({ name: l.name, color: LABEL_COLOR(l.color) }));
     const short = repo.split("/")[1];
     return {
@@ -296,8 +307,8 @@ class GitHubTracker implements IssueTracker {
       priorityLabel: "",
       updatedAt: n.updatedAt,
       state: stateOf(labels.map((l) => l.name), false, this.states),
-      team: short,
-      teamKey: short,
+      team,
+      teamKey: team,
       assignee: (n.assignees && n.assignees[0] && n.assignees[0].login) || null,
       project: n.milestone ? n.milestone.title : null,
       labels,
@@ -336,7 +347,7 @@ class GitHubTracker implements IssueTracker {
     const n = await gh(["issue", "view", m[2], "--repo", repo, "--json", "number,title,url,body,labels,assignees,milestone,state,updatedAt"]);
     const labels = (n.labels || []).map((l) => ({ name: l.name, color: LABEL_COLOR(l.color) }));
     return {
-      id, title: n.title, url: n.url, team: m[1],
+      id, title: n.title, url: n.url, team: teamOfRepo(this.repos, repo),
       state: stateOf(labels.map((l) => l.name), n.state === "CLOSED", this.states),
       priorityLabel: "",
       assignee: (n.assignees && n.assignees[0] && n.assignees[0].login) || null,
