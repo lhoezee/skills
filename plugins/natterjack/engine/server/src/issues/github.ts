@@ -16,6 +16,7 @@ import { execFile } from "node:child_process";
 import type { IssuesConfig } from "../config.ts";
 import type { ConnectHelp, IssueFilter, IssueTracker, LinkedIssues, TrackerStatus } from "./index.ts";
 import { LINKED_LIMIT, byMarker } from "./markers.ts";
+import { ACTIVITY_LIMIT, type AssignedIssue, type IssueChange, type TrackerActivity, changesOf, isBlocked, isSince, noteChange, searchTime } from "./activity.ts";
 
 const CACHE_TTL_MS = 60 * 1000;
 const LIMIT = 200;
@@ -188,6 +189,69 @@ class GitHubTracker implements IssueTracker {
       return { issue: { key: `${short}#${n.number}`, url: String(n.url || ""), title: String(n.title || ""), state: n.state === "closed" || n.state === "CLOSED" ? "Closed" : "Open" }, text: String(n.body || "") };
     });
     return byMarker(markers, found, truncated);
+  }
+
+  /**
+   * What the viewer did since `since` in the configured repos: issues they opened (search), closed,
+   * reopened or moved to a board column (a `states` label; each repo's issue events), and commented
+   * on (each repo's comments since then); and the open issues assigned to them.
+   */
+  async activity(since: string): Promise<TrackerActivity> {
+    const repos = this.repos;
+    if (!repos.length) throw new Error("No repositories are configured (workspace.json issues.repos).");
+    if (!this.viewer) this.viewer = await this.gh(["api", "user", "--jq", "{login: .login}"]).then((u) => u.login);
+    const login = this.viewer;
+    const repoArgs = repos.flatMap((r) => ["--repo", r]);
+    const at = searchTime(since);
+    const fields = "number,title,url,repository,labels,state,createdAt,updatedAt";
+    const [opened, commented, assigned, perRepo] = await Promise.all([
+      this.gh(["search", "issues", ...repoArgs, "--author=@me", "--created", `>=${at}`, "--limit", String(ACTIVITY_LIMIT), "--json", fields]),
+      // Only for the titles: the comments below say which issues, and when.
+      this.gh(["search", "issues", ...repoArgs, "--commenter=@me", "--updated", `>=${at}`, "--limit", String(ACTIVITY_LIMIT), "--json", fields]),
+      this.gh(["search", "issues", ...repoArgs, "--assignee=@me", "--state=open", "--limit", String(ACTIVITY_LIMIT), "--json", fields]),
+      Promise.all(repos.map(async (repo) => {
+        const [events, comments] = await Promise.all([
+          this.gh(["api", `repos/${repo}/issues/events?per_page=100`]),
+          this.gh(["api", `repos/${repo}/issues/comments?since=${encodeURIComponent(at)}&per_page=100`]),
+        ]);
+        return { repo, events, comments };
+      })),
+    ]);
+    const changes = new Map<string, IssueChange>();
+    const short = (n: any) => String(n.repository?.nameWithOwner || n.repository?.name || "").split("/").pop() || "";
+    const labelNames = (n: any) => (n.labels || []).map((l: any) => (typeof l === "string" ? l : l.name)).filter(Boolean);
+    const baseOf = (repo: string, n: any) => ({
+      id: `${repo}#${n.number}`, title: n.title || "", url: n.url || n.html_url || "",
+      state: stateOf(labelNames(n), String(n.state).toLowerCase() === "closed", this.states),
+    });
+    for (const n of opened || []) noteChange(changes, baseOf(short(n), n), "opened", n.createdAt);
+    // A column is a label (issues.states), so adding one moves the issue there.
+    const column = (label: string) => Object.keys(this.states).find((s) => (this.states[s] || []).some((w) => String(w).toLowerCase() === label.toLowerCase()));
+    for (const { repo, events, comments } of perRepo) {
+      const name = repo.split("/")[1];
+      for (const e of events || []) {
+        if (!e.actor || e.actor.login !== login || !e.issue || e.issue.pull_request || !isSince(e.created_at, since)) continue;
+        const base = baseOf(name, e.issue);
+        if (e.event === "closed" || e.event === "reopened") noteChange(changes, base, e.event, e.created_at);
+        else if (e.event === "labeled" && e.label && column(e.label.name)) noteChange(changes, base, `moved to ${column(e.label.name)}`, e.created_at);
+      }
+      for (const c of comments || []) {
+        if (!c.user || c.user.login !== login || !isSince(c.created_at, since)) continue;
+        // Comments on pull requests come here too; their links say /pull/.
+        const m = /\/issues\/(\d+)$/.exec(String(c.issue_url || ""));
+        if (!m || /\/pull\//.test(String(c.html_url || ""))) continue;
+        const id = `${name}#${m[1]}`;
+        const found = (commented || []).find((n: any) => short(n) === name && String(n.number) === m[1]);
+        noteChange(changes, found ? baseOf(name, found) : { id, title: "", url: String(c.html_url || "").replace(/#.*$/, ""), state: "" }, "commented", c.created_at);
+      }
+    }
+    const open: AssignedIssue[] = (assigned || []).map((n: any) => {
+      const labels = labelNames(n);
+      const state = stateOf(labels, false, this.states);
+      return { id: `${short(n)}#${n.number}`, title: n.title || "", url: n.url || "", state, priority: 0, priorityLabel: "", blocked: isBlocked(state, labels), updatedAt: n.updatedAt || "" };
+    });
+    open.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    return { changed: changesOf(changes), assigned: open };
   }
 
   toIssue(repo: string, n: any) {
