@@ -2,12 +2,14 @@
   /* The feed (transcript or tab) fills the window between the sticky top block and the composer, so
      once the page has scrolled the run into view nothing sits under the top block. The heights come
      from run-detail.component.ts (a ResizeObserver; the fallbacks are typical ones), and 64px is the
-     page's bottom padding (.wrap) plus the panel's borders. */
-  --feed-max-h: calc(100vh - var(--run-top-h, 380px) - var(--composer-h, 200px) - 64px); }
+     page's bottom padding (.wrap) plus the panel's borders (FEED_SLACK_PX there). dvh: the window as it
+     is now, with a tablet's toolbar showing. */
+  --feed-max-h: calc(100dvh - var(--run-top-h, 380px) - var(--composer-h, 200px) - 64px); }
 /* Header, subagents, ticket and tabs stay at the top of the window as the page scrolls, like the
-   History column beside them; .detail is its containing block (overflow: visible above). Each part
-   has its own background, so the feed doesn't show through as it scrolls under. */
-.run-top { position: sticky; top: 0; z-index: 3; }
+   History column beside them, when the window has room for it (.fits, run-detail.component.ts); .detail
+   is its containing block (overflow: visible above). Each part has its own background, so the feed
+   doesn't show through as it scrolls under. */
+.fits > .run-top { position: sticky; top: 0; z-index: 3; }
 .detail-h { padding: 1rem 1.1rem; border-bottom: 1px solid var(--border-strong); display: flex; flex-direction: column; gap: 0.6rem; background: var(--surface); border-radius: calc(var(--radius) - 1px) calc(var(--radius) - 1px) 0 0; }
 .detail-h .ttl { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .detail-h .name { font-family: var(--font-display); font-size: 20px; font-weight: 800; letter-spacing: var(--ls-display); }
@@ -139,8 +141,6 @@
    scrolls, rather than boxes that scroll inside a short viewport. Desktop rules above are unchanged.
    600px = SMALL_SCREEN in core/small-screen.ts. */
 @media (max-width: 600px) {
-  /* The page scrolls the whole run here, and a header this tall would cover most of a phone screen. */
-  .run-top { position: static; }
   /* The composer's children sit directly in .detail here (run-composer.component.scss): paper behind
      them as on desktop, with the header kept white (as on desktop) and a rule where the feed ends. */
   .detail { background: var(--paper); }
