@@ -21,7 +21,6 @@
  */
 
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import { execFile, type ChildProcess } from "node:child_process";
@@ -33,11 +32,16 @@ import { agentHeadlessRules, agentOf, keepRunningRule, outputsRule, type ParseSt
 import { LOCAL_MODEL_RULE, isRoutedId } from "./models/routes.ts";
 import { expandSlash } from "./agents/skills.ts";
 import { promptWithAttachments, type Attachments } from "./attachments.ts";
+import { MAX_SESSION_BYTES, MOVED_FOLDER_NOTE, claudeDir, terminalOnlyRun, firstPromptIndex, lastAssistantText, readSessionEvents, runPermission, type SessionInfo } from "./sessions.ts";
 
 const RESULT_TEXT_MAX = 4000;
 const REPLY_MAX = 20000;
 const LABEL_MAX = 120;
 const QUEUE_MAX = 10;
+/** An adopted run takes no reply until its terminal session has been quiet this long (RunManager.terminalBusy). */
+export const TERMINAL_QUIET_MS = 2 * 60_000;
+/** ...or while its terminal is running a tool, for at most this long after its last write (a terminal closed mid-tool doesn't hold it forever). */
+const TOOL_PENDING_MS = 30 * 60_000;
 /** A new run's title at most (a rename may go up to LABEL_MAX). */
 const LAUNCH_LABEL_MAX = 60;
 
@@ -396,8 +400,189 @@ export class RunManager {
     return meta;
   }
 
+  // ------------------------------------------------------------ sessions from a terminal
+
+  /**
+   * Take over a Claude Code session started in a terminal (sessions.ts): a run on the same
+   * session, so a reply resumes it. Its first prompt is the run's prompt and the rest are its
+   * events; it ends where the session's last line is, so what's typed there later is added by
+   * absorbTerminal. Throws 409 when the session is already a run here.
+   */
+  adopt(session: SessionInfo, workspace: string, trigger = "terminal", outside: string | null = null): RunMeta {
+    if (this.list().some((r) => r.sessionId === session.sessionId)) throw httpError(409, "That session is already a run here.");
+    return this._sessionRun(session, { workspace, trigger, cwd: session.cwd, adopted: true, outside });
+  }
+
+  /**
+   * A copy of a session from another folder, moved into this workspace (sessions.ts forkSession
+   * made it, under a new session id): an ordinary run in `cwd` from now on, told every turn that
+   * paths earlier in it are the old folder's. The original stays as it was, in its terminal.
+   */
+  moveIn(copy: SessionInfo, opts: { workspace: string; cwd: string; fromCwd: string; fromSession: string }): RunMeta {
+    const moved = this.list().find((r) => r.movedFrom?.session === opts.fromSession);
+    if (moved) throw httpError(409, `That session was moved here already: "${moved.label}".`);
+    return this._sessionRun(copy, { workspace: opts.workspace, trigger: "terminal:moved", cwd: opts.cwd, adopted: false, movedFrom: opts.fromCwd, fromSession: opts.fromSession });
+  }
+
+  private _sessionRun(session: SessionInfo, o: { workspace: string; trigger: string; cwd: string; adopted: boolean; outside?: string | null; movedFrom?: string; fromSession?: string }): RunMeta {
+    const { workspace, trigger } = o;
+    const readAt = fs.statSync(session.file).mtimeMs;
+    const { events, lastAt, to, pending } = readSessionEvents(session.file, 0, 0, { commands: true, terminalOnly: true });
+    const firstHuman = firstPromptIndex(events);
+    const rest = firstHuman >= 0 ? events.filter((_, i) => i !== firstHuman) : events;
+    const now = new Date().toISOString();
+    const startedAt = session.startedAt || lastAt || now;
+    const endedAt = lastAt || session.lastActivityAt;
+    const id = `${startedAt.replace(/[-:T]/g, "").slice(0, 14)}-${crypto.randomBytes(3).toString("hex")}`;
+    const meta: RunMeta = {
+      id,
+      sessionId: session.sessionId,
+      presetId: null,
+      label: runLabel(session.label, session.firstPrompt),
+      prompt: firstHuman >= 0 ? String(events[firstHuman].text) : session.firstPrompt,
+      cwd: o.cwd,
+      workspace,
+      model: null,
+      effort: null,
+      // As the session was: a reply from here (or the hosted dashboard) gets no more than it had there.
+      ...runPermission(session.permissionMode),
+      budgetUsd: null,
+      trigger,
+      agent: "claude",
+      status: "succeeded",
+      startedAt,
+      endedAt,
+      turns: 1,
+      turnStartedAt: startedAt,
+      costUsd: 0,
+      numTurns: 0,
+      durationMs: null,
+      toolCalls: toolUses(rest),
+      lastActivity: null,
+      resultText: null,
+      error: null,
+      verdict: null,
+      flagged: false,
+      question: null,
+      warning: null,
+      adoptedFrom: o.adopted ? { at: now, file: session.file, entrypoint: session.entrypoint, offset: to, readAt, inTerminal: false, pendingTools: pending, ...(o.outside ? { outside: o.outside } : {}) } : null,
+      terminalActivityAt: o.adopted ? endedAt : null,
+      watch: null,
+      queued: [],
+      queueBlocked: null,
+    };
+    if (o.movedFrom) {
+      meta.movedFrom = { at: now, cwd: o.movedFrom, ...(o.fromSession ? { session: o.fromSession } : {}) };
+      meta.extraPrompt = `${MOVED_FOLDER_NOTE}, ${o.movedFrom}. Paths earlier in the conversation under that folder are the old location: you now work in ${o.cwd}, and changes made there (committed or not) aren't here unless they were pushed.`;
+    }
+    meta.resultText = lastAssistantText(rest, RESULT_TEXT_MAX);
+    if (rest.length) fs.writeFileSync(this._eventsPath(id), rest.map((e) => JSON.stringify(e)).join("\n") + "\n");
+    this._paths.set(session.sessionId, session.file);
+    this._write(meta);
+    return meta;
+  }
+
+  /**
+   * An adopted run: add what was said in its terminal session as events (so the run page, Remote
+   * control and Send to hosted all have it). Reads only what was written since the last read
+   * (adoptedFrom.offset), and only the terminal's lines: the dashboard's own turns (`claude -p`)
+   * are told apart by their entrypoint, so what was typed there during one of them isn't lost.
+   * Returns the run when something was added, else null. Not while a dashboard turn is running.
+   */
+  absorbTerminal(id: string): RunMeta | null {
+    const meta = this.get(id);
+    const from = meta?.adoptedFrom;
+    if (!meta || !from || this.live.has(id) || meta.status === "running" || meta.status === "handedOff" || meta.handoffPendingAt || !meta.endedAt) return null;
+    const file = this._adoptedFile(meta);
+    if (!file) return null;
+    let mtime = 0;
+    try { mtime = fs.statSync(file).mtimeMs; } catch { return null; }
+    if (mtime <= (from.readAt ?? 0)) return null;
+    const wrote = new Date(mtime).toISOString();
+    let read: ReturnType<typeof readSessionEvents>;
+    try { read = readSessionEvents(file, Date.parse(meta.endedAt), from.offset ?? 0, { commands: true, terminalOnly: true, pending: from.pendingTools }); }
+    catch (e: any) {
+      if (e?.status !== 413) return null;
+      // Too much written at once to take in (big tool output, images): skip past it and say so, rather than stall here.
+      from.offset = e.size;
+      from.readAt = mtime;
+      from.pendingTools = [];
+      this._append(meta, { type: "divider", text: "Too much was written to this session at once to show here: open it in a terminal to see it", uuid: crypto.randomUUID(), timestamp: wrote });
+      this._save(meta);
+      return meta;
+    }
+    from.offset = read.to;
+    from.readAt = mtime;
+    from.pendingTools = read.pending;
+    // The file's write time, not the last line's: the terminal may have written lines that aren't events (titles).
+    const activityBefore = meta.terminalActivityAt;
+    // Also a line naming no entrypoint (an older Claude Code, a title) written after the last turn from here ended: only the terminal writes then.
+    if (read.fromTerminal || mtime > Date.parse(meta.endedAt) + 5000) meta.terminalActivityAt = wrote;
+    // A rewritten file is read from the start: what the run already has isn't added again.
+    if (read.restarted) {
+      const have = new Set(this._readEvents(id).map((e) => e.uuid).filter(Boolean));
+      // The first prompt is the run's prompt, not an event.
+      let promptSkipped = false;
+      read.events = read.events.filter((e) => {
+        if (e.uuid && have.has(e.uuid)) return false;
+        if (!promptSkipped && e.type === "human" && e.text === meta.prompt) { promptSkipped = true; return false; }
+        return true;
+      });
+    }
+    if (!read.events.length) {
+      // Only the cursor moved: written quietly (no onChange: nothing the list, the page or Remote control shows changed), unless the activity time did.
+      if (meta.terminalActivityAt !== activityBefore) this._write(meta);
+      else { fs.writeFileSync(this._metaPath(meta.id), JSON.stringify(meta, null, 2)); this._listCache = null; }
+      return null;
+    }
+    // What was said there reads as its own part of the run, under one divider until a turn runs from here.
+    if (!from.inTerminal) this._append(meta, { type: "divider", text: "In the terminal", uuid: crypto.randomUUID(), timestamp: read.events[0].timestamp });
+    from.inTerminal = true;
+    for (const ev of read.events) this._append(meta, ev);
+    const last = read.events[read.events.length - 1].timestamp as string;
+    if (last > meta.endedAt) meta.endedAt = last;
+    // Carried on there: a question it asked here, or how its last turn here ended, no longer stands. Not
+    // with messages queued: a question, cancel or restart holds them, and "succeeded" would send them.
+    if ((meta.status === "waiting" || meta.status === "failed" || meta.status === "interrupted" || meta.status === "cancelled") && !(meta.queued || []).length) {
+      meta.status = "succeeded";
+      meta.question = null;
+      meta.error = null;
+    }
+    meta.toolCalls = (meta.toolCalls || 0) + toolUses(read.events);
+    meta.resultText = lastAssistantText(read.events, RESULT_TEXT_MAX) ?? meta.resultText;
+    this._cont.delete(id);
+    this._save(meta);
+    return meta;
+  }
+
+  /**
+   * Why an adopted run can't take a turn from here right now, or null: its terminal wrote the
+   * session in the last TERMINAL_QUIET_MS, or is still running a tool (TOOL_PENDING_MS at most),
+   * and a turn from here would fork the conversation.
+   */
+  terminalBusy(meta: RunMeta, now = Date.now()): string | null {
+    const from = meta.adoptedFrom;
+    if (!from) return null;
+    const file = this._adoptedFile(meta);
+    let mtime = 0;
+    try { mtime = file ? fs.statSync(file).mtimeMs : 0; } catch {}
+    const ended = meta.endedAt ? Date.parse(meta.endedAt) : 0;
+    // Written since the last read, and not by the dashboard's own turn (which writes until it ends).
+    const written = mtime > (from.readAt ?? 0) && mtime > ended + 5000 ? mtime : 0;
+    const said = meta.terminalActivityAt ? Date.parse(meta.terminalActivityAt) : 0;
+    const latest = Math.max(written, said);
+    if ((from.pendingTools || []).length && said && now - said < TOOL_PENDING_MS) {
+      return `This session's terminal is still running a tool (since ${Math.max(1, Math.round((now - said) / 60_000))} min ago). Wait for it to finish there, or exit it, then try again.`;
+    }
+    if (!latest || now - latest >= TERMINAL_QUIET_MS) return null;
+    const ago = Math.max(1, Math.round((now - latest) / 1000));
+    return `This session is still open in a terminal (active ${ago}s ago). Reply there, or exit it there and try again in ${Math.ceil((TERMINAL_QUIET_MS - (now - latest)) / 1000)}s.`;
+  }
+
   /** Send a reply: a new turn on the same session. Throws with a user-facing message. */
   reply(id: string, text: string, opts: ReplyOptions = {}): RunMeta {
+    // An adopted run: take in what its terminal said first, or this turn's endedAt would leave it behind for good.
+    if (!this.live.has(id)) this.absorbTerminal(id);
     const meta = this.get(id);
     if (!meta) throw httpError(404, "Unknown run");
     text = String(text || "").trim();
@@ -408,6 +593,8 @@ export class RunManager {
     if (meta.status === "handedOff") throw httpError(409, handedOffMessage(meta));
     if (meta.handoffPendingAt) throw httpError(409, SENDING_MESSAGE);
     if (!REPLYABLE.has(meta.status)) throw httpError(409, `Can't reply to a ${meta.status} run.`);
+    const busy = this.terminalBusy(meta);
+    if (busy) throw httpError(409, busy);
     if (opts.budgetUsd !== undefined) meta.budgetUsd = opts.budgetUsd;
     if (opts.model !== undefined && opts.model !== meta.model) {
       meta.model = opts.model;
@@ -481,6 +668,8 @@ export class RunManager {
    * was cancelled or interrupted (those hold the queue), or whose queue was blocked.
    */
   sendQueued(id: string, opts: ReplyOptions = {}): RunMeta {
+    // An adopted run: take in what its terminal said first (it may have answered the question already).
+    if (!this.live.has(id)) this.absorbTerminal(id);
     const meta = this.get(id);
     if (!meta) throw httpError(404, "Unknown run");
     if (!meta.queued || !meta.queued.length) throw httpError(409, "Nothing is queued.");
@@ -585,8 +774,12 @@ export class RunManager {
    * processes never write to one session, then stop driving it from here.
    */
   handOff(id: string): RunMeta {
+    if (!this.live.has(id)) this.absorbTerminal(id); // an adopted run: what its terminal said last comes along
     const meta = this.get(id);
     if (!meta) throw httpError(404, "Unknown run");
+    // An adopted run whose own terminal is still going: a second one on the same session would fork it.
+    const busy = this.live.has(id) ? null : this.terminalBusy(meta);
+    if (busy) throw httpError(409, busy);
     const live = this.live.get(id);
     if (live) {
       live.stopping = "handoff";
@@ -612,6 +805,8 @@ export class RunManager {
    * Only a Claude run that isn't mid-turn can go: its transcript is what moves.
    */
   beginSend(id: string): RunMeta {
+    // An adopted run: what its terminal said last comes along (a no-op for any other run).
+    if (!this.live.has(id)) this.absorbTerminal(id);
     const meta = this.get(id);
     if (!meta) throw httpError(404, "Unknown run");
     if (agentOf(meta.agent).id !== "claude") throw httpError(400, "Only Claude runs can move to the hosted dashboard.");
@@ -619,6 +814,11 @@ export class RunManager {
     if (meta.status === "handedOff") throw httpError(409, handedOffMessage(meta));
     if (meta.handoffPendingAt) throw httpError(409, "This run is already being sent. Finish in the tab that opened, or cancel the send first.");
     if (!REPLYABLE.has(meta.status)) throw httpError(409, `Can't send a ${meta.status} run.`);
+    // A session opened from a folder outside the workspace: the hosted dashboard has only the workspace's repos.
+    if (meta.adoptedFrom?.outside) throw httpError(409, `This run works in ${meta.adoptedFrom.outside}, outside the workspace, so the hosted dashboard can't carry it on. Move it into this workspace first (From terminal, Move here), then send that.`);
+    // Not while an adopted run's terminal is still going.
+    const busy = this.terminalBusy(meta);
+    if (busy) throw httpError(409, busy);
     meta.handoffPendingAt = new Date().toISOString();
     this._save(meta);
     return meta;
@@ -790,6 +990,7 @@ export class RunManager {
     meta.error = null;
     meta.effectivePermissionMode = null; // this turn's init sets it again
     this._cont.delete(meta.id); // the terminal-continuation cutoff moves with each dashboard turn
+    if (meta.adoptedFrom) meta.adoptedFrom.inTerminal = false; // what the terminal says after this gets a divider of its own
     // Snapshot the workspace's repos (runs alongside the spawn: claude takes seconds to
     // start, long before its first edit).
     try { this.onTurnStart(meta); } catch {}
@@ -933,6 +1134,9 @@ export class RunManager {
       else applyWatchBlock(meta, rawFinalText);
       this._save(meta);
       this.onFinish(meta);
+      // An adopted run: read past this turn's own lines now (once, not on every poll), taking in
+      // anything its terminal said meanwhile.
+      if (meta.adoptedFrom && meta.status !== "handedOff") { try { this.absorbTerminal(meta.id); } catch {} }
       // Messages typed during the turn are the next turn (once finish's own work has settled).
       if (drainable(meta)) setImmediate(() => this._drain(meta.id));
 
@@ -962,27 +1166,29 @@ export class RunManager {
   continuation(id: string) {
     const meta = this.get(id);
     if (!meta || meta.status === "running" || !meta.endedAt) return null;
+    // An adopted run takes what's said in its terminal in as events instead (the page polls this, so it
+    // shows within seconds); once it's continued in a terminal from here, it's like any other run.
+    if (meta.adoptedFrom && meta.status !== "handedOff") {
+      const after = this.absorbTerminal(id) || meta;
+      return { events: [], lastActivityAt: after.terminalActivityAt || null };
+    }
     const file = this._transcriptPath(meta.sessionId);
     if (!file) return { events: [], lastActivityAt: null };
 
-    const c = this._cont.get(id) || { offset: 0, rest: "", events: [] as RunEvent[], cutoff: Date.parse(meta.endedAt) };
-    let size = 0;
-    try { size = fs.statSync(file).size; } catch { return { events: c.events, lastActivityAt: null }; }
-    if (size > c.offset) {
-      const fd = fs.openSync(file, "r");
-      const buf = Buffer.alloc(size - c.offset);
-      fs.readSync(fd, buf, 0, buf.length, c.offset);
-      fs.closeSync(fd);
-      c.offset = size;
-      const lines = (c.rest + buf.toString("utf-8")).split("\n");
-      c.rest = lines.pop();
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        let e;
-        try { e = JSON.parse(line); } catch { continue; }
-        const ev = normaliseTranscriptEntry(e, c.cutoff);
-        if (ev) c.events.push(ev);
+    const c = this._cont.get(id) || { offset: 0, events: [] as RunEvent[], cutoff: Date.parse(meta.endedAt) };
+    try {
+      let read: ReturnType<typeof readSessionEvents>;
+      try { read = readSessionEvents(file, c.cutoff, c.offset); }
+      catch (e: any) {
+        if (e?.status !== 413) throw e;
+        // A transcript too big to read whole the first time: its last part holds what came after the run.
+        read = readSessionEvents(file, c.cutoff, Math.max(c.offset, e.size - MAX_SESSION_BYTES));
       }
+      if (read.to < c.offset) c.events = []; // rewritten from the start
+      c.offset = read.to;
+      c.events.push(...read.events);
+    } catch {
+      return { events: c.events, lastActivityAt: null };
     }
     this._cont.set(id, c);
     const last = c.events.length ? c.events[c.events.length - 1].timestamp : null;
@@ -993,9 +1199,17 @@ export class RunManager {
     return { events: c.events, lastActivityAt: last };
   }
 
+  /** An adopted run's session file: where it was found, else looked up as any run's. */
+  private _adoptedFile(meta: RunMeta): string | null {
+    const f = meta.adoptedFrom?.file;
+    if (!f) return this._transcriptPath(meta.sessionId);
+    // Not looked for elsewhere when it's gone (pruned): that would scan every project folder on each poll.
+    return fs.existsSync(f) && path.basename(f) === `${meta.sessionId}.jsonl` ? f : null;
+  }
+
   private _transcriptPath(sessionId: string): string | null {
     if (this._paths.has(sessionId)) return this._paths.get(sessionId)!;
-    const root = path.join(process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude"), "projects");
+    const root = path.join(claudeDir(), "projects");
     let found: string | null = null;
     try {
       for (const dir of fs.readdirSync(root)) {
@@ -1012,6 +1226,7 @@ export class RunManager {
     const byPreset: Record<string, any> = {};
     for (const r of this.list()) {
       if (!SETTLED.has(r.status)) continue;
+      if (terminalOnlyRun(r)) continue; // a terminal session with no turn from here isn't the dashboard's record
       const key = r.presetId || "_adhoc";
       const s = (byPreset[key] = byPreset[key] || { runs: 0, succeeded: 0, rated: 0, good: 0, costUsd: 0, durationMs: 0, lastRunAt: null });
       s.runs++;
@@ -1315,31 +1530,12 @@ export function httpError(status: number, message: string) {
 
 export const SENDING_MESSAGE = "This run is being sent to the hosted dashboard. Finish in the tab that opened, or cancel the send.";
 
+/** How many tools the assistant called in these events. */
+function toolUses(events: RunEvent[]): number {
+  return events.filter((e) => e.type === "assistant").reduce((n, e) => n + (e.message?.content || []).filter((b: any) => b.type === "tool_use").length, 0);
+}
+
 /** Why a handed-off run takes no replies here. */
 export function handedOffMessage(meta: Pick<RunMeta, "handedOffTo">): string {
   return meta.handedOffTo === "hosted" ? "This run moved to the hosted dashboard; reply there." : "This run continued in a terminal; reply there.";
-}
-
-/**
- * One transcript line -> an event the UI renders, or null. Keeps main-thread user
- * prompts, assistant turns and tool results newer than the cutoff.
- */
-function normaliseTranscriptEntry(e: any, cutoff: number): RunEvent | null {
-  if (!e || e.isSidechain || e.isMeta || !e.timestamp || !e.message) return null;
-  if (Date.parse(e.timestamp) <= cutoff) return null;
-  const base = { uuid: e.uuid, timestamp: e.timestamp };
-  if (e.type === "assistant") {
-    const blocks = (e.message.content || []).filter((b: any) => b.type === "text" || b.type === "tool_use");
-    return blocks.length ? { ...base, type: "assistant", parent_tool_use_id: null, message: { content: blocks } } : null;
-  }
-  if (e.type !== "user") return null;
-  const content = e.message.content;
-  if (typeof content === "string") {
-    if (/^<(command-|local-command|system-reminder)/.test(content.trim())) return null;
-    return { ...base, type: "human", text: content };
-  }
-  if (!Array.isArray(content)) return null;
-  if (content.some((b: any) => b.type === "tool_result")) return { ...base, type: "user", parent_tool_use_id: null, message: { content } };
-  const text = content.filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n").trim();
-  return text ? { ...base, type: "human", text } : null;
 }

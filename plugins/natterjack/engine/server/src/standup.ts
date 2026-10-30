@@ -20,6 +20,7 @@ import type { IssueTracker } from "./issues/index.ts";
 import { isSince, searchTime } from "./issues/activity.ts";
 import type { Meeting, RunMeta, StandupDraft, StandupItem, StandupResponse, StandupSource } from "../../shared/api.ts";
 import { askClaude } from "./claude.ts";
+import { terminalOnlyRun } from "./sessions.ts";
 
 const SOURCE_TTL_MS = 2 * 60 * 1000;
 /** How far back a window may start. */
@@ -102,6 +103,7 @@ export function runsSource(runs: RunMeta[], since: string): StandupSource {
   const next: StandupItem[] = [];
   const blockers: StandupItem[] = [];
   for (const r of runs) {
+    if (terminalOnlyRun(r)) continue; // a terminal session with no turn from the dashboard: not a dashboard run
     const trigger = String(r.trigger || "");
     const kind = TRIGGERS[trigger] || (trigger.startsWith("routine:") ? "Routine" : "Run");
     const base = { title: r.label, runId: r.id };

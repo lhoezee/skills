@@ -9,6 +9,7 @@ import { ToastService } from '../../core/toast.service';
 import { bytes } from '../../core/util';
 import { PageHeaderComponent } from '../../shared/page-header.component';
 import { RemoteLinkComponent } from './remote-link.component';
+import { SessionFoldersComponent } from './session-folders.component';
 
 type LimitKey = Exclude<SettingKey, 'model' | 'effort'>;
 
@@ -20,7 +21,7 @@ interface NumberRow { key: LimitKey; label: string; help: string; min: number; m
  */
 @Component({
   selector: 'dash-settings',
-  imports: [PageHeaderComponent, NgTemplateOutlet, RemoteLinkComponent, RouterLink],
+  imports: [PageHeaderComponent, NgTemplateOutlet, RemoteLinkComponent, RouterLink, SessionFoldersComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   styleUrl: './settings.component.scss',
   template: `
@@ -112,6 +113,18 @@ interface NumberRow { key: LimitKey; label: string; help: string; min: number; m
               <ng-container *ngTemplateOutlet="teamNote; context: { $implicit: 'runBudget', team: s.team.limits.runBudget ? 'on' : 'off' }" />
             </div>
           </div>
+          @if (!api.hosted()) {
+            <div class="row">
+              <div class="lbl">
+                <div class="t">Open terminal sessions here</div>
+                <div class="h">Every new Claude Code session you start in this workspace or its worktrees (<code>claude</code> in a terminal, the desktop app, an IDE) shows up in Activity by itself, and keeps up with what you type there. Exit the terminal before replying from the dashboard. With Remote control on, you can follow and answer them from your hosted dashboard too. Off, open one with <b>From terminal</b> on the Activity page.</div>
+              </div>
+              <div class="ctl">
+                <label class="chk"><input type="checkbox" [checked]="s.effective.limits.adoptSessions" [disabled]="saving()" (change)="saveLimit('adoptSessions', $any($event.target).checked)"> {{ s.effective.limits.adoptSessions ? 'On' : 'Off' }}</label>
+                <ng-container *ngTemplateOutlet="teamNote; context: { $implicit: 'adoptSessions', team: s.team.limits.adoptSessions ? 'on' : 'off' }" />
+              </div>
+            </div>
+          }
           <div class="row">
             <div class="lbl">
               <div class="t">Default model</div>
@@ -214,6 +227,7 @@ interface NumberRow { key: LimitKey; label: string; help: string; min: number; m
       </div>
     </div>
 
+    @if (!api.hosted()) { <dash-session-folders /> }
     <dash-remote-link />
 
     <ng-template #num let-row>
@@ -237,7 +251,7 @@ interface NumberRow { key: LimitKey; label: string; help: string; min: number; m
   `,
 })
 export class SettingsComponent implements OnInit {
-  private readonly api = inject(ApiService);
+  readonly api = inject(ApiService);
   private readonly data = inject(DataService);
   private readonly toast = inject(ToastService);
   private readonly router = inject(Router);

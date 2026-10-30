@@ -2,7 +2,7 @@
  * Skills deck + routines config, the skill catalog, and the routine scheduler.
  *
  * Config lives in <main workspace>/.claude/dashboard/deck.json (committed):
- *   limits   { maxConcurrentRuns, pauseAtSessionPct, pauseAtWeeklyPct, runBudget, dailyBudgetUsd? }
+ *   limits   { maxConcurrentRuns, pauseAtSessionPct, pauseAtWeeklyPct, runBudget, dailyBudgetUsd?, adoptSessions? }
  *   presets  [{ id, label, prompt, args?, model, effort, permissionMode, budgetUsd, workspace? }]
  *            `prompt` may contain {argName} placeholders filled from `args`.
  *   routines [{ id, preset, at: "HH:MM", days: "daily"|"weekdays"|["mon",...], workspace?, enabled }]
@@ -27,8 +27,9 @@ const DAY_KEYS = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
 // (--max-budget-usd, from each preset's budgetUsd); off, runs have no cap, since on a
 // subscription it only stops working runs. dailyBudgetUsd is an optional API-equivalent cap.
 // keepAttachmentsDays: a finished run's attached files are deleted this many days after
-// its last turn (0 keeps them forever).
-const DEFAULT_LIMITS = { maxConcurrentRuns: 3, pauseAtSessionPct: 90, pauseAtWeeklyPct: 90, runBudget: false, keepAttachmentsDays: 14, dailyBudgetUsd: null };
+// its last turn (0 keeps them forever). adoptSessions: every new Claude Code session started in a
+// terminal in the workspace becomes a run by itself (sessions.ts), so Remote control mirrors it too.
+const DEFAULT_LIMITS = { maxConcurrentRuns: 3, pauseAtSessionPct: 90, pauseAtWeeklyPct: 90, runBudget: false, keepAttachmentsDays: 14, dailyBudgetUsd: null, adoptSessions: false };
 /** What the Settings page can change, and the range each takes. */
 const PERSONAL_LIMITS: Record<string, { min?: number; max?: number; bool?: boolean }> = {
   maxConcurrentRuns: { min: 1, max: 10 },
@@ -36,6 +37,7 @@ const PERSONAL_LIMITS: Record<string, { min?: number; max?: number; bool?: boole
   pauseAtWeeklyPct: { min: 10, max: 100 },
   runBudget: { bool: true },
   keepAttachmentsDays: { min: 0, max: 365 },
+  adoptSessions: { bool: true },
 };
 // Issues tab: which tracker teams/projects and workflow states (by name) to show, states in
 // column order; empty = all. implementTeams: teams whose implement-state issues (workspace.json

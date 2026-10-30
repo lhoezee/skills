@@ -232,6 +232,17 @@ interface Sent {
   loneBytes: number | null;
 }
 
+/**
+ * A run as it goes up the link: an adopted run's session file (a path on this computer, with the
+ * person's user name in it) and the read cursor stay here; the hosted dashboard only needs to know
+ * it came from a terminal.
+ */
+export function forPod(meta: RunMeta): RunMeta {
+  if (!meta.adoptedFrom) return meta;
+  const { at, entrypoint } = meta.adoptedFrom;
+  return { ...meta, adoptedFrom: { at, entrypoint, file: "" } };
+}
+
 export class RemoteLinkClient {
   private readonly link: HostedLink;
   private readonly runs: RunSource;
@@ -434,7 +445,7 @@ export class RemoteLinkClient {
     // A copy, as it is now: RunManager hands over its own meta and changes it in place, so a sync
     // in flight holding that object would, once acknowledged, clear a newer change not yet sent.
     // A fresh copy per change means _synced clears only the very one that went up.
-    this.dirty.set(meta.id, structuredClone(meta));
+    this.dirty.set(meta.id, structuredClone(forPod(meta)));
   }
 
   /**
@@ -723,7 +734,7 @@ export class RemoteLinkClient {
   /** Runs that may be mirrored (Assumption 2): last 7 days, not handed off to hosted, newest first. */
   private _recent(): RunMeta[] {
     const since = new Date(this.now() - this.t.recentMs).toISOString();
-    return this.runs.list()
+    return this.runs.list().map(forPod)
       .filter((r) => r.handedOffTo !== "hosted" && lastActivity(r) >= since)
       .sort((a, b) => lastActivity(b).localeCompare(lastActivity(a)));
   }
