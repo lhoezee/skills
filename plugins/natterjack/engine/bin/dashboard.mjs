@@ -38,6 +38,7 @@
  */
 
 import fs from "node:fs";
+import http from "node:http";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -126,6 +127,34 @@ function listening(port) {
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** The workspace the dashboard on `port` serves (its GET /api/boot), or null when nothing there says. */
+function servedRoot(port) {
+  return new Promise((resolve) => {
+    const req = http.get({ host: "127.0.0.1", port, path: "/api/boot", timeout: 2000, headers: { host: `localhost:${port}`, origin: `http://localhost:${port}` } }, (res) => {
+      let body = "";
+      res.setEncoding("utf-8");
+      res.on("data", (d) => { body += d; });
+      res.on("end", () => { try { resolve(JSON.parse(body).workspaceRoot || null); } catch { resolve(null); } });
+    });
+    req.on("timeout", () => req.destroy());
+    req.on("error", () => resolve(null));
+  });
+}
+function samePath(a, b) {
+  const real = (p) => { try { return fs.realpathSync.native(p); } catch { return path.resolve(p); } };
+  const [x, y] = [real(a), real(b)];
+  return IS_WIN ? x.toLowerCase() === y.toLowerCase() : x === y;
+}
+/**
+ * Another workspace's dashboard on `port` (a worktree's config names the main checkout's
+ * port, say): its root, so this one neither kills it nor takes it for its own. Null when
+ * the port is free, ours, or held by something that doesn't say.
+ */
+async function otherWorkspaceOn(port) {
+  const root = await servedRoot(port);
+  return root && !samePath(root, ROOT) ? root : null;
+}
 
 /** The Node floor from package.json engines (">=24.22.0"). */
 function nodeFloor() {
@@ -220,12 +249,15 @@ function readRecord() {
 }
 const readPid = () => readRecord().pid;
 
-/** Kill the dashboard: the pid it recorded, and whatever still holds its port. */
-function killDashboard(port = PORT) {
+/**
+ * Kill the dashboard: the pid it recorded, and whatever still holds its port, unless
+ * that's another workspace's dashboard.
+ */
+async function killDashboard(port = PORT) {
   const pids = new Set();
   const recorded = readPid();
   if (recorded) pids.add(recorded);
-  try {
+  if (!(await otherWorkspaceOn(port))) try {
     if (IS_WIN) {
       const out = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
         `Get-NetTCPConnection -LocalPort ${port} -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique`],
@@ -286,6 +318,12 @@ function warnIfClaudeNotReady() {
 
 async function start() {
   const up = await listening(PORT);
+  const other = up && (await otherWorkspaceOn(PORT));
+  if (other) {
+    console.error(`Port ${PORT} is taken by the dashboard for ${other}. Start this one on another port (--port, or dashboard.port in workspace.json).`);
+    process.exitCode = 1;
+    return;
+  }
   if (up && !flags.restart) {
     console.log(`The dashboard is already running at ${URL_} (use --restart after pulling updates).`);
     if (flags.open) openBrowser(URL_);
@@ -307,7 +345,7 @@ async function start() {
   ensureBuilt(env);
 
   if (up) {
-    killDashboard();
+    await killDashboard();
     await sleep(1000);
     console.log("Stopped the running dashboard.");
   }
@@ -320,7 +358,7 @@ async function start() {
       console.log(`The dashboard is running on its previous port, http://localhost:${was.port}. Use restart to move it to ${PORT}.`);
       return;
     }
-    killDashboard(was.port);
+    await killDashboard(was.port);
     await sleep(1000);
     console.log(`Stopped the dashboard on its previous port, ${was.port}.`);
   }
@@ -350,9 +388,13 @@ async function start() {
 
 async function stop() {
   const was = readRecord();
-  if (!(await listening(PORT)) && !was.pid) { console.log(`No dashboard running on :${PORT}.`); return; }
-  killDashboard();
-  if (was.port && was.port !== PORT) killDashboard(was.port); // started before a port change
+  const other = await otherWorkspaceOn(PORT);
+  if ((other || !(await listening(PORT))) && !was.pid) {
+    console.log(other ? `No dashboard for this workspace on :${PORT} (it's ${other}'s).` : `No dashboard running on :${PORT}.`);
+    return;
+  }
+  await killDashboard();
+  if (was.port && was.port !== PORT) await killDashboard(was.port); // started before a port change
   console.log("Dashboard stopped. Runs that were in progress show as interrupted; reply to one to carry on.");
 }
 
