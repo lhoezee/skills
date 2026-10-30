@@ -130,3 +130,21 @@ test("stop after a reboot leaves alone whatever has the recorded pid now", { tim
     assert.equal(other.exitCode, null, "the process that has the pid now is still running");
   } finally { other.kill("SIGKILL"); }
 });
+
+test("stop and start leave another workspace's dashboard on this one's port alone", { timeout: 180_000 }, async () => {
+  // A worktree's workspace.json names the main checkout's port: its stop mustn't take that dashboard down.
+  const port = await freePort();
+  setPort(port);
+  const elsewhere = path.join(TMP, "elsewhere");
+  const serve = `require("http").createServer((q, s) => s.end(JSON.stringify({ workspaceRoot: ${JSON.stringify(elsewhere)} }))).listen(${port}, "127.0.0.1")`;
+  const other = spawn(process.execPath, ["-e", serve], { stdio: "ignore" });
+  try {
+    assert.ok(await until(() => listening(port)), "the other dashboard is up");
+    try { fs.rmSync(path.join(LEDGER, "dashboard.pid")); } catch {}
+
+    assert.match(cli("stop"), /No dashboard for this workspace on :\d+ \(it's .*elsewhere's\)/);
+    assert.throws(() => cli("start", "--restart"), (e: any) => /taken by the dashboard for .*elsewhere/.test(String(e.stderr)));
+    await new Promise((r) => setTimeout(r, 500));
+    assert.equal(other.exitCode, null, "the other workspace's dashboard is still running");
+  } finally { other.kill("SIGKILL"); }
+});
