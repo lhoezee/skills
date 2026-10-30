@@ -21,6 +21,16 @@ describe('toReview', () => {
   it('never a run mirrored from a linked computer: it is rated there, so it stays out of To review and Focus', () => {
     expect(toReview({ ...fine, remote }, NOW)).toBe(false);
   });
+  it('a session taken over from a terminal only once a turn ran here', () => {
+    for (const trigger of ['terminal', 'terminal:auto', 'terminal:moved']) {
+      expect(toReview({ ...fine, trigger, turns: 1 }, NOW)).toBe(false);
+      expect(toReview({ ...fine, trigger, turns: 2 }, NOW)).toBe(true);
+    }
+  });
+  it('nor Unrated: the conversation was had in a terminal', () => {
+    expect(unrated({ ...fine, trigger: 'terminal:moved', turns: 1 })).toBe(false);
+    expect(unrated({ ...fine, trigger: 'terminal', turns: 2 })).toBe(true);
+  });
 });
 
 describe('unrated', () => {

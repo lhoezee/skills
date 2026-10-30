@@ -1,6 +1,7 @@
 import { ChangeDetectionStrategy, Component, computed, effect, inject, input, signal, untracked } from '@angular/core';
 import { ActivatedRoute, Router, RouterLink } from '@angular/router';
 import type { RunMeta } from '../../../../../shared/api';
+import { ApiService } from '../../core/api.service';
 import { DataService } from '../../core/data.service';
 import { LaunchService } from '../../core/launch.service';
 import { SmallScreenService } from '../../core/small-screen';
@@ -9,6 +10,7 @@ import { PageHeaderComponent } from '../../shared/page-header.component';
 import { RunRowComponent } from '../../shared/run-row.component';
 import { toReview, unrated } from '../../shared/run-status';
 import { RunDetailComponent } from './run-detail.component';
+import { TerminalSessionsComponent } from './terminal-sessions.component';
 
 /**
  * Status chips. Selecting several shows runs matching any of them; none selected = all. `data`
@@ -31,16 +33,18 @@ const parse = (s: string | null | undefined) => new Set(String(s || '').split(',
 
 @Component({
   selector: 'dash-runs',
-  imports: [RouterLink, PageHeaderComponent, RunRowComponent, RunDetailComponent],
+  imports: [RouterLink, PageHeaderComponent, RunRowComponent, RunDetailComponent, TerminalSessionsComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   styleUrl: './runs.component.scss',
   template: `
     <dash-page-header eyebrow="Activity" title="Activity" sub="Everything the agents have worked on here: live transcript, subagents, questions it asks you, and replies.">
+      @if (!api.hosted()) { <button class="btn sm" type="button" [class.on]="fromTerminal()" (click)="fromTerminal.set(!fromTerminal())" title="Open a Claude Code session you started in a terminal here">From terminal</button> }
       <button class="btn primary sm" type="button" (click)="newSession()" title="Start a new run in its own session">New session</button>
     </dash-page-header>
     <!-- Small screens show one thing at a time: the list, or the open run with "All runs" back to the list. -->
     <div class="runs-layout" [class.has-run]="!!selectedId()">
       <div class="col">
+        @if (fromTerminal()) { <dash-terminal-sessions (closed)="fromTerminal.set(false)" /> }
         <div class="panel">
           <div class="panel-h"><h2>History</h2><span class="shown">{{ list().length }} of {{ data.activityRuns().length }}</span></div>
           <div class="chips" role="group" aria-label="Filter runs by status">
@@ -84,6 +88,9 @@ const parse = (s: string | null | undefined) => new Set(String(s || '').split(',
 })
 export class RunsComponent {
   readonly data = inject(DataService);
+  readonly api = inject(ApiService);
+  /** The "From terminal" list is open. */
+  readonly fromTerminal = signal(false);
   private readonly launch = inject(LaunchService);
   private readonly router = inject(Router);
   private readonly route = inject(ActivatedRoute);

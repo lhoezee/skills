@@ -187,7 +187,27 @@ export interface RunMeta {
   /** Send to hosted is under way (the hosted tab is importing it): replies wait until it finishes or is cancelled. */
   handoffPendingAt?: string | null;
   /** On the hosted dashboard: the run came from someone's computer (its folder there). */
-  movedFrom?: { at: string; cwd: string } | null;
+  movedFrom?: { at: string; cwd: string; /** Moved from another folder on this computer (Move here): the session it was copied from. */ session?: string } | null;
+  /**
+   * A Claude Code session started in a terminal (or the desktop app, an IDE) that the dashboard took
+   * over (server/src/sessions.ts). What's typed there afterwards is added to the run as it comes.
+   */
+  adoptedFrom?: {
+    at: string;
+    file: string;
+    entrypoint: string | null;
+    /** How far the dashboard has read the session file (bytes), and its last write then (ms): RunManager.absorbTerminal. */
+    offset?: number;
+    readAt?: number;
+    /** The run's last events came from the terminal (the next ones go under the same divider). */
+    inTerminal?: boolean;
+    /** The terminal's tool calls whose result hasn't come yet: it's still working while there are any. */
+    pendingTools?: string[];
+    /** A session from a folder outside the workspace (Settings, Sessions from other folders): that folder. */
+    outside?: string;
+  } | null;
+  /** An adopted run: the last thing said in its terminal session, as the dashboard last read it. */
+  terminalActivityAt?: string | null;
   /** Files sent with the first prompt. A reply's files are on its `human` event. */
   attachments?: Attachment[];
   /** When the run's files were deleted (keepAttachmentsDays after it was done). */
@@ -557,9 +577,9 @@ export interface SkillInfo { name: string; description: string; argumentHint: st
  * since on a subscription the cap only stops working runs. keepAttachmentsDays: delete a done
  * run's attached files this long after its last turn (0 = never).
  */
-export interface Limits { maxConcurrentRuns: number; pauseAtSessionPct: number; pauseAtWeeklyPct: number; runBudget: boolean; keepAttachmentsDays: number; dailyBudgetUsd: number | null }
+export interface Limits { maxConcurrentRuns: number; pauseAtSessionPct: number; pauseAtWeeklyPct: number; runBudget: boolean; keepAttachmentsDays: number; dailyBudgetUsd: number | null; adoptSessions: boolean }
 /** The settings the Settings page can change. */
-export type SettingKey = 'maxConcurrentRuns' | 'pauseAtSessionPct' | 'pauseAtWeeklyPct' | 'runBudget' | 'keepAttachmentsDays' | 'model' | 'effort';
+export type SettingKey = 'maxConcurrentRuns' | 'pauseAtSessionPct' | 'pauseAtWeeklyPct' | 'runBudget' | 'keepAttachmentsDays' | 'adoptSessions' | 'model' | 'effort';
 /**
  * GET /api/settings → Settings. `team` is deck.json (what everyone gets), `mine` your overrides
  * (.claude/ledger/settings.json, only the keys you changed), `effective` the two combined.
@@ -2000,3 +2020,44 @@ export interface PeopleActionRequest { action: PeopleActionName; email: string; 
 /** POST /api/people/roles: add a role (no id), change one, or remove one. */
 export interface PeopleRolesRequest { action: 'save' | 'remove'; id?: string; role?: { label: string; description?: string; access?: Access; outputStyle?: string | null } }
 export interface PeopleActionResponse { ok: true; dryRun: boolean; output: string; objects?: unknown[] }
+
+/**
+ * GET /api/sessions: a Claude Code session started in a terminal (or the desktop app, an IDE)
+ * in this workspace or one of its worktrees, not yet a run here.
+ */
+export interface TerminalSession {
+  sessionId: string;
+  cwd: string;
+  /** Its title (one set with /rename, else Claude's), else its first prompt. */
+  label: string;
+  branch: string | null;
+  /** "cli", "claude-desktop", "claude-vscode"... */
+  entrypoint: string | null;
+  startedAt: string | null;
+  lastActivityAt: string;
+  /** The workspace it belongs to (slug); "main" for one from another folder. */
+  workspace: string;
+  /** One of Settings' other folders it was started in (or under), or null for the workspace's own. */
+  folder: string | null;
+  /** Already moved into this workspace (Move here): that run's id. */
+  movedTo: string | null;
+  /** Written in the last 2 minutes: probably still open in its terminal. */
+  live: boolean;
+}
+
+export interface TerminalSessionsResponse { sessions: TerminalSession[] }
+
+/** A folder outside the workspace whose Claude Code sessions are listed too (Settings, Sessions from other folders). */
+export interface SessionFolder {
+  path: string;
+  /** New sessions there become runs by themselves (as limits.adoptSessions does for the workspace). */
+  auto: boolean;
+  /** When `auto` was turned on (ms): only sessions started since are taken. */
+  autoSince?: number | null;
+}
+
+/** GET /api/sessions/folders: the chosen folders, and others where Claude Code was used, to pick from. */
+export interface SessionFoldersResponse {
+  folders: SessionFolder[];
+  suggestions: { path: string; sessions: number; lastActivityAt: string }[];
+}

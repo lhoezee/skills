@@ -1,18 +1,24 @@
 import type { RunMeta } from '../../../../shared/api';
 
 export const REVIEW_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/** A run from a terminal session (trigger terminal, terminal:auto, terminal:moved) with no turn from here yet (as the server's terminalOnlyRun). */
+const terminalOnly = (r: { trigger?: string | null; turns?: number }) => String(r.trigger || '').startsWith('terminal') && (r.turns ?? 1) <= 1;
 /**
  * Finished fine in the last day and not rated yet: it may still be waiting on you (e.g. "test this
  * and tell me"). Never a run mirrored from a linked computer (RunMeta.remote): it's rated there.
  */
-export function toReview(r: Pick<RunMeta, 'status' | 'verdict' | 'endedAt' | 'remote'>, now = Date.now()): boolean {
+export function toReview(r: Pick<RunMeta, 'status' | 'verdict' | 'endedAt' | 'remote'> & Partial<Pick<RunMeta, 'trigger' | 'turns'>>, now = Date.now()): boolean {
   if (r.remote) return false;
+  // A session from a terminal (opened or moved here) is yours already: only a turn run from here is up for review.
+  if (terminalOnly(r)) return false;
   return r.status === 'succeeded' && !r.verdict && !!r.endedAt && now - Date.parse(r.endedAt) < REVIEW_WINDOW_MS;
 }
 
 /** Finished and not rated yet. Never a mirrored run (RunMeta.remote): it's rated on the computer, as in toReview. */
-export function unrated(r: Pick<RunMeta, 'status' | 'verdict' | 'remote'>): boolean {
+export function unrated(r: Pick<RunMeta, 'status' | 'verdict' | 'remote'> & Partial<Pick<RunMeta, 'trigger' | 'turns'>>): boolean {
   if (r.remote) return false;
+  if (terminalOnly(r)) return false; // as in toReview
   return r.status !== 'running' && r.status !== 'waiting' && !r.verdict;
 }
 

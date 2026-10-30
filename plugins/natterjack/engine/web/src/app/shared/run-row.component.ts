@@ -46,6 +46,7 @@ import { runStatus, toReview } from './run-status';
             <span class="tag routine" [title]="'Runs on ' + rm.label + ', linked to this dashboard (Remote control)'">on {{ rm.label }}</span>
             @if (remoteTag(); as t) { <span class="tag amber" [title]="t.title">{{ t.text }}</span> }
           }
+          @if (r.adoptedFrom) { <span class="tag routine" [title]="'Started in a terminal; ' + (r.trigger === 'terminal:auto' ? 'opened here by itself' : 'opened here')">from terminal</span> }
           @if (r.movedFrom) { <span class="tag routine" [title]="'Moved here from ' + r.movedFrom.cwd">moved here</span> }
           @if (r.verdict === 'good') { <span class="tag good">good</span> }
           @if (r.verdict === 'needed-fix') { <span class="tag bad">needed fix</span> }

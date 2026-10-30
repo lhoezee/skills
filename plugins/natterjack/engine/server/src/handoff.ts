@@ -25,6 +25,7 @@ import type { RunMeta } from "../../shared/api.ts";
 import { REPLYABLE } from "./runs.ts";
 import { safeMemberPath } from "./tar.ts";
 import { slugify } from "./workspaces.ts";
+import { MOVED_FOLDER_NOTE, projectFolder } from "./sessions.ts";
 
 export const HANDOFF_FORMAT = 1;
 /** The bundle as sent (gzipped). The hosted ingress must allow at least this much (e.g. proxy-body-size 25m). */
@@ -130,10 +131,7 @@ export function remoteKey(url: string | null): string | null {
   return s.replace(/\.git$/, "").replace(/\/+$/, "") || null;
 }
 
-/** Claude Code's folder name under ~/.claude/projects for a session started in `cwd`. */
-export function projectFolder(cwd: string): string {
-  return cwd.replace(/[^a-zA-Z0-9]/g, "-");
-}
+export { projectFolder };
 
 // ------------------------------------------------------------------ build (on the person's computer)
 
@@ -546,6 +544,9 @@ export async function importBundle(buf: Buffer, ctx: ImportContext, isRoutedMode
     meta.hostedRunUrl = null;
     meta.handoffPendingAt = null;
     meta.continuedAt = null;
+    // A session taken over from a terminal (sessions.ts) has no terminal here: replies aren't held for one.
+    meta.adoptedFrom = null;
+    meta.terminalActivityAt = null;
     meta.queued = [];
     meta.queueBlocked = null;
     meta.addDirs = undefined;
@@ -554,7 +555,9 @@ export async function importBundle(buf: Buffer, ctx: ImportContext, isRoutedMode
     // The run belongs to its recreated worktree here, by name: its events hold the other computer's
     // paths, so working that out from its edits (shared/run-workspace.ts) would find nothing here.
     if (m.worktree) meta.workspace = slugify(m.worktree.name) || meta.workspace;
-    meta.extraPrompt = [meta.extraPrompt, movedNote(m.source, ctx.workspaceRoot, wtMap)].filter(Boolean).join("\n\n");
+    // A note from a move between folders on that computer (sessions.ts MOVED_FOLDER_NOTE) named paths there: this one replaces it.
+    const kept = (meta.extraPrompt || "").split("\n\n").filter((p) => p && !p.startsWith(MOVED_FOLDER_NOTE)).join("\n\n");
+    meta.extraPrompt = [kept, movedNote(m.source, ctx.workspaceRoot, wtMap)].filter(Boolean).join("\n\n");
     if (Array.isArray(meta.attachments)) meta.attachments = meta.attachments.map((a) => ({ ...a, path: path.join(attDir, path.basename(a.file || a.name)) }));
     const events = file("run/events.jsonl");
     if (events) {

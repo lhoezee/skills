@@ -22,7 +22,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { execFile, execFileSync } from "node:child_process";
 import { restartSelf } from "./self-restart.ts";
-import type { Boot, FactoryIntake, FactoryNotice, ImportRunJob, LaunchRequest, ProfileInfo, PublishPlanResponse, RunEvent, RunMeta } from "../../shared/api.ts";
+import type { Boot, FactoryIntake, FactoryNotice, ImportRunJob, LaunchRequest, ProfileInfo, PublishPlanResponse, RunEvent, RunMeta, SessionFolder, SessionFoldersResponse, TerminalSession, TerminalSessionsResponse } from "../../shared/api.ts";
 import { implementTicket, runTicket } from "../../shared/run-ticket.ts";
 import { runWorkspace } from "../../shared/run-workspace.ts";
 import { CLAUDE_SESSION_ENV } from "./claude.ts";
@@ -38,7 +38,8 @@ import type { Ws } from "./workspaces.ts";
 // start (apps, terminals). claude.ts strips them per spawn too; drop them here once.
 for (const key of CLAUDE_SESSION_ENV) delete process.env[key];
 
-import { RunManager, httpError, runLabel } from "./runs.ts";
+import { RunManager, TERMINAL_QUIET_MS, httpError, runLabel } from "./runs.ts";
+import { claudeDir, findSession, forkSession, isInside, listSessions as listTerminalSessions, suggestFolders, type SessionInfo } from "./sessions.ts";
 import { Deck, Scheduler } from "./deck.ts";
 import { Inbox, gh as ghJson } from "./inbox.ts";
 import { Reviews, askChangePrompt, numberParam, repoParam } from "./reviews.ts";
@@ -773,6 +774,172 @@ function cleanupAttachments() {
 }
 cleanupAttachments();
 setInterval(cleanupAttachments, 6 * 3600 * 1000).unref();
+
+// ------------------------------------------------------------------ sessions from a terminal
+
+/** The workspace (slug) a folder belongs to: the deepest workspace or worktree it's in, else main. */
+function workspaceOfFolder(dir: string, all: Ws[] = listWorkspaces()): string {
+  const hit = all.filter((w) => isInside(w.path, dir)).sort((a, b) => b.path.length - a.path.length)[0];
+  return hit ? hit.slug : "main";
+}
+
+/**
+ * Other folders whose sessions are listed too (Settings, Sessions from other folders), kept in
+ * <ledger>/session-folders.json: personal, since paths differ from one computer to the next.
+ */
+const SESSION_FOLDERS = path.join(LEDGER_DIR, "session-folders.json");
+const MAX_SESSION_FOLDERS = 20;
+function sessionFolders(): SessionFolder[] {
+  try {
+    const raw = JSON.parse(fs.readFileSync(SESSION_FOLDERS, "utf-8"));
+    return (Array.isArray(raw?.folders) ? raw.folders : [])
+      .filter((f: any) => f && typeof f.path === "string" && path.isAbsolute(f.path))
+      .map((f: any) => ({ path: f.path, auto: !!f.auto, autoSince: f.auto && Number(f.autoSince) ? Number(f.autoSince) : null }));
+  } catch { return []; }
+}
+/** Saves the list as sent (each an absolute folder that exists, outside the workspace); auto keeps when it was first turned on. */
+function saveSessionFolders(input: unknown): SessionFolder[] {
+  if (!Array.isArray(input)) throw httpError(400, "Expected a list of folders.");
+  if (input.length > MAX_SESSION_FOLDERS) throw httpError(400, `Up to ${MAX_SESSION_FOLDERS} folders.`);
+  const before = new Map(sessionFolders().map((f) => [path.resolve(f.path).toLowerCase(), f]));
+  const roots = listWorkspaces().map((w) => w.path);
+  const out: SessionFolder[] = [];
+  for (const f of input as any[]) {
+    const p = typeof f?.path === "string" ? f.path.trim() : "";
+    if (!p || !path.isAbsolute(p)) throw httpError(400, `${p || "A folder"} isn't a full path.`);
+    const key = path.resolve(p).toLowerCase();
+    // One saved before is kept even while it's missing (an unplugged drive): it mustn't block every other change.
+    let isDir = before.has(key);
+    try { isDir = fs.statSync(p).isDirectory(); } catch {}
+    if (!isDir) throw httpError(400, `${p} isn't a folder on this computer.`);
+    if (roots.some((r) => isInside(r, p))) throw httpError(400, `${p} is part of this workspace already.`);
+    // A folder holding the workspace (or a whole drive) would list, and auto-open, the workspace's own sessions too.
+    if (roots.some((r) => isInside(p, r))) throw httpError(400, `${p} holds this workspace: choose the folder of the other project itself.`);
+    if (out.some((o) => path.resolve(o.path).toLowerCase() === key)) continue;
+    const auto = !!f.auto;
+    const was = before.get(key);
+    out.push({ path: path.resolve(p), auto, autoSince: auto ? (was?.auto && was.autoSince) || Date.now() - TERMINAL_QUIET_MS : null });
+  }
+  fs.writeFileSync(SESSION_FOLDERS, JSON.stringify({ folders: out }, null, 2));
+  return out;
+}
+
+/** The other folder (Settings) a session's folder is in, or null when it's the workspace's. */
+function outsideFolder(cwd: string, folders: SessionFolder[], all: Ws[]): string | null {
+  if (all.some((w) => isInside(w.path, cwd))) return null;
+  return folders.filter((f) => isInside(f.path, cwd)).sort((a, b) => b.path.length - a.path.length)[0]?.path ?? null;
+}
+
+/** Claude Code sessions started in this workspace, its worktrees, or `folders` (sessions.ts) that aren't runs here. */
+function terminalSessions(all: Ws[], opts: { since?: number; startedSince?: number; limit?: number; exclude?: Set<string>; folders?: SessionFolder[] } = {}): SessionInfo[] {
+  return listTerminalSessions({
+    claudeDir: claudeDir(),
+    roots: [...all.map((w) => w.path), ...(opts.folders ?? sessionFolders()).map((f) => f.path)],
+    exclude: new Set([...runs.list().map((r) => r.sessionId), ...(opts.exclude || [])]),
+    since: opts.since ?? Date.now() - 30 * 86_400_000,
+    startedSince: opts.startedSince,
+    limit: opts.limit ?? 50,
+  });
+}
+
+/** One of the listed sessions by id, found again here, never from a path the client sent. */
+function listedSession(sessionId: string, all: Ws[], folders: SessionFolder[]): SessionInfo {
+  const s = findSession({ claudeDir: claudeDir(), roots: [...all.map((w) => w.path), ...folders.map((f) => f.path)], sessionId });
+  if (!s) throw httpError(404, "That session isn't one of this workspace's, or of the folders chosen in Settings.");
+  return s;
+}
+
+/** Take a session over as a run (Open here): it keeps working where it is. */
+function adoptSession(sessionId: string): RunMeta {
+  const all = listWorkspaces();
+  const folders = sessionFolders();
+  const s = listedSession(sessionId, all, folders);
+  const meta = runs.adopt(s, workspaceOfFolder(s.cwd, all), "terminal", outsideFolder(s.cwd, folders, all));
+  live.refresh("runs");
+  return meta;
+}
+
+/**
+ * Move a session from another folder into this workspace (Move here): a copy under a new session
+ * id, carried on in the main workspace from now on; the original stays in its folder.
+ */
+function moveSession(sessionId: string): RunMeta {
+  const all = listWorkspaces();
+  const folders = sessionFolders();
+  const s = listedSession(sessionId, all, folders);
+  if (!outsideFolder(s.cwd, folders, all)) throw httpError(400, "That session is this workspace's already: open it instead.");
+  const moved = runs.list().find((r) => r.movedFrom?.session === s.sessionId);
+  if (moved) throw httpError(409, `That session was moved here already: "${moved.label}".`);
+  const copy = forkSession(s, MAIN_WORKSPACE_PATH, claudeDir(), crypto.randomUUID());
+  try {
+    const meta = runs.moveIn(copy, { workspace: "main", cwd: MAIN_WORKSPACE_PATH, fromCwd: s.cwd, fromSession: s.sessionId });
+    live.refresh("runs");
+    return meta;
+  } catch (e) {
+    fs.rmSync(copy.file, { force: true });
+    fs.rmSync(path.join(path.dirname(copy.file), copy.sessionId), { recursive: true, force: true });
+    throw e;
+  }
+}
+
+/**
+ * Every 30 s, on a computer: what was said in an adopted run's terminal session since is added to
+ * the run (so Remote control sends it up too). With limits.adoptSessions on, sessions started in the
+ * workspace since it was turned on (at most a day back) become runs by themselves, and so do those
+ * in an other folder whose `auto` is on, since it was.
+ */
+let sessionSweeping = false;
+/**
+ * When auto-adopt was turned on (ms), kept in <ledger>/adopt-sessions.json so a restart (or a
+ * dashboard started after the terminal) doesn't skip sessions begun meanwhile. Gone while it's off.
+ */
+const ADOPT_STATE = path.join(LEDGER_DIR, "adopt-sessions.json");
+function adoptingSince(on: boolean): number | null {
+  let since: number | null = null;
+  try { since = Number(JSON.parse(fs.readFileSync(ADOPT_STATE, "utf-8")).since) || null; } catch {}
+  if (!on) { if (since !== null) fs.rmSync(ADOPT_STATE, { force: true }); return null; }
+  if (since === null) {
+    since = Date.now() - TERMINAL_QUIET_MS;
+    try { fs.writeFileSync(ADOPT_STATE, JSON.stringify({ since })); } catch {}
+  }
+  return since;
+}
+/** Sessions auto-adopt couldn't take, for the life of the process. */
+const adoptRefused = new Set<string>();
+function sweepSessions() {
+  if (HOSTED || sessionSweeping) return;
+  sessionSweeping = true;
+  try {
+    // Every adopted run, however old, whose session was written since it was last read.
+    for (const r of runs.list()) {
+      const from = r.adoptedFrom;
+      if (!from) continue;
+      let mtime = 0;
+      try { mtime = fs.statSync(from.file).mtimeMs; } catch { continue; }
+      if (mtime > (from.readAt ?? 0)) { try { runs.absorbTerminal(r.id); } catch { /* next sweep */ } }
+    }
+    const all = listWorkspaces();
+    const day = Date.now() - 86_400_000;
+    // Where new sessions are taken by themselves, and since when: the workspace, and each auto folder.
+    const scopes: { roots: Ws[]; folders: SessionFolder[]; since: number }[] = [];
+    const ws = adoptingSince(!!deck.config().limits.adoptSessions);
+    if (ws !== null) scopes.push({ roots: all, folders: [], since: Math.max(ws, day) });
+    for (const f of sessionFolders()) if (f.auto) scopes.push({ roots: [], folders: [f], since: Math.max(f.autoSince || Date.now(), day) });
+    let added = false;
+    const folders = sessionFolders();
+    for (const scope of scopes) {
+      // New sessions only: an old one picked up again (claude --resume) is opened with From terminal.
+      for (const s of terminalSessions(scope.roots, { since: scope.since, startedSince: scope.since, limit: 20, exclude: adoptRefused, folders: scope.folders })) {
+        // One too big to take (over 64 MB) is left for From terminal, which says why, rather than tried every 30 s.
+        try { runs.adopt(s, workspaceOfFolder(s.cwd, all), "terminal:auto", outsideFolder(s.cwd, folders, all)); added = true; }
+        catch (e: any) { if (e?.status === 413) adoptRefused.add(s.sessionId); /* else (a read while it's written): next sweep */ }
+      }
+    }
+    if (added) live.refresh("runs");
+  } catch { /* best effort */ }
+  finally { sessionSweeping = false; }
+}
+setInterval(sweepSessions, 30_000).unref();
 // The Factory's notices join the Inbox (Home → Needs you), unless the policy turns that off.
 const inbox = new Inbox(runs, () => {
   const state = factoryConfigState(true);
@@ -1817,7 +1984,7 @@ async function handleRemote(req: http.IncomingMessage, res: http.ServerResponse,
 }
 
 /** POSTs that open something on the server's own screen or ports, refused when hosted. */
-const LOCAL_ONLY_POSTS = new Set(["/api/models/routing", "/api/models/start", "/api/models/pull", "/api/models/cancel", "/api/models/delete", "/api/models/prepare", "/api/models/install-ollama", "/api/machine/install", "/api/machine/google-client", "/api/knowledge/setup", "/api/knowledge/store-source", "/api/docs/preview", "/api/apps/action", "/api/restart", "/api/onboarding/atlassian-secret"]);
+const LOCAL_ONLY_POSTS = new Set(["/api/sessions/adopt", "/api/sessions/move", "/api/sessions/folders", "/api/models/routing", "/api/models/start", "/api/models/pull", "/api/models/cancel", "/api/models/delete", "/api/models/prepare", "/api/models/install-ollama", "/api/machine/install", "/api/machine/google-client", "/api/knowledge/setup", "/api/knowledge/store-source", "/api/docs/preview", "/api/apps/action", "/api/restart", "/api/onboarding/atlassian-secret"]);
 
 async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, url: URL, user: string | null) {
   const p = url.pathname;
@@ -2111,6 +2278,26 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
       return d ? sendJson(res, d) : sendError(res, 404, "Not in the index");
     }
     if (p === "/api/deck") return sendJson(res, deckView());
+    if (p === "/api/sessions") {
+      if (HOSTED) return sendJson(res, { sessions: [] } satisfies TerminalSessionsResponse);
+      const now = Date.now();
+      const all = listWorkspaces();
+      const folders = sessionFolders();
+      const movedTo = new Map(runs.list().filter((r) => r.movedFrom?.session).map((r) => [r.movedFrom!.session!, r.id]));
+      const sessions: TerminalSession[] = terminalSessions(all, { folders }).map((s) => ({
+        sessionId: s.sessionId, cwd: s.cwd, label: s.label, branch: s.branch, entrypoint: s.entrypoint,
+        startedAt: s.startedAt, lastActivityAt: s.lastActivityAt,
+        workspace: workspaceOfFolder(s.cwd, all), folder: outsideFolder(s.cwd, folders, all), movedTo: movedTo.get(s.sessionId) ?? null,
+        live: now - Date.parse(s.lastActivityAt) < TERMINAL_QUIET_MS,
+      }));
+      return sendJson(res, { sessions } satisfies TerminalSessionsResponse);
+    }
+    if (p === "/api/sessions/folders") {
+      if (HOSTED) return sendJson(res, { folders: [], suggestions: [] } satisfies SessionFoldersResponse);
+      const folders = sessionFolders();
+      const skip = [...listWorkspaces().map((w) => w.path), ...folders.map((f) => f.path)];
+      return sendJson(res, { folders, suggestions: suggestFolders(claudeDir(), skip) } satisfies SessionFoldersResponse);
+    }
     if (p === "/api/runs") {
       const limit = Math.min(parseInt(q("limit") || "", 10) || 100, 500);
       return sendJson(res, { runs: runs.list().slice(0, limit), stats: runs.stats(), ...remoteRuns(limit), ...(mirror ? { remoteLinks: mirror.remoteLinks() } : {}) });
@@ -2263,6 +2450,12 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
     }
     else return sendError(res, 400, "Unknown action");
     return sendJson(res, { ...hostedLink.status(), notice });
+  }
+  if (p === "/api/sessions/adopt") return sendJson(res, { run: adoptSession(String(body.sessionId || "")) }, 201);
+  if (p === "/api/sessions/move") return sendJson(res, { run: moveSession(String(body.sessionId || "")) }, 201);
+  if (p === "/api/sessions/folders") {
+    // Suggestions aren't worked out again here (they read every project folder): the page drops the one just added.
+    return sendJson(res, { folders: saveSessionFolders(body.folders) });
   }
   if (p === "/api/runs") {
     // A run that uses a knowledge store reads the latest notes: sync them first (briefly; a slow store doesn't hold the run up).
