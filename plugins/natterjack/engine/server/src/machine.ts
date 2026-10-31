@@ -36,6 +36,24 @@ import { NOT_HOSTED } from "./hosted.ts";
 import { statusAccount } from "./github-login.ts";
 import { hardware } from "./hardware.ts";
 import { googleDirectoryCheck } from "./people/google-login.ts";
+import { pluginState } from "./plugin-skills.ts";
+
+/**
+ * A claude-plugin check's `plugin` ("name@marketplace") and `marketplace` (owner/repo or a URL): only
+ * these get into its command, each starting with a letter or digit (never read as an option, or as
+ * PowerShell's @splat). scripts/validate.mjs holds the same patterns (machine-plugin.test.ts keeps them in step).
+ */
+export const PLUGIN_KEY_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9._-]*$/;
+export const MARKETPLACE_RE = /^[A-Za-z0-9][A-Za-z0-9._/:@-]*$/;
+const PLUGIN_SCOPES = new Set(["user", "project", "local"]);
+
+/**
+ * What installs a claude-plugin check's plugin: add its marketplace (when given; a no-op if it's
+ * added already, and `;` carries on either way, in PowerShell and sh alike), then install it.
+ */
+export function pluginInstallCommand(key: string, marketplace: string | null, scope: string): string {
+  return [marketplace ? `claude plugin marketplace add ${marketplace}` : null, `claude plugin install ${key} --scope ${scope}`].filter(Boolean).join("; ");
+}
 
 const IS_WIN = process.platform === "win32";
 const IS_MAC = process.platform === "darwin";
@@ -555,6 +573,39 @@ class Machine {
         if (c.state === "disabled") return { ...base, label, status: "warn", detail: `Turned off for this workspace. In a Claude session, run /mcp and enable "claude.ai ${name}".` };
         if (c.state === "signed-out") return { ...base, label, status: "warn", detail: `Not connected (${c.text}). Connect it at claude.ai → Settings → Connectors.`, install };
         return { ...base, label, status: "warn", detail: detail.missing || `Your claude.ai account doesn't have the ${name} connector. An org admin adds it in claude.ai's admin settings; then connect it at claude.ai → Settings → Connectors.`, install };
+      }
+
+      case "claude-plugin": {
+        const key = String(s.plugin || "");
+        if (!PLUGIN_KEY_RE.test(key)) return { ...base, label, status: "warn", detail: `"plugin" should be name@marketplace (got "${key}").` };
+        if (s.scope !== undefined && !PLUGIN_SCOPES.has(s.scope)) return { ...base, label, status: "warn", detail: `"scope" is user, project or local (got ${JSON.stringify(s.scope)}).` };
+        const scope: string = s.scope ?? "user";
+        if (s.marketplace !== undefined && !(typeof s.marketplace === "string" && MARKETPLACE_RE.test(s.marketplace))) {
+          return { ...base, label, status: "warn", detail: `"marketplace" should be a GitHub owner/repo or a URL (got ${JSON.stringify(s.marketplace)}).` };
+        }
+        const market: string | null = s.marketplace ?? null;
+        const st = pluginState(this.root, key);
+        if (st.installed && st.enabled) {
+          return { ...base, label, status: "ok", version: st.installed.version || undefined, detail: detail.ok || `Installed (${st.installed.scope} scope).` };
+        }
+        // Hosted, nothing opens a terminal: the plugin goes into the image (hosting.md) instead.
+        const hostedNote = "Install it in the hosted image (the image's Claude Code setup), then redeploy.";
+        if (st.installed) {
+          // Turned on where it was turned off (a later settings file's false wins), but never by writing the
+          // team's committed project settings: local scope overrides them and stays on this computer.
+          const on = `claude plugin enable ${key} --scope ${st.disabledIn === "user" ? "user" : "local"}`;
+          if (this.hosted) return { ...base, label, status: "warn", detail: `Installed but turned off here. ${hostedNote}` };
+          return { ...base, label, status: "warn", detail: `Installed but turned off for this workspace: ${on}`, install: installFor({ label: "Turn on", win: on, mac: on, linux: on }, vars) };
+        }
+        const cmdText = pluginInstallCommand(key, market, scope);
+        const where = st.elsewhere.length ? `Installed only for ${st.elsewhere.join(", ")}, not this workspace. ` : "Not installed for this workspace: ";
+        if (this.hosted) return { ...base, label, status: absent, detail: detail.missing || `Not installed here. ${hostedNote}` };
+        return {
+          ...base, label, status: absent,
+          detail: detail.missing || `${where}${cmdText}`,
+          install: installFor(s.install || { label: "Install", win: cmdText, mac: cmdText, linux: cmdText }, vars),
+          fix: fixOf(),
+        };
       }
 
       case "claude-code": {

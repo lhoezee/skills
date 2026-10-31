@@ -22,6 +22,10 @@
  *                      for this person, from `claude mcp list`; the button opens claude.ai's connectors
  *   claude-code        Claude Code installed and signed in (`claude auth status`); Sign in
  *                      opens a terminal running `claude auth login`
+ *   claude-plugin      a Claude Code plugin (`plugin`: "name@marketplace") installed and enabled for
+ *                      this workspace; Install opens a terminal that adds its marketplace (`marketplace`:
+ *                      a GitHub owner/repo or URL, if it may not be added yet) and installs it (`scope`:
+ *                      user, the default, project or local)
  *
  * Install commands are per OS ({ win, mac, linux }; null = nothing to run there).
  * In a command, {required} is the required version and {major} its major number.
@@ -107,6 +111,7 @@ export const CATALOG: Record<string, CatalogEntry> = {
     detail: { missing: "Runs open models on this computer (the Models page downloads them and lets runs use them).", ok: "Runs open models on this computer: see the Models page." },
     install: { win: "winget install --id Ollama.Ollama -e", mac: "brew install --cask ollama-app", linux: "curl -fsSL https://ollama.com/install.sh | sh" },
   },
+  "claude-plugin": { kind: "claude-plugin", label: "Claude Code plugin" },
   "claude-connector": {
     kind: "claude-connector", label: "claude.ai connector",
     install: { label: "Open claude.ai", win: "Start-Process https://claude.ai/settings/connectors", mac: "open https://claude.ai/settings/connectors", linux: "xdg-open https://claude.ai/settings/connectors" },

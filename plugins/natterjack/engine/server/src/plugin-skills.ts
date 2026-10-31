@@ -49,13 +49,24 @@ function sources(root: string) {
 
 /** Plugin keys ("name@marketplace") enabled for the workspace, in the order first seen. */
 export function enabledPlugins(root: string): string[] {
-  const on = new Map<string, boolean>();
-  for (const file of sources(root).settings) {
+  return [...pluginSettings(root)].filter(([, v]) => v.on).map(([k]) => k);
+}
+
+type SettingsLayer = "user" | "project" | "local";
+
+/**
+ * Each plugin key's on/off as the settings decide it, and the layer that decides it: user, then
+ * project, then local settings, a later file's boolean winning. In the order keys are first seen.
+ */
+function pluginSettings(root: string): Map<string, { on: boolean; layer: SettingsLayer }> {
+  const layers: SettingsLayer[] = ["user", "project", "local"];
+  const out = new Map<string, { on: boolean; layer: SettingsLayer }>();
+  sources(root).settings.forEach((file, i) => {
     for (const [k, v] of Object.entries(obj(obj(readJson(file)).enabledPlugins))) {
-      if (typeof v === "boolean") on.set(k, v);
+      if (typeof v === "boolean") out.set(k, { on: v, layer: layers[i] });
     }
-  }
-  return [...on].filter(([, v]) => v).map(([k]) => k);
+  });
+  return out;
 }
 
 /** Most specific scope first: an install for this workspace beats the user-wide one. */
@@ -105,6 +116,32 @@ function skillFolders(paths: string[]): string[] {
     }
   }
   return [...new Set(out)];
+}
+
+/**
+ * A plugin ("name@marketplace") as Claude Code has it for this workspace (the Machine page's
+ * claude-plugin check): installed for it (user scope, or project/local scope for this folder)
+ * with its version and scope, or null; and whether it's enabled here.
+ */
+export function pluginState(root: string, key: string): {
+  installed: { version: string | null; scope: string } | null;
+  enabled: boolean;
+  /** The settings layer whose `false` turns it off here (a later one wins), or null. */
+  disabledIn: "user" | "project" | "local" | null;
+  /** Folders it's installed for at project or local scope, when not for this one. */
+  elsewhere: string[];
+} {
+  const installed = obj(obj(readJson(sources(root).installed)).plugins);
+  const entries: Record<string, any>[] = Array.isArray(installed[key]) ? installed[key].map(obj) : [];
+  const hit = installFor(entries, root);
+  const decided = pluginSettings(root).get(key);
+  const elsewhere = hit ? [] : entries.filter((e) => typeof e.installPath === "string" && typeof e.projectPath === "string").map((e) => e.projectPath as string);
+  return {
+    installed: hit ? { version: typeof hit.version === "string" ? hit.version : null, scope: String(hit.scope) } : null,
+    enabled: !!decided?.on,
+    disabledIn: decided && !decided.on ? decided.layer : null,
+    elsewhere: [...new Set(elsewhere)],
+  };
 }
 
 /** The skill folders, plus the files and folders whose change should re-read them. */
