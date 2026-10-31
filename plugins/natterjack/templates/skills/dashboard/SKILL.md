@@ -1,7 +1,7 @@
 ---
 name: {{skill}}
 description: Start, stop, restart or check the workspace dashboard (the local web console for runs, issues, apps, machine setup, docs and links), and start or stop the workspace's apps through it so they keep running. Use when the user wants to open, start, launch, restart, reload, stop or check the dashboard, or after pulling updates to {{engineDir}}/. Also use when a dashboard page looks broken right after an update (it usually just needs a restart), and to start, stop or check the workspace's apps or stacks (dev servers) from a terminal or a dashboard run.
-argument-hint: "[start|stop|restart|status|apps ...]"
+argument-hint: "[start|stop|restart|status|autostart on|off|status|apps ...]"
 ---
 
 # Workspace dashboard
@@ -13,6 +13,7 @@ node {{engineDir}}/bin/dashboard.mjs start --open   # install + build if needed,
 node {{engineDir}}/bin/dashboard.mjs status
 node {{engineDir}}/bin/dashboard.mjs restart        # after pulling changes to {{engineDir}}/
 node {{engineDir}}/bin/dashboard.mjs stop
+node {{engineDir}}/bin/dashboard.mjs autostart on   # start it when you log in (macOS, Windows); also off, status
 ```
 
 The same script starts and stops the workspace's **apps** through the running dashboard, exactly as its Apps page does (detached: they keep running after this terminal or Claude session ends, and show on the Apps page with their logs):
@@ -35,4 +36,5 @@ Things to know:
 - **Restarting or stopping ends any Claude run in progress in the dashboard** (it shows as interrupted, and replying to it carries on). If you are yourself running inside the dashboard (a headless run), don't restart it: that would end this run. Tell the user to use the restart link at the bottom of the dashboard's sidebar (or run the command in a terminal) instead.
 - It needs Node.js at the version in `{{engineDir}}/package.json` `engines` or newer. If the default `node` is older, the script uses a newer one installed with nvm; if there isn't one, it says how to install it.
 - If a page is empty or says "not set up", the matching file in `.claude/dashboard/` is missing or wrong; the page says which. Edits to those files apply on the next page load, no restart needed (except the port).
-- Logs: `.claude/ledger/dashboard.log`.
+- **Autostart** (`autostart on`) adds a login item for this user, no admin: a LaunchAgent in `~/Library/LaunchAgents/` on macOS, a shortcut in the Startup folder on Windows. It runs `start` with the Node and (on macOS) the PATH that `autostart on` ran with, so run it from a terminal where `claude` works, and again after moving the workspace or changing Node (`autostart status` says when it's stale). `--port`, `--skip-build` and `--open` are passed on to its start. `autostart off` removes it; a running dashboard keeps running.
+- Logs: `.claude/ledger/dashboard.log` (and `autostart.log` for the macOS login item's start).

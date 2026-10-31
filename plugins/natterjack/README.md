@@ -99,7 +99,7 @@ your-workspace/            its own git repo: the dashboard, config and skills ar
 
 The engine's folder is yours to choose when you create it: `natterjack/` by default, or anything else if that name is taken (`tools/natterjack`, `ops-console`…). The workspace skill is named after its last part. The choice is recorded in `.claude/dashboard/engine.json` (`dir`), and `upgrade` and `doctor` follow it.
 
-Start it any time with `node natterjack/bin/dashboard.mjs start --open` (default http://localhost:3333; set `dashboard.port` in `.claude/dashboard/workspace.json`, or `DASHBOARD_PORT` on one machine).
+Start it any time with `node natterjack/bin/dashboard.mjs start --open` (default http://localhost:3333; set `dashboard.port` in `.claude/dashboard/workspace.json`, or `DASHBOARD_PORT` on one machine). To have it start when you log in (macOS, Windows): `node natterjack/bin/dashboard.mjs autostart on`.
 
 ## What it runs and connects to
 

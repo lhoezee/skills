@@ -6,6 +6,8 @@
  *   node <engine>/bin/dashboard.mjs stop
  *   node <engine>/bin/dashboard.mjs status
  *   node <engine>/bin/dashboard.mjs run        (foreground, for a container: references/hosting.md)
+ *   node <engine>/bin/dashboard.mjs autostart <on|off|status> [--port N] [--skip-build] [--open]
+ *                                              (start it when you log in, macOS and Windows: bin/autostart.mjs)
  *
  * and start, stop or check the workspace's apps through the running dashboard (what its
  * Apps page does: detached, they outlive the terminal or Claude run; see bin/apps.mjs):
@@ -445,10 +447,28 @@ async function apps() {
   });
 }
 
-const commands = { start, stop, status, run, apps, restart: () => { flags.restart = true; return start(); } };
+/** `autostart ...`: start this workspace's dashboard at login (bin/autostart.mjs). */
+async function autostart() {
+  const { autostartMain, runCommand } = await import("./autostart.mjs");
+  process.exitCode = autostartMain({
+    argv: rest,
+    flags,
+    platform: process.platform,
+    root: ROOT,
+    home: os.homedir(),
+    appData: process.env.APPDATA,
+    node: process.execPath,
+    script: SELF,
+    ledger: LEDGER,
+    env: process.env,
+    run: runCommand,
+  });
+}
+
+const commands = { start, stop, status, run, apps, autostart, restart: () => { flags.restart = true; return start(); } };
 if (!commands[cmd]) {
   const self = path.relative(process.cwd(), SELF) || SELF;
-  console.error(`Usage: node ${self} <start|stop|restart|status|run> [--port N] [--restart] [--open] [--skip-build]\n       node ${self} apps <status|start|stop|restart|stop-all|setup> [--workspace <slug|path>] [--stack <id> | --app <id>] [--no-wait] [--timeout <sec>]   (apps help: details)`);
+  console.error(`Usage: node ${self} <start|stop|restart|status|run> [--port N] [--restart] [--open] [--skip-build]\n       node ${self} autostart <on|off|status> [--port N] [--skip-build] [--open]\n       node ${self} apps <status|start|stop|restart|stop-all|setup> [--workspace <slug|path>] [--stack <id> | --app <id>] [--no-wait] [--timeout <sec>]   (apps help: details)`);
   process.exit(2);
 }
 await commands[cmd]();
