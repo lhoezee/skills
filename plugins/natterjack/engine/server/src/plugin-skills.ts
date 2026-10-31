@@ -107,6 +107,20 @@ function skillFolders(paths: string[]): string[] {
   return [...new Set(out)];
 }
 
+/**
+ * A plugin ("name@marketplace") as Claude Code has it for this workspace (the Machine page's
+ * claude-plugin check): installed for it (user scope, or project/local scope for this folder)
+ * with its version and scope, or null; and whether it's enabled here.
+ */
+export function pluginState(root: string, key: string): { installed: { version: string | null; scope: string } | null; enabled: boolean } {
+  const installed = obj(obj(readJson(sources(root).installed)).plugins);
+  const hit = installFor(Array.isArray(installed[key]) ? installed[key].map(obj) : [], root);
+  return {
+    installed: hit ? { version: typeof hit.version === "string" ? hit.version : null, scope: String(hit.scope) } : null,
+    enabled: enabledPlugins(root).includes(key),
+  };
+}
+
 /** The skill folders, plus the files and folders whose change should re-read them. */
 function uncachedDirs(root: string): { dirs: PluginSkillDir[]; watch: string[] } {
   const installed = obj(obj(readJson(sources(root).installed)).plugins);

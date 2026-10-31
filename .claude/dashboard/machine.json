@@ -49,6 +49,21 @@
       }
     },
     {
+      "use": "claude-plugin",
+      "id": "multirepo-plugin",
+      "label": "multirepo plugin",
+      "plugin": "multirepo@lhoezee-skills",
+      "marketplace": "lhoezee/skills",
+      "optional": true,
+      "group": "Optional",
+      "when": {
+        "access": "full"
+      },
+      "detail": {
+        "ok": "Implement on the Issues page can run /multirepo:implement."
+      }
+    },
+    {
       "use": "gcloud",
       "optional": true,
       "group": "Optional"

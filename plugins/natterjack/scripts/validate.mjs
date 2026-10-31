@@ -185,6 +185,11 @@ export function validate(root) {
       const where = `checks[${i}]${c.id || c.use ? ` (${c.id || c.use})` : ""}`;
       if (c.use && catalog.length && !catalog.includes(c.use)) err("machine.json", `${where}: "${c.use}" isn't in the catalog (${catalog.length} tools; see ${engineDir}/server/src/machine-catalog.ts)`);
       if (!c.use && !c.kind) err("machine.json", `${where}: needs "use" (a catalog id) or "kind"`);
+      if ((c.use || c.kind) === "claude-plugin") {
+        if (!/^[A-Za-z0-9._-]+@[A-Za-z0-9._-]+$/.test(String(c.plugin || ""))) err("machine.json", `${where}: "plugin" should be name@marketplace (e.g. "multirepo@lhoezee-skills")`);
+        if (c.marketplace !== undefined && !/^[A-Za-z0-9._/:@-]+$/.test(String(c.marketplace))) err("machine.json", `${where}: "marketplace" should be a GitHub owner/repo or a URL`);
+        if (c.scope !== undefined && !["user", "project", "local"].includes(c.scope)) err("machine.json", `${where}: "scope" is user, project or local`);
+      }
       if (c.required && c.required.file && !dirExists(c.required.file)) warn("machine.json", `${where}: required.file "${c.required.file}" isn't there (the min/default applies)`);
       if (c.apps && apps) for (const k of c.apps) if (!(apps.apps || {})[k]) warn("machine.json", `${where}: apps lists "${k}", which isn't in apps.json`);
     }

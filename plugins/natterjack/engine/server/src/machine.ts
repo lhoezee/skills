@@ -36,6 +36,20 @@ import { NOT_HOSTED } from "./hosted.ts";
 import { statusAccount } from "./github-login.ts";
 import { hardware } from "./hardware.ts";
 import { googleDirectoryCheck } from "./people/google-login.ts";
+import { pluginState } from "./plugin-skills.ts";
+
+/** A claude-plugin check's `plugin` ("name@marketplace") and `marketplace` (owner/repo or a URL): only these get into its command. */
+const PLUGIN_KEY_RE = /^[A-Za-z0-9._-]+@[A-Za-z0-9._-]+$/;
+const MARKETPLACE_RE = /^[A-Za-z0-9._/:@-]+$/;
+const PLUGIN_SCOPES = new Set(["user", "project", "local"]);
+
+/**
+ * What installs a claude-plugin check's plugin: add its marketplace (when given; a no-op if it's
+ * added already, and `;` carries on either way, in PowerShell and sh alike), then install it.
+ */
+export function pluginInstallCommand(key: string, marketplace: string | null, scope: string): string {
+  return [marketplace ? `claude plugin marketplace add ${marketplace}` : null, `claude plugin install ${key} --scope ${scope}`].filter(Boolean).join("; ");
+}
 
 const IS_WIN = process.platform === "win32";
 const IS_MAC = process.platform === "darwin";
@@ -555,6 +569,28 @@ class Machine {
         if (c.state === "disabled") return { ...base, label, status: "warn", detail: `Turned off for this workspace. In a Claude session, run /mcp and enable "claude.ai ${name}".` };
         if (c.state === "signed-out") return { ...base, label, status: "warn", detail: `Not connected (${c.text}). Connect it at claude.ai → Settings → Connectors.`, install };
         return { ...base, label, status: "warn", detail: detail.missing || `Your claude.ai account doesn't have the ${name} connector. An org admin adds it in claude.ai's admin settings; then connect it at claude.ai → Settings → Connectors.`, install };
+      }
+
+      case "claude-plugin": {
+        const key = String(s.plugin || "");
+        if (!PLUGIN_KEY_RE.test(key)) return { ...base, label, status: "warn", detail: `"plugin" should be name@marketplace (got "${key}").` };
+        const scope = PLUGIN_SCOPES.has(s.scope) ? s.scope : "user";
+        const market = typeof s.marketplace === "string" && MARKETPLACE_RE.test(s.marketplace) ? s.marketplace : null;
+        const st = pluginState(this.root, key);
+        if (st.installed && st.enabled) {
+          return { ...base, label, status: "ok", version: st.installed.version || undefined, detail: detail.ok || `Installed (${st.installed.scope} scope).` };
+        }
+        if (st.installed) {
+          const on = `claude plugin enable ${key} --scope ${st.installed.scope}`;
+          return { ...base, label, status: "warn", detail: `Installed but turned off for this workspace: ${on}`, install: installFor({ label: "Turn on", win: on, mac: on, linux: on }, vars) };
+        }
+        const cmdText = pluginInstallCommand(key, market, scope);
+        return {
+          ...base, label, status: absent,
+          detail: detail.missing || `Not installed for this workspace: ${cmdText}`,
+          install: installFor(s.install || { label: "Install", win: cmdText, mac: cmdText, linux: cmdText }, vars),
+          fix: fixOf(),
+        };
       }
 
       case "claude-code": {

@@ -25,14 +25,10 @@
       "use": "machine"
     },
     {
-      "id": "multirepo",
-      "kind": "manual",
+      "check": "multirepo-plugin",
       "label": "Install the multirepo plugin",
-      "detail": "Implement on the Issues page runs /multirepo:implement: claude plugin install multirepo@lhoezee-skills.",
-      "optional": true,
-      "when": {
-        "access": "full"
-      }
+      "detail": "Implement on the Issues page runs /multirepo:implement. Install opens a terminal that adds the lhoezee/skills marketplace and installs the plugin for your user.",
+      "optional": true
     }
   ]
 }
