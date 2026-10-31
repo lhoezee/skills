@@ -74,15 +74,18 @@ export function slashCommand(text: string): string | null {
 }
 
 /**
- * The run's permission mode for a session's: the same where the dashboard has it; plan mode is
- * the run's plan switch; anything that would have asked ("default", or one we don't know) is
- * dontAsk, since a dashboard turn can't ask; bypassPermissions is narrowed to auto.
+ * The run's permission mode for a session's, giving it no more than it had: the same where the
+ * dashboard has it; bypassPermissions narrowed to auto; plan mode as the run's plan switch. Anything
+ * else (Claude Code's default mode, "manual", once recorded as "default", or none recorded) is manual:
+ * a dashboard turn can't ask (--permission-prompts none), so it reads and searches as it did there and
+ * what would have asked is refused. Never dontAsk unless the session was: that refuses everything not
+ * on the allow list, reading a file included.
  */
 export function runPermission(mode: string | null): { permissionMode: PermissionMode; planMode: boolean } {
-  if (mode === "plan") return { permissionMode: "dontAsk", planMode: true };
+  if (mode === "plan") return { permissionMode: "manual", planMode: true };
   if (mode === "acceptEdits" || mode === "auto" || mode === "dontAsk") return { permissionMode: mode, planMode: false };
   if (mode === "bypassPermissions") return { permissionMode: "auto", planMode: false };
-  return { permissionMode: "dontAsk", planMode: false };
+  return { permissionMode: "manual", planMode: false };
 }
 
 /**
@@ -166,6 +169,9 @@ function titlesAndMode(lines: any[], into: { custom: string; ai: string }, mode:
     if (e?.type === "custom-title" && typeof e.customTitle === "string") into.custom = e.customTitle;
     else if (e?.type === "ai-title" && typeof e.aiTitle === "string") into.ai = e.aiTitle;
     else if (e?.type === "permission-mode" && typeof e.permissionMode === "string") mode = e.permissionMode;
+    // Claude Code also records it on each prompt (`permissionMode` on a user line); only the terminal's own
+    // count, not a dashboard turn's (claude -p, entrypoint sdk-*), which says how the dashboard ran it.
+    else if (e?.type === "user" && typeof e.permissionMode === "string" && !scripted(e)) mode = e.permissionMode;
   }
   return mode;
 }

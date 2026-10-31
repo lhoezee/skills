@@ -249,11 +249,14 @@ test("continuation: an adopted run continued in a terminal from here shows that 
   assert.deepEqual(runs.continuation(meta.id)!.events.map((e) => e.text), ["after continuing"]);
 });
 
-test("runPermission: a run gets no more than the session had", () => {
-  assert.deepEqual(runPermission("plan"), { permissionMode: "dontAsk", planMode: true });
+test("runPermission: no more than the session had; its default mode is manual, never a dontAsk it didn't have", () => {
+  assert.deepEqual(runPermission("plan"), { permissionMode: "manual", planMode: true });
   assert.deepEqual(runPermission("acceptEdits"), { permissionMode: "acceptEdits", planMode: false });
-  assert.deepEqual(runPermission("default"), { permissionMode: "dontAsk", planMode: false });
-  assert.deepEqual(runPermission(null), { permissionMode: "dontAsk", planMode: false });
+  assert.deepEqual(runPermission("auto"), { permissionMode: "auto", planMode: false });
+  assert.deepEqual(runPermission("dontAsk"), { permissionMode: "dontAsk", planMode: false });
+  assert.deepEqual(runPermission("default"), { permissionMode: "manual", planMode: false });
+  assert.deepEqual(runPermission("manual"), { permissionMode: "manual", planMode: false });
+  assert.deepEqual(runPermission(null), { permissionMode: "manual", planMode: false }, "none recorded: not dontAsk (can't even read a file) nor auto (more than it had)");
   assert.deepEqual(runPermission("bypassPermissions"), { permissionMode: "auto", planMode: false });
 });
 
@@ -262,7 +265,18 @@ test("adopt: the session's permission mode (its last) carries over", () => {
   fs.appendFileSync(s.file, JSON.stringify({ type: "permission-mode", permissionMode: "plan", sessionId: s.id }) + String.fromCharCode(10));
   const meta = new RunManager(ledger()).adopt(readSessionInfo(s.file)!, "main");
   assert.equal(meta.planMode, true);
-  assert.equal(meta.permissionMode, "dontAsk");
+  assert.equal(meta.permissionMode, "manual", "plan switched off later: the default mode, not more");
+});
+
+test("adopt: a mode recorded only on the prompts is read, the terminal's own and not a dashboard turn's", () => {
+  // As Claude Code writes it now: `permissionMode` on each user line, no permission-mode line.
+  const s = writeSession(ROOT, { lines: [
+    { cwd: ROOT, entrypoint: "cli", type: "user", uuid: uid(), timestamp: ts(0), permissionMode: "acceptEdits", message: { content: "Fix the login bug" } },
+    { cwd: ROOT, entrypoint: "cli", type: "assistant", uuid: uid(), timestamp: ts(1), message: { content: [{ type: "text", text: "Done." }] } },
+    { cwd: ROOT, entrypoint: "sdk-cli", type: "user", uuid: uid(), timestamp: ts(2), permissionMode: "dontAsk", message: { content: "a dashboard turn" } },
+  ] });
+  assert.equal(readSessionInfo(s.file)!.permissionMode, "acceptEdits");
+  assert.equal(new RunManager(ledger()).adopt(readSessionInfo(s.file)!, "main").permissionMode, "acceptEdits");
 });
 
 test("listSessions startedSince: older sessions written lately don't crowd out a new one", () => {
