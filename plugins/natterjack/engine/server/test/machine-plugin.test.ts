@@ -110,8 +110,10 @@ test("claude-plugin: a plugin or marketplace that isn't a plain name never reach
   assert.equal(scope.install, undefined);
 });
 
-test("validate.mjs checks plugin and marketplace with the engine's own patterns", () => {
-  const src = fs.readFileSync(path.join(import.meta.dirname, "..", "..", "..", "scripts", "validate.mjs"), "utf-8");
+test("validate.mjs checks plugin and marketplace with the engine's own patterns", (t) => {
+  const script = path.join(import.meta.dirname, "..", "..", "..", "scripts", "validate.mjs");
+  if (!fs.existsSync(script)) return t.skip("no plugin scripts next to this engine");
+  const src = fs.readFileSync(script, "utf-8");
   assert.ok(src.includes(PLUGIN_KEY_RE.toString() + ".test("), "PLUGIN_KEY_RE");
   assert.ok(src.includes(MARKETPLACE_RE.toString() + ".test("), "MARKETPLACE_RE");
 });

@@ -148,3 +148,31 @@ test("stop and start leave another workspace's dashboard on this one's port alon
     assert.equal(other.exitCode, null, "the other workspace's dashboard is still running");
   } finally { other.kill("SIGKILL"); }
 });
+
+test("start --skip-build doesn't install packages, even with a lockfile newer than the install", { timeout: 180_000 }, async () => {
+  // The tests above run the real engine's bin/dashboard.mjs: an npm ci there (right after an
+  // upgrade rewrote package-lock.json) would reinstall the engine's node_modules under its
+  // running dashboard. So a copy of the script in a scratch engine whose server only listens.
+  const engine = path.join(TMP, "engine");
+  fs.mkdirSync(path.join(engine, "bin"), { recursive: true });
+  fs.mkdirSync(path.join(engine, "server", "src"), { recursive: true });
+  fs.copyFileSync(CLI, path.join(engine, "bin", "dashboard.mjs"));
+  fs.writeFileSync(path.join(engine, "package.json"), JSON.stringify({ name: "scratch-engine", private: true }));
+  fs.writeFileSync(path.join(engine, "package-lock.json"), JSON.stringify({ name: "scratch-engine", lockfileVersion: 3, packages: { "": { name: "scratch-engine" } } }));
+  fs.writeFileSync(path.join(engine, "server", "src", "main.ts"), `import http from "node:http";\nhttp.createServer((q, s) => s.end("{}")).listen(Number(process.argv[3]), "127.0.0.1");\n`);
+  const port = await freePort();
+  setPort(port);
+  const ledger = path.join(TMP, "scratch-ledger");
+  const out = execFileSync(process.execPath, [path.join(engine, "bin", "dashboard.mjs"), "start", "--skip-build"], {
+    encoding: "utf-8",
+    timeout: 90_000,
+    env: { ...process.env, WORKSPACE_ROOT: TMP, DASHBOARD_LEDGER_DIR: ledger, DASHBOARD_PORT: "" },
+  });
+  try {
+    assert.doesNotMatch(out, /npm ci/, "no install");
+    assert.equal(fs.existsSync(path.join(engine, "node_modules")), false, "no node_modules");
+    assert.ok(await listening(port), "and the server still starts");
+  } finally {
+    try { process.kill(Number(fs.readFileSync(path.join(ledger, "dashboard.pid"), "utf-8").split(/\s+/)[0])); } catch {}
+  }
+});

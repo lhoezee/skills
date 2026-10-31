@@ -29,6 +29,7 @@
  * server fully detached: it keeps running after the terminal or Claude session that
  * started it closes. Running start when it's already up does nothing; --restart
  * replaces it (and ends any Claude run in progress; those show as interrupted).
+ * --skip-build skips both the install and the build.
  *
  * The server needs Node >= the "engines" floor in the engine's package.json. If the
  * default node is older, a newer version installed with nvm is used for it.
@@ -223,12 +224,14 @@ function ensureBuilt(env) {
   // A published UI (dist/.prebuilt.json, from snapshot publish) needs no packages: the
   // server only uses Node itself. So someone with the downloaded copy never runs npm.
   if (fs.existsSync(path.join(DASH_DIR, "dist", ".prebuilt.json")) && fs.existsSync(index) && sources() <= newest(index)) return;
+  // The packages are only for the build, so --skip-build skips the install too (an npm ci
+  // there would reinstall node_modules under whatever else is using them).
+  if (flags["skip-build"]) return;
   const installed = path.join(DASH_DIR, "node_modules", ".package-lock.json");
   if (!fs.existsSync(installed) || newest(path.join(DASH_DIR, "package-lock.json")) > newest(installed)) {
     console.log("Installing the dashboard's packages (npm ci)...");
     execSync("npm ci --no-audit --no-fund", { cwd: ENGINE_DIR, stdio: "inherit", env, windowsHide: true });
   }
-  if (flags["skip-build"]) return;
   if (!fs.existsSync(index) || sources() > newest(index)) {
     console.log("Building the dashboard UI (ng build)...");
     execSync("npx ng build", { cwd: ENGINE_DIR, stdio: "inherit", env, windowsHide: true });
