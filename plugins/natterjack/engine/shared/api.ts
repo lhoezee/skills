@@ -106,7 +106,8 @@ export type RunStatus =
   | 'interrupted'  // the dashboard restarted mid-turn; you can still reply
   | 'handedOff';   // continued in a terminal; the dashboard no longer drives it
 
-export type PermissionMode = 'auto' | 'acceptEdits' | 'dontAsk' | 'plan';
+/** `manual` (Claude Code's default mode, once called "default") only for a session taken over from a terminal (RunMeta.adoptedFrom): runs aren't launched in it. */
+export type PermissionMode = 'auto' | 'acceptEdits' | 'dontAsk' | 'plan' | 'manual';
 export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra' | 'none';
 
 /** The agent CLIs a run can use (server/src/agents/). */
