@@ -23,7 +23,8 @@ test("autostartPlan: a LaunchAgent on macOS, a Startup shortcut on Windows, none
   const mac = autostartPlan({ platform: "darwin", root: "/w/ws", home: "/Users/me", node: "/n/node", script: "/w/ws/natterjack/bin/dashboard.mjs", flags: { port: "4000", open: true } });
   assert.equal(mac.kind, "launchagent");
   assert.match(mac.label, /^com\.natterjack\.dashboard\.ws-[0-9a-f]{8}$/);
-  assert.equal(mac.file, `/Users/me/Library/LaunchAgents/${mac.label}.plist`);
+  // The host's path rules: the on/off tests below run the macOS flow against a real scratch home, on Windows too.
+  assert.equal(mac.file, path.join("/Users/me", "Library", "LaunchAgents", `${mac.label}.plist`));
   assert.deepEqual(mac.args, ["/w/ws/natterjack/bin/dashboard.mjs", "start", "--port", "4000", "--open"]);
 
   const win = autostartPlan({ platform: "win32", root: "C:\\w\\ws", home: "C:\\Users\\me", appData: "C:\\Users\\me\\AppData\\Roaming", node: "C:\\n\\node.exe", script: "C:\\w\\ws\\natterjack\\bin\\dashboard.mjs", flags: { "skip-build": true } });
