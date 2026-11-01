@@ -168,6 +168,49 @@ test("list: a native git worktree without .worktree.json is grouped by its folde
   assert.deepEqual(wt.repos.map((r) => [r.repo, r.native, r.branch]), [["api", true, "fix/ENG-9"]]);
 });
 
+test("list + remove: native worktrees outside worktrees/ (the workspace repo's own, and a main repo's)", async () => {
+  const ws = makeWorkspace();
+  // The workspace folder is itself a repo (not in repos.json), as when its config is versioned.
+  git(ws.root, "init", "-q", "-b", "main");
+  commit(ws.root, ".gitignore", "/api/\n/worktrees/\n/.claude/worktrees/\n", "ws init");
+  const wsRemote = path.join(ws.base, "remotes", "ws.git");
+  fs.mkdirSync(wsRemote, { recursive: true });
+  git(wsRemote, "init", "-q", "--bare", "-b", "main");
+  git(ws.root, "remote", "add", "origin", wsRemote);
+  git(ws.root, "push", "-q", "-u", "origin", "main");
+  const session = path.join(ws.root, ".claude", "worktrees", "session-a1");
+  git(ws.root, "worktree", "add", "-q", "--detach", session);
+  const elsewhere = path.join(ws.base, "elsewhere", "api-spike");
+  git(path.join(ws.root, "api"), "worktree", "add", "-q", "-b", "spike", elsewhere);
+
+  const wts = await gatherWorktrees(ws.root, { fetch: false, pr: false });
+  const byName = Object.fromEntries(wts.map((w) => [w.name, w]));
+  assert.deepEqual(Object.keys(byName).sort(), ["api-spike", "session-a1"]);
+  assert.equal(byName["session-a1"].outside, true);
+  assert.deepEqual(byName["session-a1"].repos.map((r) => [r.repo, r.native, r.branch, r.merged]), [[".", true, "(detached)", true]]);
+  assert.deepEqual(byName["api-spike"].repos.map((r) => [r.repo, r.native, r.branch]), [[".", true, "spike"]]);
+
+  // Unsaved work still blocks; then removed by name although it's outside worktrees/.
+  write(path.join(session, "scratch.txt"), "x\n");
+  assert.throws(() => removeWorktree({ root: ws.root, name: "session-a1" }), (e) => e.unsaved?.some((u) => u.type === "uncommitted"));
+  fs.rmSync(path.join(session, "scratch.txt"));
+  assert.equal(removeWorktree({ root: ws.root, name: "session-a1" }).removed, true);
+  assert.equal(fs.existsSync(session), false);
+  assert.doesNotMatch(git(ws.root, "worktree", "list"), /session-a1/);
+
+  assert.throws(() => removeWorktree({ root: ws.root, path: path.join(ws.base, "elsewhere") }), /is not a worktree of/);
+  assert.equal(removeWorktree({ root: ws.root, path: elsewhere }).removed, true);
+  assert.doesNotMatch(git(path.join(ws.root, "api"), "worktree", "list"), /api-spike/);
+  assert.deepEqual(await gatherWorktrees(ws.root, { fetch: false, pr: false }), []);
+});
+
+test("remove: an ambiguous outside name asks for --path", () => {
+  const ws = makeWorkspace();
+  for (const dir of ["a", "b"]) git(path.join(ws.root, "api"), "worktree", "add", "-q", "--detach", path.join(ws.base, dir, "same"));
+  assert.throws(() => removeWorktree({ root: ws.root, name: "same" }), /matches 2 worktrees.*pass --path/);
+  assert.throws(() => removeWorktree({ root: ws.root, name: "nope" }), /not found/);
+});
+
 test("list: merge ladder against a bare remote (merged, squash by trees, patches after main moved on, grep, not merged, unpushed)", async () => {
   const ws = makeWorkspace();
   const seed = ws.remotes.api.seed;

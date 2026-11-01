@@ -19,7 +19,7 @@ Everything deterministic is one script; use it rather than ad-hoc git commands.
 W="${CLAUDE_PLUGIN_ROOT}/scripts/worktree.mjs"
 node "$W" create --name <name> --repos <a,b> [--branch <b>] [--ticket <id>] [--tracker <kind>] [--native] [--root <ws>] [--no-install] [--json]
 node "$W" list   [--root <ws>] [--json] [--no-fetch] [--no-pr]
-node "$W" remove --name <name> [--force] [--delete-remote-branches] [--root <ws>] [--json]
+node "$W" remove --name <name> | --path <worktree> [--force] [--delete-remote-branches] [--root <ws>] [--json]
 node "$W" sync   [--path <worktree>] [--json]
 ```
 
@@ -95,6 +95,7 @@ Any other name (`[A-Za-z0-9_.-]+`): ask which repos (multiSelect, unless `--repo
    - **Missing repo**: `| <repo> | _(missing)_ | — | — | — |`.
    - **No ticket**: leave out the tracker line.
    - **`native: true`**: add "(git worktree)" after the repo name.
+   - **`outside: true`**: a native git worktree outside `worktrees.dir` that mirrors no workspace layout, e.g. a coding agent's session worktree (Claude Code's `.claude/worktrees/<name>`). The workspace folder's own git worktrees count when it is a repo. Head the block `## Git worktree: <name>` and leave out the tracker line unless it has a ticket.
    - **vs main**: use the first rule that matches (`<mainRef>` is e.g. `origin/main`; deltas are `+aheadOfMain`/`-behindMain`):
      1. `unknown`: `merged === null` (no base ref found).
      2. `no commits yet (= <mainRef>)`: `merged` and ahead = behind = 0.
@@ -114,7 +115,7 @@ Any other name (`[A-Za-z0-9_.-]+`): ask which repos (multiSelect, unless `--repo
 
 ## Remove (`/worktree --remove <name>`)
 
-1. `node "$W" remove --name <name>`. It refuses (exit 1, details on stderr) when any repo has uncommitted changes, stashes or unpushed commits (including commits on a branch with no upstream that are on no remote), and when it finds a checkout git can't read (a broken gitdir link, a corrupt repo, dubious ownership): it can't prove those are safe. A folder without `.worktree.json` is scanned for checkouts (the source workspace's repo paths, then three levels down); if none can be inspected and the folder isn't empty, it refuses without `--force` rather than guess.
+1. `node "$W" remove --name <name>`. The name is a folder in `worktrees.dir`, else an `outside` worktree with that name; when two outside ones share it, it asks for `--path <worktree>` (which only accepts a worktree `list` finds). It refuses (exit 1, details on stderr) when any repo has uncommitted changes, stashes or unpushed commits (including commits on a branch with no upstream that are on no remote), and when it finds a checkout git can't read (a broken gitdir link, a corrupt repo, dubious ownership): it can't prove those are safe. A folder without `.worktree.json` is scanned for checkouts (the source workspace's repo paths, then three levels down); if none can be inspected and the folder isn't empty, it refuses without `--force` rather than guess.
 2. If it refused, show the details and ask with `AskUserQuestion` ("Yes, remove it" / "No, keep it"). Only on an explicit yes, re-run with `--force`.
 3. It removes native repos with `git worktree remove` + `prune`, frees the port slot, and deletes the folder with retries. If the folder is locked (Windows: a shell, editor, dev server or build server inside it), it says so. Tell the user to `cd` out or close the process, then delete the folder.
 
@@ -132,14 +133,16 @@ Removes only worktrees that are safe by **both** gates. Git alone can lie (merge
    `squashMergedByGrep` alone is **not** safe, and neither is `prMergedStale` (commits after the merged PR never shipped).
 2. **Tracker shipping-ready**: the ticket's state is in `issues.doneStates` (default `["Done"]`, case-insensitive). For GitHub Issues, "closed" also counts.
 
+   Exception: an `outside` worktree with no ticket id (from its metadata, name or branch) has no ticket to wait on, so git-safe alone qualifies it. A session might still be running in one: the preview marks them and the confirmation covers them by name.
+
 Procedure:
 
 1. `list --json`.
-2. Classify every worktree. Skip without the tracker call: no metadata, or no ticket id.
+2. Classify every worktree. Skip without the tracker call: no ticket id (unless `outside`), or no metadata (unless `outside`).
 3. Fetch every remaining ticket's state in parallel.
-4. Show a dry-run preview: `### Eligible for removal (N)` (Worktree | State | Notes) and `### Skipped (M)` (Worktree | Reason), each skipped worktree with its **first** failure. Nothing eligible → say `Nothing to purge.` and stop.
+4. Show a dry-run preview: `### Eligible for removal (N)` (Worktree | State | Notes; an outside one's State is `git worktree, no ticket` and its Notes give the path) and `### Skipped (M)` (Worktree | Reason), each skipped worktree with its **first** failure. Nothing eligible → say `Nothing to purge.` and stop.
 5. Confirm with `AskUserQuestion` (`Remove N worktree(s): <names>?`).
-6. On yes, run `remove --name <n> --force --delete-remote-branches` for each, in parallel.
+6. On yes, run `remove --name <n> --force --delete-remote-branches` for each, in parallel (`--path <path>` instead of `--name` for an `outside` one, so a shared name can't pick the wrong one).
 7. Report `Removed: <names>. Skipped: <count>.` plus any failures.
 
 | Cause | Reason string |

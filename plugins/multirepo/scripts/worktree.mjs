@@ -5,7 +5,7 @@
  *   create --name <name> [--repos a,b] [--branch <b>] [--ticket <id>] [--tracker <kind>]
  *          [--native] [--root <workspace>] [--no-install] [--json]
  *   list   [--root <workspace>] [--json] [--no-fetch] [--no-pr]
- *   remove --name <name> [--force] [--delete-remote-branches] [--root <workspace>] [--json]
+ *   remove --name <name> | --path <worktree> [--force] [--delete-remote-branches] [--root <workspace>] [--json]
  *   sync   [--path <worktree>] [--json]
  *
  * A worktree is <workspace>/<worktrees.dir>/<name>/ (default dir "worktrees"), holding
@@ -621,7 +621,10 @@ export function parseWorktreeList(text) {
  * The worktrees of a main workspace, without git status: every folder under
  * worktrees.dir (with or without .worktree.json), plus native git worktrees of the
  * main repos, grouped into the workspace folder they mirror (<ws>/<relativePath>).
- * Each: { name, path, hasMetadata, metadata, source, repos: [{ rel, path, native, mainRepo }] }.
+ * A native worktree that mirrors nothing and sits outside worktrees.dir (e.g. a
+ * coding agent's session worktree) is its own entry, `outside: true`. The workspace
+ * folder counts as a main repo too when it is a git repo missing from repos.json.
+ * Each: { name, path, hasMetadata, metadata, source, outside, repos: [{ rel, path, native, mainRepo }] }.
  */
 export function discoverWorktrees(root, settings = worktreeSettings(root)) {
   const entries = [];
@@ -630,7 +633,7 @@ export function discoverWorktrees(root, settings = worktreeSettings(root)) {
     let e = find(p);
     if (!e) {
       const meta = normalizeMeta(readJson(path.join(p, ".worktree.json")));
-      e = { name: path.basename(p), path: p, hasMetadata: !!meta, metadata: meta, source, repos: [] };
+      e = { name: path.basename(p), path: p, hasMetadata: !!meta, metadata: meta, source, outside: !isInside(p, settings.dir), repos: [] };
       entries.push(e);
     }
     return e;
@@ -651,7 +654,11 @@ export function discoverWorktrees(root, settings = worktreeSettings(root)) {
     }
   }
 
-  for (const repo of listRepos(root)) {
+  const mainRepos = listRepos(root);
+  if (isRepoTop(root) && !mainRepos.some((r) => samePath(r.path, root))) {
+    mainRepos.push({ name: path.basename(root), relativePath: ".", path: root });
+  }
+  for (const repo of mainRepos) {
     if (!hasGit(repo.path)) continue;
     const r = gitRun(repo.path, ["worktree", "list", "--porcelain"], { timeout: 10000 });
     if (!r.ok) continue;
@@ -666,7 +673,7 @@ export function discoverWorktrees(root, settings = worktreeSettings(root)) {
         if (caseless ? tail.toLowerCase() === repo.relativePath.toLowerCase() : tail === repo.relativePath) wsPath = candidate;
         else if (isInside(wt.path, settings.dir) && !samePath(wt.path, settings.dir)) {
           wsPath = path.join(settings.dir, path.relative(realOr(settings.dir), realOr(wt.path)).split(path.sep)[0]);
-        }
+        } else wsPath = wt.path;
       }
       if (!wsPath || samePath(wsPath, root)) continue;
       const e = ensure(wsPath, "git");
@@ -890,7 +897,7 @@ export async function gatherWorktrees(root, { fetch = true, pr = true } = {}) {
   }
 
   const result = entries.map((e) => ({
-    name: e.name, path: slash(e.path), hasMetadata: e.hasMetadata, metadata: e.metadata, source: e.source, repos: [],
+    name: e.name, path: slash(e.path), hasMetadata: e.hasMetadata, metadata: e.metadata, source: e.source, outside: e.outside, repos: [],
   }));
   const config = readWorkspaceConfig(root);
   for (const p of plan) {
@@ -958,7 +965,8 @@ export function renderList(worktrees) {
   for (const wt of worktrees) {
     out.push("", `Worktree: ${wt.name}`, `  Path:    ${wt.path}`);
     const m = wt.metadata;
-    if (!wt.hasMetadata) out.push("  (no .worktree.json)");
+    if (wt.outside) out.push("  (git worktree outside the worktrees folder)");
+    else if (!wt.hasMetadata) out.push("  (no .worktree.json)");
     if (m) {
       if (m.created) out.push(`  Created: ${m.created}`);
       if (m.ticketId) out.push(`  Ticket:  ${m.ticketId}${m.tracker ? ` (${m.tracker})` : ""}`);
@@ -1038,19 +1046,41 @@ export function unsavedWork(repos) {
 }
 
 /**
+ * The worktree remove acts on: --path (must be a discovered worktree), else
+ * <worktrees.dir>/<name>, else the one native worktree outside it with that name.
+ * Returns { entry, wtPath } (entry null for an undiscovered folder in worktrees.dir).
+ */
+function resolveRemoveTarget(root, settings, name, wantedPath) {
+  const discovered = discoverWorktrees(root, settings);
+  if (typeof wantedPath === "string" && wantedPath) {
+    const entry = discovered.find((e) => samePath(e.path, path.resolve(wantedPath)));
+    if (!entry) throw new Error(`${slash(path.resolve(wantedPath))} is not a worktree of ${slash(root)}`);
+    return { entry, wtPath: entry.path };
+  }
+  const inDir = path.join(settings.dir, name);
+  const entry = discovered.find((e) => samePath(e.path, inDir));
+  if (entry || fs.existsSync(inDir)) return { entry: entry || null, wtPath: inDir };
+  const named = discovered.filter((e) => e.outside && e.name === name);
+  if (named.length > 1) throw new Error(`'${name}' matches ${named.length} worktrees (${named.map((e) => slash(e.path)).join(", ")}): pass --path`);
+  if (!named.length) throw new Error(`Worktree '${name}' not found at ${slash(inDir)}`);
+  return { entry: named[0], wtPath: named[0].path };
+}
+
+/**
  * Removes a worktree: refuses on unsaved work unless force; optionally deletes the
  * remote branches; `git worktree remove` + prune for native repos; frees the port
  * slot; deletes the folder (with retries for Windows file locks).
  */
 export function removeWorktree(opts, log = () => {}) {
   const root = mainRoot(path.resolve(opts.root || findRoot(process.cwd())));
-  const name = opts.name;
-  if (!name || name === true) throw new Error("--name is required");
-  if (!NAME_RE.test(name) || /^\.+$/.test(name)) throw new Error(`Invalid name '${name}'`);
+  const hasPath = typeof opts.path === "string" && opts.path;
+  let name = opts.name;
+  if (!hasPath && (!name || name === true)) throw new Error("--name or --path is required");
+  if (!hasPath && (!NAME_RE.test(name) || /^\.+$/.test(name))) throw new Error(`Invalid name '${name}'`);
   const settings = worktreeSettings(root);
-  const wtPath = path.join(settings.dir, name);
-  const entry = discoverWorktrees(root, settings).find((e) => samePath(e.path, wtPath));
-  if (!entry && !fs.existsSync(wtPath)) throw new Error(`Worktree '${name}' not found at ${slash(wtPath)}`);
+  const { entry, wtPath } = resolveRemoveTarget(root, settings, name, opts.path);
+  if (hasPath) name = entry.name;
+  if (isInside(root, wtPath)) throw new Error(`Refusing to remove ${slash(wtPath)}: it holds the workspace`);
   const force = opts.force === true;
   const repos = entry ? [...entry.repos] : [];
   if (!entry || !entry.hasMetadata) {
@@ -1106,7 +1136,8 @@ export function removeWorktree(opts, log = () => {}) {
   }
 
   let portsFreed = [];
-  try { portsFreed = releasePorts({ portsFile: settings.portsFile, wtPath, name, wtDir: settings.dir }); } catch (e) { log(`ports: ${e.message}`); }
+  // By name only for worktrees.dir entries: an outside worktree's name may be another's.
+  try { portsFreed = releasePorts({ portsFile: settings.portsFile, wtPath, name: entry?.outside ? null : name, wtDir: settings.dir }); } catch (e) { log(`ports: ${e.message}`); }
 
   let removed = true;
   let error = null;
@@ -1141,7 +1172,7 @@ export function syncWorktree(opts = {}) {
 const USAGE = `Usage: node worktree.mjs <create|list|remove|sync> [options]
   create --name <name> --repos <a,b> [--branch <b>] [--ticket <id>] [--tracker <kind>] [--native] [--root <ws>] [--no-install] [--json]
   list   [--root <ws>] [--json] [--no-fetch] [--no-pr]
-  remove --name <name> [--force] [--delete-remote-branches] [--root <ws>] [--json]
+  remove --name <name> | --path <worktree> [--force] [--delete-remote-branches] [--root <ws>] [--json]
   sync   [--path <worktree>] [--json]`;
 
 async function main(argv) {
@@ -1180,7 +1211,7 @@ async function main(argv) {
   }
   if (command === "remove") {
     try {
-      const r = removeWorktree({ ...args, root, deleteRemoteBranches: args["delete-remote-branches"] === true }, log);
+      const r = removeWorktree({ ...args, root, path: typeof args.path === "string" ? args.path : undefined, deleteRemoteBranches: args["delete-remote-branches"] === true }, log);
       if (json) print(JSON.stringify(r, null, 2));
       else {
         print(r.removed ? `Worktree '${r.name}' removed.` : `Worktree '${r.name}' could not be fully deleted: ${r.error}`);
