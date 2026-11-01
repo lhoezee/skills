@@ -663,19 +663,14 @@ export function discoverWorktrees(root, settings = worktreeSettings(root)) {
     const r = gitRun(repo.path, ["worktree", "list", "--porcelain"], { timeout: 10000 });
     if (!r.ok) continue;
     for (const wt of parseWorktreeList(r.out).slice(1)) {
-      if (wt.bare || wt.prunable || !fs.existsSync(wt.path) || samePath(wt.path, repo.path)) continue;
-      let wsPath = null;
-      if (repo.relativePath === ".") wsPath = wt.path;
-      else {
-        const parts = repo.relativePath.split("/");
-        const candidate = path.resolve(wt.path, ...parts.map(() => ".."));
-        const tail = slash(path.relative(candidate, wt.path));
-        if (caseless ? tail.toLowerCase() === repo.relativePath.toLowerCase() : tail === repo.relativePath) wsPath = candidate;
-        else if (isInside(wt.path, settings.dir) && !samePath(wt.path, settings.dir)) {
-          wsPath = path.join(settings.dir, path.relative(realOr(settings.dir), realOr(wt.path)).split(path.sep)[0]);
-        } else wsPath = wt.path;
-      }
-      if (!wsPath || samePath(wsPath, root)) continue;
+      // A configured main checkout can itself be a linked worktree of another one: never an entry.
+      if (wt.bare || wt.prunable || !fs.existsSync(wt.path) || mainRepos.some((m) => samePath(wt.path, m.path))) continue;
+      // In worktrees.dir: grouped into its <dir>/<name> folder. Anywhere else: the exact
+      // checkout only, never a parent folder that may hold unrelated files.
+      const wsPath = isInside(wt.path, settings.dir) && !samePath(wt.path, settings.dir)
+        ? path.join(settings.dir, path.relative(realOr(settings.dir), realOr(wt.path)).split(path.sep)[0])
+        : wt.path;
+      if (samePath(wsPath, root) || isInside(root, wsPath)) continue;
       const e = ensure(wsPath, "git");
       const existing = e.repos.find((x) => samePath(x.path, wt.path));
       if (existing) { existing.native = true; existing.mainRepo = repo.path; }
@@ -864,21 +859,28 @@ export function collectRepoStatus(repoPath, { base, ticketId = null } = {}) {
   return info;
 }
 
+/**
+ * A checkout's base branch: its repos.json defaultBranch, found through its main repo
+ * when it is a native worktree (an outside one's rel is "."), else by relativePath;
+ * without one, the repo's own default.
+ */
+function baseBranchOf(root, r, mainRepos = listRepos(root)) {
+  const known = (r.mainRepo && mainRepos.find((m) => samePath(m.path, r.mainRepo))) ||
+    mainRepos.find((m) => m.relativePath === r.rel) || readReposJson(root).find((m) => m.relativePath === r.rel || m.name === r.rel);
+  return defaultBranch(r.path, known && known.defaultBranch);
+}
+
 /** discoverWorktrees + per-repo status, after a parallel fetch; gh only where git is inconclusive. */
 export async function gatherWorktrees(root, { fetch = true, pr = true } = {}) {
   const settings = worktreeSettings(root);
   const mainRepos = listRepos(root);
-  const baseFor = (rel, repoPath) => {
-    const known = mainRepos.find((r) => r.relativePath === rel) || readReposJson(root).find((r) => r.relativePath === rel || r.name === rel);
-    return defaultBranch(repoPath, known && known.defaultBranch);
-  };
   const entries = discoverWorktrees(root, settings);
 
   const plan = [];
   for (const e of entries) {
     for (const r of e.repos) {
       const exists = fs.existsSync(path.join(r.path, ".git"));
-      plan.push({ e, r, exists, base: exists ? baseFor(r.rel, r.path) : null });
+      plan.push({ e, r, exists, base: exists ? baseBranchOf(root, r, mainRepos) : null });
     }
   }
 
@@ -1108,7 +1110,7 @@ export function removeWorktree(opts, log = () => {}) {
     for (const r of repos) {
       if (!fs.existsSync(path.join(r.path, ".git"))) continue;
       const branch = git(r.path, ["branch", "--show-current"]) || entry?.metadata?.branch;
-      const base = defaultBranch(r.path, readReposJson(root).find((x) => x.relativePath === r.rel)?.defaultBranch);
+      const base = baseBranchOf(root, r);
       if (!branch || branch === base || ["main", "master"].includes(branch)) continue;
       if (!refExists(r.path, `refs/remotes/origin/${branch}`)) { remote.push({ repo: r.rel, branch, status: "no remote branch" }); continue; }
       const res = gitRun(r.path, ["push", "origin", "--delete", branch], { timeout: 60000 });

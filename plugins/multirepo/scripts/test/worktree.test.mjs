@@ -204,6 +204,42 @@ test("list + remove: native worktrees outside worktrees/ (the workspace repo's o
   assert.deepEqual(await gatherWorktrees(ws.root, { fetch: false, pr: false }), []);
 });
 
+test("outside worktrees: a configured repo that is a linked worktree is never an entry", async () => {
+  const ws = makeWorkspace();
+  git(path.join(ws.root, "api"), "worktree", "add", "-q", "--detach", path.join(ws.root, "api-release"));
+  write(path.join(ws.root, "repos.json"), { repos: [{ name: "api", relativePath: "api" }, { name: "api-release", relativePath: "api-release" }] });
+  assert.deepEqual(await gatherWorktrees(ws.root, { fetch: false, pr: false }), []);
+  assert.throws(() => removeWorktree({ root: ws.root, name: "api-release" }), /not found/);
+  assert.ok(fs.existsSync(path.join(ws.root, "api-release", "README.md")));
+});
+
+test("outside worktrees: the exact checkout, never its parent folder, even when it mirrors the layout", async () => {
+  const ws = makeWorkspace();
+  const scratch = path.join(ws.base, "scratch");
+  write(path.join(scratch, "unrelated.txt"), "keep\n");
+  git(path.join(ws.root, "api"), "worktree", "add", "-q", "--detach", path.join(scratch, "api"));
+  const [wt] = await gatherWorktrees(ws.root, { fetch: false, pr: false });
+  assert.equal(path.resolve(wt.path), path.join(scratch, "api"));
+  assert.equal(removeWorktree({ root: ws.root, name: "api" }).removed, true);
+  assert.ok(fs.existsSync(path.join(scratch, "unrelated.txt")));
+});
+
+test("outside worktrees keep their repo's configured defaultBranch (status and remote-branch deletion)", async () => {
+  const ws = makeWorkspace();
+  git(ws.remotes.api.seed, "push", "-q", "origin", "HEAD:production");
+  write(path.join(ws.root, "repos.json"), { repos: [{ name: "api", relativePath: "api", defaultBranch: "production" }] });
+  const main = path.join(ws.root, "api");
+  git(main, "fetch", "-q", "origin");
+  const prod = path.join(ws.base, "elsewhere", "prod");
+  git(main, "worktree", "add", "-q", "--track", "-b", "production", prod, "origin/production");
+  const [wt] = await gatherWorktrees(ws.root, { fetch: false, pr: false });
+  assert.equal(wt.repos[0].base, "production");
+  const out = removeWorktree({ root: ws.root, path: prod, deleteRemoteBranches: true });
+  assert.equal(out.removed, true);
+  assert.deepEqual(out.remoteBranches, []); // the default branch is never deleted
+  assert.match(git(ws.remotes.api.bare, "branch", "--list", "production"), /production/);
+});
+
 test("remove: an ambiguous outside name asks for --path", () => {
   const ws = makeWorkspace();
   for (const dir of ["a", "b"]) git(path.join(ws.root, "api"), "worktree", "add", "-q", "--detach", path.join(ws.base, dir, "same"));

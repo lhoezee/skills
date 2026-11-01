@@ -95,7 +95,7 @@ Any other name (`[A-Za-z0-9_.-]+`): ask which repos (multiSelect, unless `--repo
    - **Missing repo**: `| <repo> | _(missing)_ | — | — | — |`.
    - **No ticket**: leave out the tracker line.
    - **`native: true`**: add "(git worktree)" after the repo name.
-   - **`outside: true`**: a native git worktree outside `worktrees.dir` that mirrors no workspace layout, e.g. a coding agent's session worktree (Claude Code's `.claude/worktrees/<name>`). The workspace folder's own git worktrees count when it is a repo. Head the block `## Git worktree: <name>` and leave out the tracker line unless it has a ticket.
+   - **`outside: true`**: a native git worktree outside `worktrees.dir`, listed as that exact checkout (never its parent folder; a configured repo that is itself a linked worktree never counts), e.g. a coding agent's session worktree (Claude Code's `.claude/worktrees/<name>`). The workspace folder's own git worktrees count when it is a repo. Head the block `## Git worktree: <name>` and leave out the tracker line unless it has a ticket.
    - **vs main**: use the first rule that matches (`<mainRef>` is e.g. `origin/main`; deltas are `+aheadOfMain`/`-behindMain`):
      1. `unknown`: `merged === null` (no base ref found).
      2. `no commits yet (= <mainRef>)`: `merged` and ahead = behind = 0.
