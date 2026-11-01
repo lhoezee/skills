@@ -99,6 +99,37 @@ export function lineLanes(columns: FactoryColumn[], items: FactoryItem[]): { lan
   return { lanes, bottleneck };
 }
 
+/** Which items the Factory page shows: the ones still going (the default), waiting on someone, finished (done or stopped short), or all. */
+export type FactoryShow = 'active' | 'waiting' | 'finished' | 'all';
+export const FACTORY_SHOWS: FactoryShow[] = ['active', 'waiting', 'finished', 'all'];
+
+/** Done, or stopped short (rejected, overridden, aborted): nothing more happens to it. */
+export function finished(it: FactoryItem): boolean { return it.state === 'done' || !!it.error; }
+
+function shows(it: FactoryItem, show: FactoryShow): boolean {
+  if (show === 'all') return true;
+  if (show === 'finished') return finished(it);
+  if (show === 'waiting') return !finished(it) && it.state === 'waiting';
+  return !finished(it);
+}
+
+/**
+ * The items a filter shows, matching `text` in the ticket id or title (any case). `keep` (a ticket
+ * linked to with ?ticket=) shows whatever the filter says, so a link never lands on nothing.
+ */
+export function filterItems(items: FactoryItem[], show: FactoryShow, text = '', keep: string | null = null): FactoryItem[] {
+  const q = text.trim().toLowerCase();
+  return items.filter((it) => it.ticket === keep
+    || (shows(it, show) && (!q || it.ticket.toLowerCase().includes(q) || (it.title || '').toLowerCase().includes(q))));
+}
+
+/** How many items each filter shows (for its button). */
+export function showCounts(items: FactoryItem[]): Record<FactoryShow, number> {
+  const out = { active: 0, waiting: 0, finished: 0, all: items.length };
+  for (const it of items) for (const s of ['active', 'waiting', 'finished'] as const) if (shows(it, s)) out[s]++;
+  return out;
+}
+
 /** The throughput strip's figures, in reading order (leaving out what there's no data for yet). */
 export function metricLine(m: FactoryMetrics): { label: string; value: string; title: string }[] {
   const pct = (x: { rate: number; n: number }) => `${Math.round(x.rate * 100)}%`;

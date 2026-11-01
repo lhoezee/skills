@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { FactoryConfig, FactoryPresetPatch } from '../../../../../shared/api';
-import { approverVerdict, checkMark, duration, gateName, guideLink, lineLanes, metricLine, matchingPreset, specLevel, numOrNull, pipelineSteps, splitLines, splitList, withPreset } from './factory.util';
+import { approverVerdict, checkMark, duration, filterItems, gateName, guideLink, lineLanes, showCounts, metricLine, matchingPreset, specLevel, numOrNull, pipelineSteps, splitLines, splitList, withPreset } from './factory.util';
 
 const STAGES = ['align', 'plan', 'build', 'review', 'security', 'qa', 'guide', 'pr', 'approve', 'merge'] as const;
 
@@ -131,5 +131,23 @@ describe('the Line view and the throughput strip', () => {
     expect(metricLine(none).map((m) => m.label)).toEqual(['done this week']);
     const all = metricLine({ done7d: 3, leadTimeHours: 60, firstPassReview: { rate: 0.75, n: 4 }, autoApproved: { rate: 0.5, n: 2 }, costPerMergedUsd: 4.5, merged: 2 });
     expect(all.map((m) => m.value)).toEqual(['3', '3d', '75%', '50%', '$4.50']);
+  });
+});
+
+describe('filtering the Factory page', () => {
+  const item = (ticket: string, state: string, title: string | null = null, error: string | null = null) => ({ ticket, state, title, error }) as any;
+  const items = [item('ENG-1', 'moving', 'Patch NuGet advisories'), item('ENG-2', 'waiting'), item('ENG-3', 'done'), item('ENG-4', 'failing', null, 'Spec gate rejected'), item('ENG-5', 'failing')];
+  const ids = (xs: any[]) => xs.map((x) => x.ticket);
+  it('shows what is still going by default, and done or stopped items as finished', () => {
+    expect(ids(filterItems(items, 'active'))).toEqual(['ENG-1', 'ENG-2', 'ENG-5']);
+    expect(ids(filterItems(items, 'waiting'))).toEqual(['ENG-2']);
+    expect(ids(filterItems(items, 'finished'))).toEqual(['ENG-3', 'ENG-4']);
+    expect(ids(filterItems(items, 'all'))).toHaveLength(5);
+    expect(showCounts(items)).toEqual({ active: 3, waiting: 1, finished: 2, all: 5 });
+  });
+  it('matches text in the id or title, and always keeps a linked ticket', () => {
+    expect(ids(filterItems(items, 'all', ' nuget '))).toEqual(['ENG-1']);
+    expect(ids(filterItems(items, 'all', 'eng-2'))).toEqual(['ENG-2']);
+    expect(ids(filterItems(items, 'active', '', 'ENG-3'))).toEqual(['ENG-1', 'ENG-2', 'ENG-3', 'ENG-5']);
   });
 });
