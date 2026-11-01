@@ -8,10 +8,12 @@ import { ToastService } from '../../core/toast.service';
 import { relTime } from '../../core/util';
 import { PageHeaderComponent } from '../../shared/page-header.component';
 import { FactoryTicketsComponent } from './factory-tickets.component';
-import { guideLink, lineLanes, metricLine, specLevel } from './factory.util';
+import { type FactoryShow, FACTORY_SHOWS, filterItems, guideLink, lineLanes, metricLine, showCounts, specLevel } from './factory.util';
 
 type View = 'tickets' | 'board' | 'line';
 const VIEW_KEY = 'natterjack.factory.view';
+const SHOW_KEY = 'natterjack.factory.show';
+const SHOW_LABELS: Record<FactoryShow, string> = { active: 'Active', waiting: 'Waiting', finished: 'Finished', all: 'All' };
 
 const MARK: Record<FactoryStepStatus, string> = { done: '✓', running: '●', failed: '✕', pending: '○', skipped: '–' };
 const STATE: Record<FactoryItem['state'], { label: string; cls: string }> = {
@@ -28,7 +30,8 @@ const STATE: Record<FactoryItem['state'], { label: string; cls: string }> = {
  * each step; Board, a card per item in the column of the first stage or gate it hasn't finished;
  * and Line, a lane per stage and gate showing what's being worked on and what waits there, with the
  * bottleneck marked. Columns come from the policy (Factory policy page); items from what pipelines
- * report. The throughput strip and Pull work in (the policy's intake, up to the WIP limit) sit on top.
+ * report. The throughput strip and Pull work in (the policy's intake, up to the WIP limit) sit on top,
+ * then a filter for every view (?show=, remembered: Active by default, so finished items don't pile up) and a search.
  */
 @Component({
   selector: 'dash-factory',
@@ -80,6 +83,18 @@ const STATE: Record<FactoryItem['state'], { label: string; cls: string }> = {
         </div>
       }
 
+      @if (b.items.length) {
+        <div class="filters">
+          <div class="seg" role="group" aria-label="Show">
+            @for (s of shows; track s) {
+              <button type="button" [class.on]="show() === s" [attr.aria-pressed]="show() === s" (click)="setShow(s)">{{ showLabel(s) }} <span class="n">{{ counts()[s] }}</span></button>
+            }
+          </div>
+          <input type="search" [value]="search()" (input)="search.set($any($event.target).value)" placeholder="Find a ticket" aria-label="Find a ticket by id or title" />
+          @if (!items().length) { <span class="faint">Nothing {{ search().trim() ? 'matches' : show() === 'active' ? 'going on right now' : 'here' }}.</span> }
+        </div>
+      }
+
       @if (!b.items.length) {
         <div class="panel empty-board">
           <p><b>Nothing in the factory yet.</b></p>
@@ -88,7 +103,7 @@ const STATE: Record<FactoryItem['state'], { label: string; cls: string }> = {
       }
 
       @if (view() === 'tickets') {
-        <dash-factory-tickets [items]="b.items" [canDecide]="b.canDecide" [focus]="focus()" />
+        <dash-factory-tickets [items]="items()" [canDecide]="b.canDecide" [focus]="focus()" />
       } @else if (view() === 'line') {
         <div class="line" role="list" aria-label="The line">
           @for (l of lanes().lanes; track l.id) {
@@ -186,6 +201,9 @@ const STATE: Record<FactoryItem['state'], { label: string; cls: string }> = {
     .metrics { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 12.5px; color: var(--ink-soft); margin-bottom: 10px; }
     .metrics b { color: var(--ink); font-family: var(--font-mono); }
     .intake { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-bottom: 12px; font-size: 12.5px; }
+    .filters { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-bottom: 12px; font-size: 12.5px; }
+    .filters .n { font-family: var(--font-mono); opacity: .7; margin-left: 2px; }
+    .filters input { font: inherit; font-size: 12.5px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px; min-width: 180px; }
     .line { display: flex; flex-direction: column; gap: 6px; }
     .lane { display: grid; grid-template-columns: 160px 1fr; gap: 10px; align-items: center; background: var(--paper-2); border-radius: 8px; padding: 6px 10px; }
     .lane.gate { background: transparent; border: 1px dashed var(--line); }
@@ -217,13 +235,24 @@ export class FactoryComponent implements OnInit {
 
   /** The live topic once it has sent the board, else what this page loaded. */
   readonly board = computed(() => this.data.factory() || this.loaded());
+  /** ?show=, else the one picked last in this browser, else Active. */
+  readonly show = computed<FactoryShow>(() => {
+    const q = this.query()?.get('show') as FactoryShow;
+    if (FACTORY_SHOWS.includes(q)) return q;
+    try { const v = localStorage.getItem(SHOW_KEY) as FactoryShow; return FACTORY_SHOWS.includes(v) ? v : 'active'; } catch { return 'active'; }
+  });
+  readonly shows = FACTORY_SHOWS;
+  readonly search = signal('');
+  readonly counts = computed(() => showCounts(this.board()?.items || []));
+  /** The items every view shows: the filter's and the search's, plus a ticket linked to with ?ticket=. */
+  readonly items = computed(() => filterItems(this.board()?.items || [], this.show(), this.search(), this.focus()));
   readonly byColumn = computed(() => {
     const out: Record<string, FactoryItem[]> = {};
-    for (const it of this.board()?.items || []) (out[it.column] ||= []).push(it);
+    for (const it of this.items()) (out[it.column] ||= []).push(it);
     return out;
   });
 
-  readonly lanes = computed(() => lineLanes(this.board()?.columns || [], this.board()?.items || []));
+  readonly lanes = computed(() => lineLanes(this.board()?.columns || [], this.items()));
   readonly metrics = computed(() => { const b = this.board(); return b ? metricLine(b.metrics) : []; });
   readonly intake = signal<FactoryIntake | null>(null);
   readonly pulling = signal(false);
@@ -258,6 +287,12 @@ export class FactoryComponent implements OnInit {
     try { localStorage.setItem(VIEW_KEY, v); } catch { /* private window */ }
     this.router.navigate([], { queryParams: { view: v }, queryParamsHandling: 'merge', replaceUrl: true });
   }
+
+  setShow(s: FactoryShow): void {
+    try { localStorage.setItem(SHOW_KEY, s); } catch { /* private window */ }
+    this.router.navigate([], { queryParams: { show: s }, queryParamsHandling: 'merge', replaceUrl: true });
+  }
+  showLabel(s: FactoryShow): string { return SHOW_LABELS[s]; }
 
   state(it: FactoryItem) { return STATE[it.state]; }
   mark(s: FactoryStepStatus): string { return MARK[s]; }
