@@ -168,6 +168,157 @@ test("list: a native git worktree without .worktree.json is grouped by its folde
   assert.deepEqual(wt.repos.map((r) => [r.repo, r.native, r.branch]), [["api", true, "fix/ENG-9"]]);
 });
 
+test("list + remove: native worktrees outside worktrees/ (the workspace repo's own, and a main repo's)", async () => {
+  const ws = makeWorkspace();
+  // The workspace folder is itself a repo (not in repos.json), as when its config is versioned.
+  git(ws.root, "init", "-q", "-b", "main");
+  commit(ws.root, ".gitignore", "/api/\n/worktrees/\n/.claude/worktrees/\n", "ws init");
+  const wsRemote = path.join(ws.base, "remotes", "ws.git");
+  fs.mkdirSync(wsRemote, { recursive: true });
+  git(wsRemote, "init", "-q", "--bare", "-b", "main");
+  git(ws.root, "remote", "add", "origin", wsRemote);
+  git(ws.root, "push", "-q", "-u", "origin", "main");
+  const session = path.join(ws.root, ".claude", "worktrees", "session-a1");
+  git(ws.root, "worktree", "add", "-q", "--detach", session);
+  const elsewhere = path.join(ws.base, "elsewhere", "api-spike");
+  git(path.join(ws.root, "api"), "worktree", "add", "-q", "-b", "spike", elsewhere);
+
+  const wts = await gatherWorktrees(ws.root, { fetch: false, pr: false });
+  const byName = Object.fromEntries(wts.map((w) => [w.name, w]));
+  assert.deepEqual(Object.keys(byName).sort(), ["api-spike", "session-a1"]);
+  assert.equal(byName["session-a1"].outside, true);
+  assert.deepEqual(byName["session-a1"].repos.map((r) => [r.repo, r.native, r.branch, r.merged]), [[".", true, "(detached)", true]]);
+  assert.deepEqual(byName["api-spike"].repos.map((r) => [r.repo, r.native, r.branch]), [[".", true, "spike"]]);
+
+  // Unsaved work still blocks; then removed by name although it's outside worktrees/.
+  write(path.join(session, "scratch.txt"), "x\n");
+  assert.throws(() => removeWorktree({ root: ws.root, name: "session-a1" }), (e) => e.unsaved?.some((u) => u.type === "uncommitted"));
+  fs.rmSync(path.join(session, "scratch.txt"));
+  assert.equal(removeWorktree({ root: ws.root, name: "session-a1" }).removed, true);
+  assert.equal(fs.existsSync(session), false);
+  assert.doesNotMatch(git(ws.root, "worktree", "list"), /session-a1/);
+
+  assert.throws(() => removeWorktree({ root: ws.root, path: path.join(ws.base, "elsewhere") }), /is not a worktree of/);
+  assert.equal(removeWorktree({ root: ws.root, path: elsewhere }).removed, true);
+  assert.doesNotMatch(git(path.join(ws.root, "api"), "worktree", "list"), /api-spike/);
+  assert.deepEqual(await gatherWorktrees(ws.root, { fetch: false, pr: false }), []);
+});
+
+test("outside worktrees: a configured repo that is a linked worktree is never an entry", async () => {
+  const ws = makeWorkspace();
+  git(path.join(ws.root, "api"), "worktree", "add", "-q", "--detach", path.join(ws.root, "api-release"));
+  write(path.join(ws.root, "repos.json"), { repos: [{ name: "api", relativePath: "api" }, { name: "api-release", relativePath: "api-release" }] });
+  assert.deepEqual(await gatherWorktrees(ws.root, { fetch: false, pr: false }), []);
+  assert.throws(() => removeWorktree({ root: ws.root, name: "api-release" }), /not found/);
+  assert.ok(fs.existsSync(path.join(ws.root, "api-release", "README.md")));
+});
+
+test("outside worktrees: the exact checkout, never its parent folder, even when it mirrors the layout", async () => {
+  const ws = makeWorkspace();
+  const scratch = path.join(ws.base, "scratch");
+  write(path.join(scratch, "unrelated.txt"), "keep\n");
+  git(path.join(ws.root, "api"), "worktree", "add", "-q", "--detach", path.join(scratch, "api"));
+  const [wt] = await gatherWorktrees(ws.root, { fetch: false, pr: false });
+  assert.equal(fs.realpathSync.native(wt.path), fs.realpathSync.native(path.join(scratch, "api")));
+  assert.equal(removeWorktree({ root: ws.root, name: "api" }).removed, true);
+  assert.ok(fs.existsSync(path.join(scratch, "unrelated.txt")));
+});
+
+test("outside worktrees keep their repo's configured defaultBranch (status and remote-branch deletion)", async () => {
+  const ws = makeWorkspace();
+  git(ws.remotes.api.seed, "push", "-q", "origin", "HEAD:production");
+  write(path.join(ws.root, "repos.json"), { repos: [{ name: "api", relativePath: "api", defaultBranch: "production" }] });
+  const main = path.join(ws.root, "api");
+  git(main, "fetch", "-q", "origin");
+  const prod = path.join(ws.base, "elsewhere", "prod");
+  git(main, "worktree", "add", "-q", "--track", "-b", "production", prod, "origin/production");
+  const [wt] = await gatherWorktrees(ws.root, { fetch: false, pr: false });
+  assert.equal(wt.repos[0].base, "production");
+  const out = removeWorktree({ root: ws.root, path: prod, deleteRemoteBranches: true });
+  assert.equal(out.removed, true);
+  assert.deepEqual(out.remoteBranches, []); // the default branch is never deleted
+  assert.match(git(ws.remotes.api.bare, "branch", "--list", "production"), /production/);
+});
+
+/** Makes the workspace folder a repo with a remote (api/ and worktrees/ ignored), as when its config is versioned. */
+function versionWorkspace(ws) {
+  git(ws.root, "init", "-q", "-b", "main");
+  commit(ws.root, ".gitignore", "/api/\n/worktrees/\n/.worktree.json\n", "ws init");
+  const bare = path.join(ws.base, "remotes", "ws.git");
+  fs.mkdirSync(bare, { recursive: true });
+  git(bare, "init", "-q", "--bare", "-b", "main");
+  git(ws.root, "remote", "add", "origin", bare);
+  git(ws.root, "push", "-q", "-u", "origin", "main");
+}
+
+test("outside worktrees: nested clones (declared or found by the scan) block removal", async () => {
+  const ws = makeWorkspace();
+  versionWorkspace(ws);
+  const sess = path.join(ws.base, "sess");
+  git(ws.root, "worktree", "add", "-q", "--detach", sess);
+  execFileSync("git", ["clone", "-q", ws.remotes.api.bare, path.join(sess, "api")], { stdio: "pipe" });
+  write(path.join(sess, "api", "wip.txt"), "x\n");
+  // No .worktree.json: list sees only the outer checkout, but remove's scan finds the clone.
+  assert.throws(() => removeWorktree({ root: ws.root, path: sess }), (e) => e.unsaved?.some((u) => u.repo === "api" && u.type === "uncommitted"));
+  // With one declaring it, list covers it too.
+  write(path.join(sess, ".worktree.json"), { name: "sess", repos: [".", "api"] });
+  const [wt] = await gatherWorktrees(ws.root, { fetch: false, pr: false });
+  assert.deepEqual(wt.repos.map((r) => [r.repo, r.uncommitted]).sort(), [[".", 0], ["api", 1]]);
+  assert.throws(() => removeWorktree({ root: ws.root, path: sess }), (e) => e.unsaved?.some((u) => u.repo === "api"));
+  assert.ok(fs.existsSync(path.join(sess, "api", "wip.txt")));
+});
+
+test("remove refuses, even with --force, a worktree that holds other worktrees", () => {
+  const ws = makeWorkspace();
+  versionWorkspace(ws);
+  const parent = path.join(ws.base, "parent");
+  git(ws.root, "worktree", "add", "-q", "--detach", parent);
+  const child = path.join(parent, ".claude", "worktrees", "child");
+  git(path.join(ws.root, "api"), "worktree", "add", "-q", "--detach", child);
+  assert.throws(() => removeWorktree({ root: ws.root, path: parent, force: true }), /holds other worktrees/);
+  assert.ok(fs.existsSync(child));
+  assert.equal(removeWorktree({ root: ws.root, path: child }).removed, true);
+  assert.equal(removeWorktree({ root: ws.root, path: parent }).removed, true);
+});
+
+test("remote-branch deletion spares every default branch of configured repos sharing the git repo", () => {
+  // Both repos.json orders: whichever configured repo ends up owning the worktree, release survives.
+  for (const releaseFirst of [false, true]) {
+    const ws = makeWorkspace();
+    git(ws.remotes.api.seed, "push", "-q", "origin", "HEAD:release");
+    const main = path.join(ws.root, "api");
+    git(main, "fetch", "-q", "origin");
+    // api-release: a second configured checkout of the same repo, defaultBranch release, currently on another branch.
+    git(main, "worktree", "add", "-q", "-b", "feature-y", path.join(ws.root, "api-release"));
+    const repos = [
+      { name: "api", relativePath: "api", defaultBranch: "main" },
+      { name: "api-release", relativePath: "api-release", defaultBranch: "release" },
+    ];
+    write(path.join(ws.root, "repos.json"), { repos: releaseFirst ? repos.reverse() : repos });
+    const rel = path.join(ws.base, "elsewhere", "rel");
+    git(main, "worktree", "add", "-q", "--track", "-b", "release", rel, "origin/release");
+    const out = removeWorktree({ root: ws.root, path: rel, deleteRemoteBranches: true });
+    assert.equal(out.removed, true);
+    assert.deepEqual(out.remoteBranches, [], `releaseFirst=${releaseFirst}`);
+    assert.match(git(ws.remotes.api.bare, "branch", "--list", "release"), /release/);
+  }
+});
+
+test("a worktree folder named like '..scratch' is inside worktrees/, not outside it", async () => {
+  const ws = makeWorkspace();
+  git(path.join(ws.root, "api"), "worktree", "add", "-q", "--detach", path.join(ws.root, "worktrees", "..scratch", "api"));
+  const wts = await gatherWorktrees(ws.root, { fetch: false, pr: false });
+  assert.deepEqual(wts.map((w) => [w.name, w.outside, w.repos.map((r) => r.repo)]), [["..scratch", false, ["api"]]]);
+  assert.equal(removeWorktree({ root: ws.root, name: "..scratch" }).removed, true);
+});
+
+test("remove: an ambiguous outside name asks for --path", () => {
+  const ws = makeWorkspace();
+  for (const dir of ["a", "b"]) git(path.join(ws.root, "api"), "worktree", "add", "-q", "--detach", path.join(ws.base, dir, "same"));
+  assert.throws(() => removeWorktree({ root: ws.root, name: "same" }), /matches 2 worktrees.*pass --path/);
+  assert.throws(() => removeWorktree({ root: ws.root, name: "nope" }), /not found/);
+});
+
 test("list: merge ladder against a bare remote (merged, squash by trees, patches after main moved on, grep, not merged, unpushed)", async () => {
   const ws = makeWorkspace();
   const seed = ws.remotes.api.seed;
