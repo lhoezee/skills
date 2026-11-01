@@ -281,6 +281,29 @@ test("remove refuses, even with --force, a worktree that holds other worktrees",
   assert.equal(removeWorktree({ root: ws.root, path: parent }).removed, true);
 });
 
+test("remote-branch deletion spares every default branch of configured repos sharing the git repo", () => {
+  // Both repos.json orders: whichever configured repo ends up owning the worktree, release survives.
+  for (const releaseFirst of [false, true]) {
+    const ws = makeWorkspace();
+    git(ws.remotes.api.seed, "push", "-q", "origin", "HEAD:release");
+    const main = path.join(ws.root, "api");
+    git(main, "fetch", "-q", "origin");
+    // api-release: a second configured checkout of the same repo, defaultBranch release, currently on another branch.
+    git(main, "worktree", "add", "-q", "-b", "feature-y", path.join(ws.root, "api-release"));
+    const repos = [
+      { name: "api", relativePath: "api", defaultBranch: "main" },
+      { name: "api-release", relativePath: "api-release", defaultBranch: "release" },
+    ];
+    write(path.join(ws.root, "repos.json"), { repos: releaseFirst ? repos.reverse() : repos });
+    const rel = path.join(ws.base, "elsewhere", "rel");
+    git(main, "worktree", "add", "-q", "--track", "-b", "release", rel, "origin/release");
+    const out = removeWorktree({ root: ws.root, path: rel, deleteRemoteBranches: true });
+    assert.equal(out.removed, true);
+    assert.deepEqual(out.remoteBranches, [], `releaseFirst=${releaseFirst}`);
+    assert.match(git(ws.remotes.api.bare, "branch", "--list", "release"), /release/);
+  }
+});
+
 test("a worktree folder named like '..scratch' is inside worktrees/, not outside it", async () => {
   const ws = makeWorkspace();
   git(path.join(ws.root, "api"), "worktree", "add", "-q", "--detach", path.join(ws.root, "worktrees", "..scratch", "api"));

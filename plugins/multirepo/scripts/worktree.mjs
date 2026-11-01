@@ -670,7 +670,8 @@ export function discoverWorktrees(root, settings = worktreeSettings(root)) {
       if (samePath(wsPath, root) || isInside(root, wsPath)) continue;
       const e = ensure(wsPath, "git");
       const existing = e.repos.find((x) => samePath(x.path, wt.path));
-      if (existing) { existing.native = true; existing.mainRepo = repo.path; }
+      // Configured repos sharing one git repo all list it: the first (repos.json order) owns it, deterministically.
+      if (existing) { existing.native = true; existing.mainRepo ||= repo.path; }
       // Real paths on both sides: git reports long paths, the worktrees dir may be a Windows 8.3 short one.
       else e.repos.push({ rel: slash(path.relative(realOr(e.path), realOr(wt.path))) || ".", path: wt.path, native: true, mainRepo: repo.path });
     }
@@ -1046,6 +1047,30 @@ export function unsavedWork(repos) {
 }
 
 /**
+ * Branches remote deletion must never touch for a checkout: the default branch and
+ * the checked-out branch of every configured main repo sharing its git repository.
+ * Two configured repos can be checkouts of one repo with different defaultBranches,
+ * so the owner baseBranchOf picks isn't the only one whose branches count.
+ */
+function sharedRepoBranches(repoPath, mainRepos) {
+  const common = (p) => {
+    const c = git(p, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+    return c ? realOr(c) : null;
+  };
+  const mine = common(repoPath);
+  const out = new Set();
+  if (!mine) return out;
+  for (const m of mainRepos) {
+    const theirs = hasGit(m.path) ? common(m.path) : null;
+    if (!theirs || !samePath(theirs, mine)) continue;
+    out.add(defaultBranch(m.path, m.defaultBranch));
+    const current = git(m.path, ["branch", "--show-current"]);
+    if (current) out.add(current);
+  }
+  return out;
+}
+
+/**
  * The worktree remove acts on: --path (must be a discovered worktree), else
  * <worktrees.dir>/<name>, else the one native worktree outside it with that name.
  * Returns { entry, wtPath, discovered } (entry null for an undiscovered folder in worktrees.dir).
@@ -1113,7 +1138,7 @@ export function removeWorktree(opts, log = () => {}) {
       if (!fs.existsSync(path.join(r.path, ".git"))) continue;
       const branch = git(r.path, ["branch", "--show-current"]) || entry?.metadata?.branch;
       const base = baseBranchOf(root, r, mainRepos);
-      if (!branch || branch === base || ["main", "master"].includes(branch)) continue;
+      if (!branch || branch === base || ["main", "master"].includes(branch) || sharedRepoBranches(r.path, mainRepos).has(branch)) continue;
       if (!refExists(r.path, `refs/remotes/origin/${branch}`)) { remote.push({ repo: r.rel, branch, status: "no remote branch" }); continue; }
       const res = gitRun(r.path, ["push", "origin", "--delete", branch], { timeout: 60000 });
       remote.push({ repo: r.rel, branch, status: res.ok ? "deleted" : `failed: ${firstLine(res.err)}` });
