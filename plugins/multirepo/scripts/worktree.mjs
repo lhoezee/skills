@@ -1046,26 +1046,29 @@ export function unsavedWork(repos) {
   return out;
 }
 
+/** A checkout's git common dir as a comparable key, or null. */
+function commonDirKey(repoPath) {
+  const c = git(repoPath, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+  if (!c) return null;
+  const real = realOr(c).replace(/[\\/]+$/, "");
+  return caseless ? real.toLowerCase() : real;
+}
+
 /**
- * Branches remote deletion must never touch for a checkout: the default branch and
- * the checked-out branch of every configured main repo sharing its git repository.
- * Two configured repos can be checkouts of one repo with different defaultBranches,
- * so the owner baseBranchOf picks isn't the only one whose branches count.
+ * Branches remote deletion must never touch, by git common dir: the default branch
+ * and the checked-out branch of every configured main repo. Two configured repos can
+ * be checkouts of one repo with different defaultBranches, so the owner baseBranchOf
+ * picks isn't the only one whose branches count. Built once per removal.
  */
-function sharedRepoBranches(repoPath, mainRepos) {
-  const common = (p) => {
-    const c = git(p, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
-    return c ? realOr(c) : null;
-  };
-  const mine = common(repoPath);
-  const out = new Set();
-  if (!mine) return out;
+function protectedBranchesByRepo(mainRepos) {
+  const out = new Map();
   for (const m of mainRepos) {
-    const theirs = hasGit(m.path) ? common(m.path) : null;
-    if (!theirs || !samePath(theirs, mine)) continue;
-    out.add(defaultBranch(m.path, m.defaultBranch));
+    const key = hasGit(m.path) ? commonDirKey(m.path) : null;
+    if (!key) continue;
+    if (!out.has(key)) out.set(key, new Set());
+    out.get(key).add(defaultBranch(m.path, m.defaultBranch));
     const current = git(m.path, ["branch", "--show-current"]);
-    if (current) out.add(current);
+    if (current) out.get(key).add(current);
   }
   return out;
 }
@@ -1134,11 +1137,13 @@ export function removeWorktree(opts, log = () => {}) {
   const remote = [];
   if (opts.deleteRemoteBranches) {
     const mainRepos = listRepos(root);
+    const protectedBranches = protectedBranchesByRepo(mainRepos);
     for (const r of repos) {
       if (!fs.existsSync(path.join(r.path, ".git"))) continue;
       const branch = git(r.path, ["branch", "--show-current"]) || entry?.metadata?.branch;
       const base = baseBranchOf(root, r, mainRepos);
-      if (!branch || branch === base || ["main", "master"].includes(branch) || sharedRepoBranches(r.path, mainRepos).has(branch)) continue;
+      if (!branch || branch === base || ["main", "master"].includes(branch)) continue;
+      if (protectedBranches.get(commonDirKey(r.path))?.has(branch)) continue;
       if (!refExists(r.path, `refs/remotes/origin/${branch}`)) { remote.push({ repo: r.rel, branch, status: "no remote branch" }); continue; }
       const res = gitRun(r.path, ["push", "origin", "--delete", branch], { timeout: 60000 });
       remote.push({ repo: r.rel, branch, status: res.ok ? "deleted" : `failed: ${firstLine(res.err)}` });
