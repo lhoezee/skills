@@ -281,6 +281,14 @@ test("remove refuses, even with --force, a worktree that holds other worktrees",
   assert.equal(removeWorktree({ root: ws.root, path: parent }).removed, true);
 });
 
+test("a worktree folder named like '..scratch' is inside worktrees/, not outside it", async () => {
+  const ws = makeWorkspace();
+  git(path.join(ws.root, "api"), "worktree", "add", "-q", "--detach", path.join(ws.root, "worktrees", "..scratch", "api"));
+  const wts = await gatherWorktrees(ws.root, { fetch: false, pr: false });
+  assert.deepEqual(wts.map((w) => [w.name, w.outside, w.repos.map((r) => r.repo)]), [["..scratch", false, ["api"]]]);
+  assert.equal(removeWorktree({ root: ws.root, name: "..scratch" }).removed, true);
+});
+
 test("remove: an ambiguous outside name asks for --path", () => {
   const ws = makeWorkspace();
   for (const dir of ["a", "b"]) git(path.join(ws.root, "api"), "worktree", "add", "-q", "--detach", path.join(ws.base, dir, "same"));

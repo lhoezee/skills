@@ -65,7 +65,8 @@ export function samePath(a, b) {
 }
 const isInside = (child, parent) => {
   const rel = path.relative(realOr(parent), realOr(child));
-  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+  // "..x" is a name inside parent; only ".." itself or "../…" climbs out.
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel));
 };
 const writeJson = (file, data) => fs.writeFileSync(file, JSON.stringify(data, null, 2) + "\n");
 const firstLine = (s) => String(s || "").split("\n")[0].trim();
