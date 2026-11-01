@@ -737,6 +737,7 @@ export function itemSteps(m: FactoryManifest, steps: PipelineStep[], column: str
   const laterActivity = (i: number) => steps.slice(i + 1).some((s) => (s.kind === "stage" ? m.stages.some((x) => x.id === s.id) : m.gates.some((g) => g.id === s.id)));
   const minIso = (xs: (string | null)[]) => xs.filter((x): x is string => !!x).sort()[0] ?? null;
   const maxIso = (xs: (string | null)[]) => xs.filter((x): x is string => !!x).sort().at(-1) ?? null;
+  const merged = m.prs.length > 0 && m.prs.every((p) => p.state === "merged");
   return steps.map((s, i): FactoryItemStep => {
     const id = colId(s);
     const base = { id, kind: s.kind as FactoryItemStep["kind"], label: s.kind === "stage" ? STAGE_LABELS[s.id] : GATE_LABELS[s.id], current: id === column, repos: [] as FactoryItemStep["repos"], decisions: [] as FactoryItemStep["decisions"] };
@@ -752,9 +753,13 @@ export function itemSteps(m: FactoryManifest, steps: PipelineStep[], column: str
     }
     const hist = roundGates(m).filter((g) => g.id === s.id).map((g) => ({ decision: g.decision, mode: g.mode, by: g.by, risk: g.risk, rationale: g.rationale, at: g.at }));
     const last = hist.at(-1);
+    // Still pending once the item finished: nobody waits there any more. The merge gate of an item
+    // whose PRs all merged was passed on the code host; any other is skipped.
+    const ended = last?.decision === "pending" && (m.done || merged) ? (s.id === "merge" && merged ? "done" : "skipped") : null;
     const state: FactoryItemStep["state"] = !last ? (laterActivity(i) || m.done ? "skipped" : "pending")
-      : last.decision === "approved" ? "done" : last.decision === "rejected" ? "failed" : "waiting";
-    return { ...base, decisions: hist, state, startedAt: hist[0]?.at ?? null, endedAt: last && last.decision !== "pending" ? last.at : null };
+      : ended ?? (last.decision === "approved" ? "done" : last.decision === "rejected" ? "failed" : "waiting");
+    return { ...base, decisions: hist, state, startedAt: hist[0]?.at ?? null,
+      endedAt: !last ? null : ended ? m.finishedAt || m.updatedAt : last.decision !== "pending" ? last.at : null };
   });
 }
 

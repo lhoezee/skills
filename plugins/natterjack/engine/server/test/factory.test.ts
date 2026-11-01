@@ -182,6 +182,19 @@ test("itemSteps gives every step its state, times, repo rows and gate decisions"
   assert.deepEqual(skip.slice(0, 4).map((x) => x.state), ["skipped", "skipped", "skipped", "running"]);
 });
 
+test("itemSteps: a gate still pending when the item finished isn't waiting (merged PRs passed the merge gate)", () => {
+  const cfg = defaultFactoryConfig();
+  const gates = [{ id: "prePr", decision: "pending", at: "2026-10-27T10:00:00.000Z" }, { id: "merge", decision: "pending", at: "2026-10-27T11:00:00.000Z" }];
+  const merged = manifest({ gates, prs: [{ url: "https://github.com/acme/api/pull/1", state: "merged" }], finishedAt: "2026-10-27T12:00:00.000Z" });
+  const s = Object.fromEntries(buildBoard(cfg, true, [merged], []).items[0].steps.map((x) => [x.id, x]));
+  assert.deepEqual([s["gate:prePr"].state, s["gate:merge"].state], ["skipped", "done"]);
+  assert.equal(s["gate:merge"].endedAt, "2026-10-27T12:00:00.000Z");
+  assert.equal(buildBoard(cfg, true, [merged], []).items[0].waitingGate, null);
+  const open = Object.fromEntries(buildBoard(cfg, true, [manifest({ gates, prs: [{ url: "https://github.com/acme/api/pull/1", state: "open" }] })], []).items[0].steps.map((x) => [x.id, x]));
+  assert.equal(open["gate:merge"].state, "waiting");
+  assert.equal(open["gate:merge"].endedAt, null);
+});
+
 test("spec readiness: the team's levels and weights, checked; a manifest's score carried to its item", () => {
   const c = normalizeFactoryConfig({ spec: { readyAt: "85", needsWorkAt: 60, minScore: 55.4, weights: { scope: 0, constraints: "8", bogus: 5, verify: -3 } } });
   assert.deepEqual(c.spec, { readyAt: 85, needsWorkAt: 60, minScore: 55, weights: { scope: 0, constraints: 8, verify: 0 } });
