@@ -634,6 +634,11 @@ export function discoverWorktrees(root, settings = worktreeSettings(root)) {
     if (!e) {
       const meta = normalizeMeta(readJson(path.join(p, ".worktree.json")));
       e = { name: path.basename(p), path: p, hasMetadata: !!meta, metadata: meta, source, outside: !isInside(p, settings.dir), repos: [] };
+      // The repos its .worktree.json declares, for every entry (outside ones too), so status covers them.
+      for (const r of Array.isArray(meta?.repos) ? meta.repos.map(normalizeRepo) : []) {
+        const rp = r.relativePath === "." ? p : relPath(p, r.relativePath);
+        e.repos.push({ rel: r.relativePath, path: rp, native: fs.existsSync(path.join(rp, ".git")) && fs.statSync(path.join(rp, ".git")).isFile(), mainRepo: null });
+      }
       entries.push(e);
     }
     return e;
@@ -644,15 +649,6 @@ export function discoverWorktrees(root, settings = worktreeSettings(root)) {
       if (d.isDirectory()) ensure(path.join(settings.dir, d.name), "folder");
     }
   } catch { /* no worktrees dir */ }
-
-  for (const e of entries) {
-    if (e.metadata && Array.isArray(e.metadata.repos)) {
-      for (const r of e.metadata.repos.map(normalizeRepo)) {
-        const p = r.relativePath === "." ? e.path : relPath(e.path, r.relativePath);
-        e.repos.push({ rel: r.relativePath, path: p, native: fs.existsSync(path.join(p, ".git")) && fs.statSync(path.join(p, ".git")).isFile(), mainRepo: null });
-      }
-    }
-  }
 
   const mainRepos = listRepos(root);
   if (isRepoTop(root) && !mainRepos.some((r) => samePath(r.path, root))) {
@@ -1051,22 +1047,22 @@ export function unsavedWork(repos) {
 /**
  * The worktree remove acts on: --path (must be a discovered worktree), else
  * <worktrees.dir>/<name>, else the one native worktree outside it with that name.
- * Returns { entry, wtPath } (entry null for an undiscovered folder in worktrees.dir).
+ * Returns { entry, wtPath, discovered } (entry null for an undiscovered folder in worktrees.dir).
  */
 function resolveRemoveTarget(root, settings, name, wantedPath) {
   const discovered = discoverWorktrees(root, settings);
   if (typeof wantedPath === "string" && wantedPath) {
     const entry = discovered.find((e) => samePath(e.path, path.resolve(wantedPath)));
     if (!entry) throw new Error(`${slash(path.resolve(wantedPath))} is not a worktree of ${slash(root)}`);
-    return { entry, wtPath: entry.path };
+    return { entry, wtPath: entry.path, discovered };
   }
   const inDir = path.join(settings.dir, name);
   const entry = discovered.find((e) => samePath(e.path, inDir));
-  if (entry || fs.existsSync(inDir)) return { entry: entry || null, wtPath: inDir };
+  if (entry || fs.existsSync(inDir)) return { entry: entry || null, wtPath: inDir, discovered };
   const named = discovered.filter((e) => e.outside && e.name === name);
   if (named.length > 1) throw new Error(`'${name}' matches ${named.length} worktrees (${named.map((e) => slash(e.path)).join(", ")}): pass --path`);
   if (!named.length) throw new Error(`Worktree '${name}' not found at ${slash(inDir)}`);
-  return { entry: named[0], wtPath: named[0].path };
+  return { entry: named[0], wtPath: named[0].path, discovered };
 }
 
 /**
@@ -1081,13 +1077,16 @@ export function removeWorktree(opts, log = () => {}) {
   if (!hasPath && (!name || name === true)) throw new Error("--name or --path is required");
   if (!hasPath && (!NAME_RE.test(name) || /^\.+$/.test(name))) throw new Error(`Invalid name '${name}'`);
   const settings = worktreeSettings(root);
-  const { entry, wtPath } = resolveRemoveTarget(root, settings, name, opts.path);
+  const { entry, wtPath, discovered } = resolveRemoveTarget(root, settings, name, opts.path);
   if (hasPath) name = entry.name;
   if (isInside(root, wtPath)) throw new Error(`Refusing to remove ${slash(wtPath)}: it holds the workspace`);
+  // Even with --force: deleting the folder would delete worktrees inside it that were never assessed.
+  const nested = discovered.filter((e) => !samePath(e.path, wtPath) && isInside(e.path, wtPath));
+  if (nested.length) throw new Error(`Refusing to remove ${slash(wtPath)}: it holds other worktrees (${nested.map((e) => slash(e.path)).join(", ")}); remove those first`);
   const force = opts.force === true;
   const repos = entry ? [...entry.repos] : [];
-  if (!entry || !entry.hasMetadata) {
-    // No .worktree.json: find the checkouts in the folder ourselves before trusting it's safe.
+  if (!entry || !entry.hasMetadata || entry.outside) {
+    // No .worktree.json, or outside worktrees.dir: find the checkouts in the folder ourselves before trusting it's safe.
     for (const found of findCheckouts(wtPath, readReposJson(root).map((r) => r.relativePath))) {
       if (!repos.some((x) => samePath(x.path, found.path))) repos.push(found);
     }
@@ -1108,10 +1107,11 @@ export function removeWorktree(opts, log = () => {}) {
 
   const remote = [];
   if (opts.deleteRemoteBranches) {
+    const mainRepos = listRepos(root);
     for (const r of repos) {
       if (!fs.existsSync(path.join(r.path, ".git"))) continue;
       const branch = git(r.path, ["branch", "--show-current"]) || entry?.metadata?.branch;
-      const base = baseBranchOf(root, r);
+      const base = baseBranchOf(root, r, mainRepos);
       if (!branch || branch === base || ["main", "master"].includes(branch)) continue;
       if (!refExists(r.path, `refs/remotes/origin/${branch}`)) { remote.push({ repo: r.rel, branch, status: "no remote branch" }); continue; }
       const res = gitRun(r.path, ["push", "origin", "--delete", branch], { timeout: 60000 });

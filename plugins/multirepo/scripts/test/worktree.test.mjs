@@ -240,6 +240,47 @@ test("outside worktrees keep their repo's configured defaultBranch (status and r
   assert.match(git(ws.remotes.api.bare, "branch", "--list", "production"), /production/);
 });
 
+/** Makes the workspace folder a repo with a remote (api/ and worktrees/ ignored), as when its config is versioned. */
+function versionWorkspace(ws) {
+  git(ws.root, "init", "-q", "-b", "main");
+  commit(ws.root, ".gitignore", "/api/\n/worktrees/\n/.worktree.json\n", "ws init");
+  const bare = path.join(ws.base, "remotes", "ws.git");
+  fs.mkdirSync(bare, { recursive: true });
+  git(bare, "init", "-q", "--bare", "-b", "main");
+  git(ws.root, "remote", "add", "origin", bare);
+  git(ws.root, "push", "-q", "-u", "origin", "main");
+}
+
+test("outside worktrees: nested clones (declared or found by the scan) block removal", async () => {
+  const ws = makeWorkspace();
+  versionWorkspace(ws);
+  const sess = path.join(ws.base, "sess");
+  git(ws.root, "worktree", "add", "-q", "--detach", sess);
+  execFileSync("git", ["clone", "-q", ws.remotes.api.bare, path.join(sess, "api")], { stdio: "pipe" });
+  write(path.join(sess, "api", "wip.txt"), "x\n");
+  // No .worktree.json: list sees only the outer checkout, but remove's scan finds the clone.
+  assert.throws(() => removeWorktree({ root: ws.root, path: sess }), (e) => e.unsaved?.some((u) => u.repo === "api" && u.type === "uncommitted"));
+  // With one declaring it, list covers it too.
+  write(path.join(sess, ".worktree.json"), { name: "sess", repos: [".", "api"] });
+  const [wt] = await gatherWorktrees(ws.root, { fetch: false, pr: false });
+  assert.deepEqual(wt.repos.map((r) => [r.repo, r.uncommitted]).sort(), [[".", 0], ["api", 1]]);
+  assert.throws(() => removeWorktree({ root: ws.root, path: sess }), (e) => e.unsaved?.some((u) => u.repo === "api"));
+  assert.ok(fs.existsSync(path.join(sess, "api", "wip.txt")));
+});
+
+test("remove refuses, even with --force, a worktree that holds other worktrees", () => {
+  const ws = makeWorkspace();
+  versionWorkspace(ws);
+  const parent = path.join(ws.base, "parent");
+  git(ws.root, "worktree", "add", "-q", "--detach", parent);
+  const child = path.join(parent, ".claude", "worktrees", "child");
+  git(path.join(ws.root, "api"), "worktree", "add", "-q", "--detach", child);
+  assert.throws(() => removeWorktree({ root: ws.root, path: parent, force: true }), /holds other worktrees/);
+  assert.ok(fs.existsSync(child));
+  assert.equal(removeWorktree({ root: ws.root, path: child }).removed, true);
+  assert.equal(removeWorktree({ root: ws.root, path: parent }).removed, true);
+});
+
 test("remove: an ambiguous outside name asks for --path", () => {
   const ws = makeWorkspace();
   for (const dir of ["a", "b"]) git(path.join(ws.root, "api"), "worktree", "add", "-q", "--detach", path.join(ws.base, dir, "same"));

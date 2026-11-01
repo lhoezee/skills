@@ -115,7 +115,7 @@ Any other name (`[A-Za-z0-9_.-]+`): ask which repos (multiSelect, unless `--repo
 
 ## Remove (`/worktree --remove <name>`)
 
-1. `node "$W" remove --name <name>`. The name is a folder in `worktrees.dir`, else an `outside` worktree with that name; when two outside ones share it, it asks for `--path <worktree>` (which only accepts a worktree `list` finds). It refuses (exit 1, details on stderr) when any repo has uncommitted changes, stashes or unpushed commits (including commits on a branch with no upstream that are on no remote), and when it finds a checkout git can't read (a broken gitdir link, a corrupt repo, dubious ownership): it can't prove those are safe. A folder without `.worktree.json` is scanned for checkouts (the source workspace's repo paths, then three levels down); if none can be inspected and the folder isn't empty, it refuses without `--force` rather than guess.
+1. `node "$W" remove --name <name>`. The name is a folder in `worktrees.dir`, else an `outside` worktree with that name; when two outside ones share it, it asks for `--path <worktree>` (which only accepts a worktree `list` finds). It always refuses, even with `--force`, a folder holding other worktrees (remove those first). It refuses (exit 1, details on stderr) when any repo has uncommitted changes, stashes or unpushed commits (including commits on a branch with no upstream that are on no remote), and when it finds a checkout git can't read (a broken gitdir link, a corrupt repo, dubious ownership): it can't prove those are safe. A folder without `.worktree.json` is scanned for checkouts (the source workspace's repo paths, then three levels down); if none can be inspected and the folder isn't empty, it refuses without `--force` rather than guess.
 2. If it refused, show the details and ask with `AskUserQuestion` ("Yes, remove it" / "No, keep it"). Only on an explicit yes, re-run with `--force`.
 3. It removes native repos with `git worktree remove` + `prune`, frees the port slot, and deletes the folder with retries. If the folder is locked (Windows: a shell, editor, dev server or build server inside it), it says so. Tell the user to `cd` out or close the process, then delete the folder.
 
@@ -142,7 +142,7 @@ Procedure:
 3. Fetch every remaining ticket's state in parallel.
 4. Show a dry-run preview: `### Eligible for removal (N)` (Worktree | State | Notes; an outside one's State is `git worktree, no ticket` and its Notes give the path) and `### Skipped (M)` (Worktree | Reason), each skipped worktree with its **first** failure. Nothing eligible → say `Nothing to purge.` and stop.
 5. Confirm with `AskUserQuestion` (`Remove N worktree(s): <names>?`).
-6. On yes, run `remove --name <n> --force --delete-remote-branches` for each, in parallel (`--path <path>` instead of `--name` for an `outside` one, so a shared name can't pick the wrong one).
+6. On yes, run `remove --name <n> --force --delete-remote-branches` for each, in parallel. An `outside` one is removed with `remove --path <path> --delete-remote-branches` and **no** `--force`: `list` only assessed its own checkout, while `remove` also scans it for nested clones (an ignored `api/` inside a workspace-repo worktree), and `--force` would delete their work unassessed. Report a refusal as a failure with its details; never retry it with `--force` without asking.
 7. Report `Removed: <names>. Skipped: <count>.` plus any failures.
 
 | Cause | Reason string |
