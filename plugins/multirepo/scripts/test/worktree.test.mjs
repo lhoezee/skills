@@ -219,7 +219,7 @@ test("outside worktrees: the exact checkout, never its parent folder, even when 
   write(path.join(scratch, "unrelated.txt"), "keep\n");
   git(path.join(ws.root, "api"), "worktree", "add", "-q", "--detach", path.join(scratch, "api"));
   const [wt] = await gatherWorktrees(ws.root, { fetch: false, pr: false });
-  assert.equal(path.resolve(wt.path), path.join(scratch, "api"));
+  assert.equal(fs.realpathSync.native(wt.path), fs.realpathSync.native(path.join(scratch, "api")));
   assert.equal(removeWorktree({ root: ws.root, name: "api" }).removed, true);
   assert.ok(fs.existsSync(path.join(scratch, "unrelated.txt")));
 });

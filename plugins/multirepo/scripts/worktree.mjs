@@ -674,7 +674,8 @@ export function discoverWorktrees(root, settings = worktreeSettings(root)) {
       const e = ensure(wsPath, "git");
       const existing = e.repos.find((x) => samePath(x.path, wt.path));
       if (existing) { existing.native = true; existing.mainRepo = repo.path; }
-      else e.repos.push({ rel: slash(path.relative(wsPath, wt.path)) || ".", path: wt.path, native: true, mainRepo: repo.path });
+      // Real paths on both sides: git reports long paths, the worktrees dir may be a Windows 8.3 short one.
+      else e.repos.push({ rel: slash(path.relative(realOr(e.path), realOr(wt.path))) || ".", path: wt.path, native: true, mainRepo: repo.path });
     }
   }
   return entries;
