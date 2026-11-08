@@ -231,7 +231,15 @@ export class LoopsComponent implements OnInit {
   readonly busy = signal<string | null>(null);
 
   readonly routines = computed(() => this.data.routines() || []);
-  readonly loops = computed(() => this.data.activityRuns().filter(watching));
+  /**
+   * Every run with a watch on: the routines topic's list (all of them, however old), each
+   * replaced by its fresher copy from the runs feed when that has it, plus mirrored runs.
+   */
+  readonly loops = computed(() => {
+    const byId = new Map(this.data.loopRuns().map((r) => [r.id, r]));
+    for (const r of this.data.activityRuns()) if (byId.has(r.id) || watching(r)) byId.set(r.id, r);
+    return [...byId.values()].filter(watching);
+  });
   readonly presets = computed(() => this.data.deck()?.presets || []);
   readonly workspaces = computed(() => this.data.deck()?.workspaces || [{ slug: 'main', name: 'main' }]);
   readonly models = computed(() => this.data.deck()?.options?.models || []);
@@ -297,7 +305,7 @@ export class LoopsComponent implements OnInit {
     try {
       const routine: RoutineInput = draftToInput(d, this.presets());
       const res = await this.api.post<RoutinesResponse & { routine: { id: string } }>('/api/routines', { routine });
-      this.data.routines.set(res.routines);
+      this.data.applyRoutines(res);
       this.toast.show(d.id ? 'Routine saved' : 'Routine created');
       this.cancel();
     } catch (e) {
@@ -310,8 +318,10 @@ export class LoopsComponent implements OnInit {
   private async act(id: string, path: string, body: unknown, done: string): Promise<void> {
     this.busy.set(id);
     try {
-      const res = await this.api.post<RoutinesResponse & { last?: { runId?: string | null } }>(path, body);
-      this.data.routines.set(res.routines);
+      const res = await this.api.post<RoutinesResponse & { last?: { ok: boolean; runId?: string | null; error?: string | null } }>(path, body);
+      this.data.applyRoutines(res);
+      // Run now answers 200 with ok: false when nothing started (its runId is then the previous run's).
+      if (res.last && !res.last.ok) { this.toast.error(`Didn't start: ${res.last.error || 'unknown error'}`); return; }
       this.toast.show(done);
       if (res.last?.runId) void this.router.navigate(['/runs', res.last.runId]);
     } catch (e) {
@@ -333,9 +343,12 @@ export class LoopsComponent implements OnInit {
   private async runAction(r: RunMeta, action: 'watch-stop' | 'watch-approve', done: string): Promise<void> {
     this.busy.set(r.id);
     try {
-      await this.api.post<{ run: RunMeta }>(`/api/runs/${r.id}/${action}`);
+      // Approve names the command shown here: the server refuses if a turn replaced it since.
+      const body = action === 'watch-approve' ? { startedAt: r.watch?.startedAt, command: r.watch?.command } : undefined;
+      await this.api.post<{ run: RunMeta }>(`/api/runs/${r.id}/${action}`, body);
       this.toast.show(done);
       this.data.loadRuns();
+      this.data.loadRoutines();
     } catch (e) {
       this.toast.error((e as Error).message);
     } finally {

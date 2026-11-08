@@ -97,6 +97,32 @@ test("Routines: yours are created, changed and removed; a team one can only be s
   } finally { f.done(); }
 });
 
+test("Routines: a team routine without \"enabled\" stays off (deck.json routines are opt-in); one you create is on", () => {
+  const f = files([{ id: "legacy", preset: "brief", at: "08:30" }]);
+  try {
+    assert.equal(f.store.get("legacy")!.routine.enabled, false);
+    assert.equal(f.store.save({ label: "Mine", prompt: "x", at: "09:00" }).enabled, true);
+    f.store.setEnabled("legacy", true);
+    assert.equal(f.store.get("legacy")!.routine.enabled, true);
+    assert.deepEqual(f.store.personal().team, { legacy: { enabled: true } });
+    f.store.setEnabled("legacy", false); // back to the team's (off): no override left
+    assert.deepEqual(f.store.personal().team, {});
+  } finally { f.done(); }
+});
+
+test("checkRoutine: a local or team model is fine (launch checks it's available)", () => {
+  assert.equal(checkRoutine({ id: "a", prompt: "x", at: "09:00", model: "local/qwen3.8:27b" }).model, "local/qwen3.8:27b");
+  assert.equal(checkRoutine({ id: "a", prompt: "x", at: "09:00", model: "team/gpu-box/llama-4:70b" }).model, "team/gpu-box/llama-4:70b");
+  assert.throws(() => checkRoutine({ id: "a", prompt: "x", at: "09:00", model: "--bare" }), /Invalid model/);
+});
+
+test("dueSlot: no catch-up still gives the 30 s scheduler a minute to catch the slot", () => {
+  const exact = r({ at: "09:00", catchUpMinutes: 0 });
+  assert.equal(dueSlot(exact, at(9, 9, 0))!.getTime(), at(9, 9).getTime());
+  assert.equal(dueSlot(exact, new Date(at(9, 9).getTime() + 29000))!.getTime(), at(9, 9).getTime());
+  assert.equal(dueSlot(exact, at(9, 9, 2)), null);
+});
+
 // ------------------------------------------------------------ the scheduler
 
 function scheduler(team: any[]) {
@@ -146,6 +172,17 @@ test("Scheduler: a new interval routine starts with the next slot, and a missed 
     t.s.tick(at(9, 14, 40));
     t.s.tick(at(9, 14, 50));
     assert.equal(t.fired.length, 2);
+  } finally { t.done(); }
+});
+
+test("Scheduler: an interval routine first seen outside its window fires on the window's first slot", () => {
+  const t = scheduler([{ id: "w", prompt: "Check.", every: "2h", between: "08:00-18:00", enabled: true }]);
+  try {
+    t.s.tick(at(9, 7, 30)); // before the window: nothing due, but the schedule is recorded
+    assert.equal(t.fired.length, 0);
+    assert.equal(t.s.view(at(9, 7, 30))[0].nextAt, at(9, 8).toISOString());
+    t.s.tick(at(9, 8, 0));
+    assert.equal(t.fired.length, 1, "08:00 runs, as nextAt said");
   } finally { t.done(); }
 });
 

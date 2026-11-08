@@ -123,9 +123,17 @@ test("a run's proposed routine is created once, from the run page", async () => 
   assert.equal((await post("/api/routines/from-run", { runId: "proposer" })).status, 409);
 });
 
-test("a check watch is approved from the run page; other runs have nothing to approve", async () => {
-  const res = await post("/api/runs/checker/watch-approve");
+test("a check watch is approved from the run page, only as it was shown; other runs have nothing to approve", async () => {
+  const stale = await post("/api/runs/checker/watch-approve", { startedAt: T, command: "rm -rf ." });
+  assert.equal(stale.status, 409);
+  assert.match(stale.body.error, /changed since you looked/);
+  const res = await post("/api/runs/checker/watch-approve", { startedAt: T, command: "test -f done" });
   assert.equal(res.status, 200, res.text);
   assert.equal(res.body.run.watch.approval, "approved");
-  assert.equal((await post("/api/runs/proposer/watch-approve")).status, 409);
+  assert.equal((await post("/api/runs/proposer/watch-approve", {})).status, 409);
+});
+
+test("the routines topic lists every run with a watch on", async () => {
+  const list = await get("/api/routines");
+  assert.deepEqual(list.body.loops.map((r: any) => r.id), ["checker"]);
 });

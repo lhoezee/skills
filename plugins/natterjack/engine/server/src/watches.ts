@@ -20,7 +20,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { execFile, spawn } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
 import type { CheckResult, PrSnapshot, RunWatch, WatchedPr } from "../../shared/api.ts";
 import { formatMinutes } from "../../shared/loops.ts";
 import { endWatch, watchActive, type RunManager } from "./runs.ts";
@@ -65,22 +65,52 @@ export function findBash(env: NodeJS.ProcessEnv = process.env, exists = fs.exist
   return candidates.find((c) => exists(c)) || null;
 }
 
-const defaultRunCommand: RunCommand = (command, cwd) => new Promise((resolve, reject) => {
-  const bash = findBash();
-  if (!bash) return reject(new Error(process.platform === "win32" ? "Git Bash wasn't found (install Git for Windows, or set CLAUDE_CODE_GIT_BASH_PATH)." : "bash wasn't found."));
-  let out = "";
-  const child = spawn(bash, ["-c", command], { cwd, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
-  const keep = (d: Buffer) => { out = (out + d.toString("utf-8")).slice(-CHECK_OUTPUT_MAX * 2); };
-  child.stdout!.on("data", keep);
-  child.stderr!.on("data", keep);
-  const timer = setTimeout(() => { child.kill(); }, CHECK_TIMEOUT_MS);
-  child.on("error", (e) => { clearTimeout(timer); reject(e); });
-  child.on("close", (code, signal) => {
-    clearTimeout(timer);
-    if (signal) return reject(new Error(`The command didn't finish within ${CHECK_TIMEOUT_MS / 1000} s.`));
-    resolve({ exitCode: code ?? 0, output: out.trim().slice(-CHECK_OUTPUT_MAX) });
+/** Stop a check's whole process tree: bash and anything it started (which could hold the output pipes open). */
+function killCheckTree(child: ChildProcess) {
+  const pid = child.pid;
+  if (!pid) return;
+  if (process.platform === "win32") {
+    execFile("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true }, () => {});
+    return;
+  }
+  // Its own process group (spawned detached): TERM the group, then KILL whatever ignored it.
+  try { process.kill(-pid, "SIGTERM"); } catch { /* already gone */ }
+  setTimeout(() => { try { process.kill(-pid, "SIGKILL"); } catch { /* gone */ } }, 2000).unref();
+}
+
+/**
+ * A runner that gives each command `timeoutMs`. On timeout it settles at once (the watch isn't
+ * left busy waiting on pipes a leftover process holds), stops the whole tree and drops the pipes.
+ */
+export function makeRunCommand(timeoutMs = CHECK_TIMEOUT_MS): RunCommand {
+  return (command, cwd) => new Promise((resolve, reject) => {
+    const bash = findBash();
+    if (!bash) return reject(new Error(process.platform === "win32" ? "Git Bash wasn't found (install Git for Windows, or set CLAUDE_CODE_GIT_BASH_PATH)." : "bash wasn't found."));
+    let out = "";
+    let settled = false;
+    const child = spawn(bash, ["-c", command], { cwd, windowsHide: true, stdio: ["ignore", "pipe", "pipe"], detached: process.platform !== "win32" });
+    const keep = (d: Buffer) => { out = (out + d.toString("utf-8")).slice(-CHECK_OUTPUT_MAX * 2); };
+    child.stdout!.on("data", keep);
+    child.stderr!.on("data", keep);
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      killCheckTree(child);
+      child.stdout!.destroy();
+      child.stderr!.destroy();
+      reject(new Error(`The command didn't finish within ${Math.round(timeoutMs / 1000)} s.`));
+    }, timeoutMs);
+    child.on("error", (e) => { clearTimeout(timer); if (!settled) { settled = true; reject(e); } });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (settled) return;
+      settled = true;
+      resolve({ exitCode: code ?? 0, output: out.trim().slice(-CHECK_OUTPUT_MAX) });
+    });
   });
-});
+}
+
+const defaultRunCommand: RunCommand = makeRunCommand();
 
 /**
  * Whether deck.json `loops.allowCommands` allows a check's command without asking: each

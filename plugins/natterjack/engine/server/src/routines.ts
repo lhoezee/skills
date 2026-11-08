@@ -28,6 +28,10 @@ const PROMPT_MAX = 8000;
 const LABEL_MAX = 80;
 const ID_RE = /^[a-z0-9][a-z0-9-]{0,47}$/;
 const MODEL_RE = /^[a-z][a-z0-9.\-/]{1,80}(\[[a-z0-9]+\])?$/i;
+/** A local or team model (models/routes.ts: local/<tag>, team/<endpoint>/<model>); launch checks it's available. */
+const ROUTED_MODEL_RE = /^(local|team)\/\S{1,160}$/;
+/** The scheduler ticks every 30 s: a slot stays reachable at least this long, even with no catch-up. */
+const TICK_WINDOW_MS = 60 * 1000;
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 const PERMISSION_MODES = ["auto", "acceptEdits", "dontAsk", "plan"];
 
@@ -40,12 +44,13 @@ export function routineId(label: string): string {
  * A routine as it's stored, checked and tidied: unknown keys dropped, empty ones left out.
  * Throws an Error that says what's wrong. `presets`: the preset ids that exist (checked when given).
  */
-export function checkRoutine(input: any, opts: { presets?: string[] } = {}): Routine {
+export function checkRoutine(input: any, opts: { presets?: string[]; defaultEnabled?: boolean } = {}): Routine {
   if (!input || typeof input !== "object") throw new Error("A routine must be an object.");
   const str = (v: unknown) => (v == null ? "" : String(v).trim());
   const id = str(input.id);
   if (!ID_RE.test(id)) throw new Error("A routine's id is lowercase letters, digits and dashes.");
-  const out: Routine = { id, enabled: input.enabled !== false };
+  // Without "enabled": on for one you create, off for a team routine (deck.json routines were always opt-in).
+  const out: Routine = { id, enabled: typeof input.enabled === "boolean" ? input.enabled : opts.defaultEnabled ?? true };
   const label = str(input.label);
   if (label.length > LABEL_MAX) throw new Error(`The name is longer than ${LABEL_MAX} characters.`);
   if (label) out.label = label;
@@ -101,7 +106,7 @@ export function checkRoutine(input: any, opts: { presets?: string[] } = {}): Rou
   }
   const model = str(input.model);
   if (model) {
-    if (!MODEL_RE.test(model)) throw new Error(`Invalid model ${model}.`);
+    if (!MODEL_RE.test(model) && !ROUTED_MODEL_RE.test(model)) throw new Error(`Invalid model ${model}.`);
     out.model = model;
   }
   const effort = str(input.effort);
@@ -168,7 +173,7 @@ export function dueSlot(r: Routine, now = new Date()): Date | null {
   }
   if (!latest) return null;
   const late = now.getTime() - latest.getTime();
-  if (r.at) return late <= (r.catchUpMinutes ?? DEFAULT_CATCH_UP) * 60000 ? latest : null;
+  if (r.at) return late <= Math.max((r.catchUpMinutes ?? DEFAULT_CATCH_UP) * 60000, TICK_WINDOW_MS) ? latest : null;
   const every = parseDuration(r.every)!;
   return late < Math.max(every, r.catchUpMinutes ?? 0) * 60000 ? latest : null;
 }
@@ -233,7 +238,7 @@ export class Routines {
       seen.add(id);
       let routine: Routine;
       let problem: string | null = null;
-      try { routine = checkRoutine(raw, { presets: presetIds }); } catch (e) {
+      try { routine = checkRoutine(raw, { presets: presetIds, defaultEnabled: source === "personal" }); } catch (e) {
         routine = { ...(raw && typeof raw === "object" ? raw : {}), id, enabled: false };
         problem = (e as Error).message;
       }
@@ -294,7 +299,7 @@ export class Routines {
     }
     const team = this.team().routines.find((r: any) => r?.id === id);
     if (!team) throw new Error(`No routine ${id}.`);
-    if ((team.enabled !== false) === on) delete mine.team[id];
+    if ((team.enabled === true) === on) delete mine.team[id];
     else mine.team[id] = { enabled: on };
     this._write(mine);
     return this.get(id)!.routine;
@@ -349,17 +354,18 @@ export class Scheduler {
       const prev = this.state[r.id];
       const schedule = scheduleKey(r);
       const slot = dueSlot(r, now);
-      if (!slot) continue;
-      const slotKey = slot.toISOString();
-      // State from before schedules were recorded has no `schedule`: same slot, same routine.
-      if (prev && prev.slot === slotKey && (prev.schedule ?? schedule) === schedule) continue;
-      // A new interval routine (or one whose schedule changed) starts with the next slot,
-      // not the one it was created in; an `at` routine still fires within its catch-up time.
+      const slotKey = slot ? slot.toISOString() : "";
+      // A new interval routine (or one whose schedule changed) starts with the next slot, not
+      // the one it was created in. Recorded even when no slot is due (outside `between`), so
+      // the first slot to come does fire. An `at` routine still fires within its catch-up time.
       if (r.every && (!prev || (prev.schedule && prev.schedule !== schedule))) {
         this.state[r.id] = { ...(prev || { firedAt: "", ok: true }), slot: slotKey, schedule };
         this._save();
         continue;
       }
+      if (!slot) continue;
+      // State from before schedules were recorded has no `schedule`: same slot, same routine.
+      if (prev && prev.slot === slotKey && (prev.schedule ?? schedule) === schedule) continue;
       this._fire(r, now, { slot: slotKey, schedule });
     }
   }

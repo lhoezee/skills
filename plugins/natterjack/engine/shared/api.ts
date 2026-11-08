@@ -667,7 +667,12 @@ export interface RoutineView extends Routine {
   problem?: string | null;
 }
 /** GET /api/routines */
-export interface RoutinesResponse { routines: RoutineView[]; error?: string }
+export interface RoutinesResponse {
+  routines: RoutineView[];
+  /** Every run with a watch on (PRs, a loop, a check), however old: the Loops page lists them. */
+  loops?: RunMeta[];
+  error?: string;
+}
 /** A workspace skill, or (with `plugin`) one from an enabled Claude Code plugin, named `<plugin>:<skill>`. */
 export interface SkillInfo { name: string; description: string; argumentHint: string; plugin?: string }
 /**

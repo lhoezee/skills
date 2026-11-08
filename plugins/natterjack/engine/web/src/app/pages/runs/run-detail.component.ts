@@ -728,7 +728,8 @@ export class RunDetailComponent implements OnDestroy {
     const r = this.run();
     if (!r) return;
     try {
-      const res = await this.api.post<{ run: RunMeta }>('/api/runs/' + r.id + '/watch-approve');
+      // The command shown here: the server refuses if a turn replaced it since.
+      const res = await this.api.post<{ run: RunMeta }>('/api/runs/' + r.id + '/watch-approve', { startedAt: r.watch?.startedAt, command: r.watch?.command });
       this.setRun(res.run);
       this.toast.show('Approved: the first check runs within a minute');
       this.data.loadRuns();
@@ -743,7 +744,7 @@ export class RunDetailComponent implements OnDestroy {
     try {
       const res = await this.api.post<RoutinesResponse & { run: RunMeta; routine: { id: string } }>('/api/routines/from-run', { runId: r.id });
       this.setRun(res.run);
-      this.data.routines.set(res.routines);
+      this.data.applyRoutines(res);
       this.toast.show('Routine created: it\'s on the Loops page');
     } catch (e) { this.toast.error((e as Error).message); }
     finally { this.creatingRoutine.set(false); }

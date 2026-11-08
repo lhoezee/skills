@@ -62,6 +62,8 @@ export class DataService {
   readonly models = signal<ModelsView | null>(null);
   /** Routines, team and your own (live topic `routines`, the Loops page); null until they arrive. */
   readonly routines = signal<RoutineView[] | null>(null);
+  /** Every run with a watch on, however old (RoutinesResponse.loops): the runs feed stops at 200. */
+  readonly loopRuns = signal<RunMeta[]>([]);
   /** The Factory board (live topic `factory`); null until it arrives. */
   readonly factory = signal<FactoryBoard | null>(null);
   /** MCP servers (Connections page and its sidebar count). */
@@ -128,7 +130,7 @@ export class DataService {
     on<Inbox>('inbox', (d) => { this.inbox.set(d); this.inboxError.set(null); });
     on<ModelsView>('models', (d) => this.applyModels(d));
     on<FactoryBoard>('factory', (d) => this.factory.set(d));
-    on<RoutinesResponse>('routines', (d) => this.routines.set(d.routines));
+    on<RoutinesResponse>('routines', (d) => this.applyRoutines(d));
     // Sent when the server evaluates Get started again after a sign-in, clone or role change.
     on<OnboardingResponse>('onboarding', (d) => this.onboarding.set(d));
     es.onopen = () => { if (this.es === es) { this.api.connected.set(true); this.stopPolling(); } };
@@ -177,7 +179,13 @@ export class DataService {
   }
 
   async loadRoutines(): Promise<void> {
-    try { this.routines.set((await this.api.get<RoutinesResponse>('/api/routines')).routines); } catch { /* keep the last list */ }
+    try { this.applyRoutines(await this.api.get<RoutinesResponse>('/api/routines')); } catch { /* keep the last list */ }
+  }
+
+  /** The routines topic (or a routine route's answer): the routines and every run with a watch on. */
+  applyRoutines(d: RoutinesResponse): void {
+    this.routines.set(d.routines);
+    if (d.loops) this.loopRuns.set(d.loops.map(normaliseRun));
   }
 
   async loadDeck(): Promise<void> {

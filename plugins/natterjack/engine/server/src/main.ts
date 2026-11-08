@@ -38,7 +38,7 @@ import type { Ws } from "./workspaces.ts";
 // start (apps, terminals). claude.ts strips them per spawn too; drop them here once.
 for (const key of CLAUDE_SESSION_ENV) delete process.env[key];
 
-import { IMPLEMENT_PROMPT, REPLYABLE, RunManager, TERMINAL_QUIET_MS, httpError, runLabel } from "./runs.ts";
+import { IMPLEMENT_PROMPT, REPLYABLE, RunManager, TERMINAL_QUIET_MS, httpError, runLabel, watchActive } from "./runs.ts";
 import { claudeDir, findSession, forkSession, isInside, listSessions as listTerminalSessions, suggestFolders, type SessionInfo } from "./sessions.ts";
 import { Deck } from "./deck.ts";
 import { Routines, Scheduler, describeSchedule, type FireOutcome } from "./routines.ts";
@@ -729,13 +729,14 @@ const meetingTickets = new MeetingTickets(LEDGER_DIR);
 let remoteLink: RemoteLinkClient | null = null;
 const runs = new RunManager(LEDGER_DIR, {
   onFinish: (meta) => {
-    usage.invalidate(); live.refresh("runs"); live.refresh("overview"); // a finished turn moves the meters and preset stats
+    usage.invalidate(); live.refresh("runs"); live.refresh("overview"); live.refresh("routines"); // a finished turn moves the meters and preset stats
     // A meeting's Ask run lists the tickets it created in its outputs: record them against the meeting.
     if (meta.trigger === "meetings" && meta.meetingId) recordRunTickets(meetingTickets, meta, attachments.output(meta.id, TICKETS_FILE));
   },
   onTurnStart: (meta) => { runChanges.snapshot({ ...meta }).catch(() => {}); },
   onChange: (meta) => {
     live.publish("run", meta); // one run, not the whole list: a live run saves every 1.5 s
+    if (meta.watch) live.refresh("routines"); // the Loops page lists every run with a watch on
     remoteLink?.noteChange(meta);
   },
   onEvent: (meta, ev, index) => remoteLink?.noteEvent(meta, ev, index),
@@ -1487,9 +1488,12 @@ const scheduler = new Scheduler(routines, path.join(LEDGER_DIR, "scheduler-state
 });
 scheduler.start();
 
-/** GET /api/routines, and what the routine routes return. */
+/**
+ * GET /api/routines, and what the routine routes return: the routines, and every run with a
+ * watch on however old it is (the runs topic carries only the newest 200).
+ */
 function routinesView(): RoutinesResponse {
-  return { routines: scheduler.view() };
+  return { routines: scheduler.view(), loops: runs.list().filter(watchActive) };
 }
 /** After a routine changed: every open page, now. */
 function routinesChanged(): RoutinesResponse {
@@ -2537,7 +2541,7 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
   if (runMatch && runMatch[2] === "flag") return sendJson(res, { run: runs.setFlag(runMatch[1], !!body.flagged) });
   if (runMatch && runMatch[2] === "watch-stop") return sendJson(res, { run: runs.stopWatch(runMatch[1]) });
   // A check watch runs a command Claude wrote: nothing runs until you approve it here.
-  if (runMatch && runMatch[2] === "watch-approve") return sendJson(res, { run: runs.approveWatch(runMatch[1]) });
+  if (runMatch && runMatch[2] === "watch-approve") return sendJson(res, { run: runs.approveWatch(runMatch[1], { startedAt: body.startedAt, command: body.command }) });
   // Routines (the Loops page): your own are created, changed and deleted here; a team one can only be switched off for you.
   if (p === "/api/routines") {
     const routine = routines.save(body.routine && typeof body.routine === "object" ? body.routine : body);

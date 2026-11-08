@@ -41,6 +41,9 @@ export interface RoutineDraft {
   model: string;
   effort: string;
   catchUp: string;
+  /** Kept as they were when editing: the form doesn't show them, and saving replaces the routine. */
+  enabled: boolean;
+  permissionMode: string;
 }
 
 export function blankDraft(): RoutineDraft {
@@ -48,6 +51,7 @@ export function blankDraft(): RoutineDraft {
     id: null, label: '', what: 'prompt', prompt: '', preset: '', args: {},
     when: 'at', at: '09:00', every: '2h', between: false, from: '08:00', to: '18:00',
     days: 'weekdays', custom: ['mon'], mode: 'fresh', workspace: 'main', model: '', effort: '', catchUp: '',
+    enabled: true, permissionMode: '',
   };
 }
 
@@ -72,12 +76,15 @@ export function draftFrom(r: Partial<RoutineView> & { prompt?: string }): Routin
   d.model = r.model || '';
   d.effort = r.effort || '';
   d.catchUp = r.catchUpMinutes != null ? String(r.catchUpMinutes) : '';
+  d.enabled = r.enabled !== false;
+  d.permissionMode = r.permissionMode || '';
   return d;
 }
 
 /** The draft as POST /api/routines takes it (the server checks it). */
 export function draftToInput(d: RoutineDraft, presets: Preset[] = []): RoutineInput {
-  const out: RoutineInput = { label: d.label.trim() || undefined };
+  const out: RoutineInput = { label: d.label.trim() || undefined, enabled: d.enabled };
+  if (d.permissionMode) out.permissionMode = d.permissionMode as RoutineInput['permissionMode'];
   if (d.id) out.id = d.id;
   if (d.what === 'preset') {
     out.preset = d.preset;

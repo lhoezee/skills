@@ -826,12 +826,16 @@ export class RunManager {
    * Approve a check watch's command: until then the server never runs it (a command Claude
    * wrote, which a prompt injection could have planted). The first check runs right away.
    */
-  approveWatch(id: string, now = new Date()): RunMeta {
+  approveWatch(id: string, seen: { startedAt?: unknown; command?: unknown }, now = new Date()): RunMeta {
     const live = this.live.get(id);
     const meta = live ? live.meta : this.get(id);
     if (!meta) throw httpError(404, "Unknown run");
     if (meta.remote) throw httpError(409, "Approve it on the computer that runs it.");
     if (!watchActive(meta) || meta.watch!.kind !== "check") throw httpError(409, "This run has no check to approve.");
+    // Approve only the command you looked at: a turn may have replaced it since the page showed it.
+    if (seen.startedAt !== meta.watch!.startedAt || seen.command !== meta.watch!.command) {
+      throw httpError(409, "The check changed since you looked at it. Read the command again before approving.");
+    }
     meta.watch!.approval = "approved";
     meta.watch!.nextCheckAt = now.toISOString();
     meta.watch!.error = null;
@@ -1373,7 +1377,10 @@ export function applyWatchBlock(meta: RunMeta, text: string, now = new Date()) {
   }
   if ("stop" in block) { endWatch(meta, "Claude ended the watch.", now); return; }
   const old = active ? meta.watch! : null;
-  const w = blankWatch(block.kind, now, block.everyMinutes, block.prompt, new Date(now.getTime() + block.days * 86400000));
+  // An interval loop lives at least two intervals, so it always gets its first wake-up (a 24 h
+  // loop for "1 day" would otherwise expire the moment it's due).
+  const lifeMs = Math.max(block.days * 86400000, block.kind === "every" ? 2 * block.everyMinutes * 60000 : 0);
+  const w = blankWatch(block.kind, now, block.everyMinutes, block.prompt, new Date(now.getTime() + lifeMs));
   w.wakes = old ? old.wakes : 0;
   if (block.kind === "github-pr") {
     const previous = old?.kind === "github-pr" ? old.prs : [];

@@ -11,7 +11,14 @@ describe('loops.util', () => {
     expect(d.when).toBe('every');
     expect(d.between).toBe(true);
     expect(d.days).toBe('custom');
-    expect(draftToInput(d)).toEqual({ id: 'q', label: 'Queue', prompt: 'Check.', every: '2h', between: '08:00-18:00', days: ['mon', 'fri'], mode: 'continue', workspace: 'main', model: 'sonnet', catchUpMinutes: 30 });
+    expect(draftToInput(d)).toEqual({ id: 'q', label: 'Queue', enabled: true, prompt: 'Check.', every: '2h', between: '08:00-18:00', days: ['mon', 'fri'], mode: 'continue', workspace: 'main', model: 'sonnet', catchUpMinutes: 30 });
+  });
+
+  it('keeps what the form doesn\'t show when a routine is edited and saved', () => {
+    const out = draftToInput(draftFrom(view({ id: 'p', prompt: 'Read only.', at: '07:00', enabled: false, permissionMode: 'plan' })));
+    expect(out.enabled).toBe(false);
+    expect(out.permissionMode).toBe('plan');
+    expect(draftToInput(blankDraft()).enabled).toBe(true);
   });
 
   it('keeps only the chosen preset\'s args', () => {

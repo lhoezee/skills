@@ -7,7 +7,7 @@ import type { RunMeta } from "../../shared/api.ts";
 import { findBlock, stripBlock } from "../../shared/blocks.ts";
 import { daysLabel, formatMinutes, inWindow, parseDuration, parseWindow, routineDays } from "../../shared/loops.ts";
 import { RunManager, applyRoutineBlock, applyWatchBlock, parseWatch } from "../src/runs.ts";
-import { Watcher, commandAllowed, findBash, type RunCommand } from "../src/watches.ts";
+import { Watcher, commandAllowed, findBash, makeRunCommand, type RunCommand } from "../src/watches.ts";
 import { loopRules } from "../src/agents/util.ts";
 
 const T0 = new Date("2026-10-02T10:00:00Z");
@@ -201,7 +201,8 @@ test("watcher: a check runs nothing until approved; then the first run records a
     await t.watcher.tick(later(0));
     await t.watcher.tick(later(30));
     assert.equal(t.commands.length, 0);
-    t.runs.approveWatch("r1", later(31));
+    const w0 = t.runs.get("r1")!.watch!;
+    t.runs.approveWatch("r1", { startedAt: w0.startedAt, command: w0.command }, later(31));
     await t.watcher.tick(later(31)); // approving makes it due now
     assert.equal(t.commands.length, 1);
     assert.equal(t.wakes.length, 0);
@@ -246,11 +247,51 @@ test("watcher: a command that can't run is recorded, not woken on", async () => 
   } finally { t.done(); }
 });
 
-test("approveWatch: only a check, only on this computer", () => {
+test("approveWatch: only a check", () => {
   const t = setup('<<WATCH>>{"every":"1h","prompt":"x"}<</WATCH>>');
   try {
-    assert.throws(() => t.runs.approveWatch("r1"), /no check/);
+    assert.throws(() => t.runs.approveWatch("r1", {}), /no check/);
   } finally { t.done(); }
+});
+
+test("approveWatch: only the command you saw; a replaced check isn't approved", () => {
+  const t = setup('<<WATCH>>{"command":"cat status"}<</WATCH>>');
+  try {
+    const seen = { startedAt: t.runs.get("r1")!.watch!.startedAt, command: "cat status" };
+    assert.throws(() => t.runs.approveWatch("r1", {}), /changed since you looked/);
+    assert.throws(() => t.runs.approveWatch("r1", { ...seen, command: "cat other" }), /changed since you looked/);
+    assert.throws(() => t.runs.approveWatch("r1", { ...seen, startedAt: later(9).toISOString() }), /changed since you looked/);
+    assert.equal(t.runs.get("r1")!.watch!.approval, "pending");
+    assert.equal(t.runs.approveWatch("r1", seen).watch!.approval, "approved");
+  } finally { t.done(); }
+});
+
+test("an interval loop always lives long enough for its first wake-up", async () => {
+  const meta = { watch: null } as unknown as RunMeta;
+  applyWatchBlock(meta, '<<WATCH>>{"every":"24h","prompt":"Daily look."}<</WATCH>>', T0);
+  assert.equal(meta.watch!.expiresAt, later(2 * 1440).toISOString());
+  applyWatchBlock(meta, '<<WATCH>>{"every":"30m","prompt":"x","days":2}<</WATCH>>', T0);
+  assert.equal(meta.watch!.expiresAt, later(2 * 1440).toISOString()); // days wins when it's longer
+  const t = setup('<<WATCH>>{"every":"24h","prompt":"Daily look.","days":1}<</WATCH>>');
+  try {
+    await t.watcher.tick(later(1440));
+    assert.equal(t.wakes.length, 1);
+    assert.equal(t.runs.get("r1")!.watch!.endedAt, null);
+  } finally { t.done(); }
+});
+
+test("the real command runner: a timeout stops the whole tree and settles at once", { skip: !findBash() }, async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dash-loops-tree-"));
+  try {
+    const run = makeRunCommand(1500);
+    const started = Date.now();
+    // A child that outlives bash's own work and holds the output pipe open.
+    await assert.rejects(run("sleep 30 | cat; echo never", dir), /didn't finish within 2 s/);
+    assert.ok(Date.now() - started < 10000, "settled on the timeout, not when the pipes closed");
+  } finally {
+    // taskkill finishes on its own time: the killed sleep can hold the folder a moment longer on Windows.
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+  }
 });
 
 test("the real command runner: output and exit code, in the run's folder", { skip: !findBash() }, async () => {
