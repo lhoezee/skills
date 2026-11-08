@@ -1,7 +1,7 @@
 import { Injectable, computed, inject, signal } from '@angular/core';
 import type {
   AgentInfo, ConnectionsResponse, DeckResponse, DocSite, DocsResponse, FactoryBoard, KnowledgeArea, Inbox, Job, JobsResponse, MachineReport, ModelsView, OnboardingResponse, Overview, PresetStats,
-  RemoteLinkLive, RunMeta, RunsResponse, Stack, StatusResponse,
+  RemoteLinkLive, RoutinesResponse, RoutineView, RunMeta, RunsResponse, Stack, StatusResponse,
 } from '../../../../shared/api';
 import { linkLive, mergeRuns, stampLinks, upsertRunSplit } from '../runs/remote';
 import { needsAnswer as canAnswerHere } from '../shared/run-status';
@@ -60,6 +60,8 @@ export class DataService {
   readonly agents = signal<AgentInfo[] | null>(null);
   /** Local and team open models (Models page); null until the stream sends it. */
   readonly models = signal<ModelsView | null>(null);
+  /** Routines, team and your own (live topic `routines`, the Loops page); null until they arrive. */
+  readonly routines = signal<RoutineView[] | null>(null);
   /** The Factory board (live topic `factory`); null until it arrives. */
   readonly factory = signal<FactoryBoard | null>(null);
   /** MCP servers (Connections page and its sidebar count). */
@@ -126,6 +128,7 @@ export class DataService {
     on<Inbox>('inbox', (d) => { this.inbox.set(d); this.inboxError.set(null); });
     on<ModelsView>('models', (d) => this.applyModels(d));
     on<FactoryBoard>('factory', (d) => this.factory.set(d));
+    on<RoutinesResponse>('routines', (d) => this.routines.set(d.routines));
     // Sent when the server evaluates Get started again after a sign-in, clone or role change.
     on<OnboardingResponse>('onboarding', (d) => this.onboarding.set(d));
     es.onopen = () => { if (this.es === es) { this.api.connected.set(true); this.stopPolling(); } };
@@ -151,7 +154,7 @@ export class DataService {
   /** The intervals the dashboard polled on before the stream. */
   private startPolling(): void {
     if (this.polls.length) return;
-    this.loadDeck(); this.loadRuns(); this.loadOverview(); this.loadStatus(); this.loadInbox(false); this.loadJobs(); this.loadFactory();
+    this.loadDeck(); this.loadRuns(); this.loadOverview(); this.loadStatus(); this.loadInbox(false); this.loadJobs(); this.loadFactory(); this.loadRoutines();
     this.polls = [
       setInterval(() => this.loadJobs(), 2000),
       setInterval(() => this.loadRuns(), 3000),
@@ -160,6 +163,7 @@ export class DataService {
       setInterval(() => this.loadDeck(), 30000),
       setInterval(() => this.loadInbox(false), 60000),
       setInterval(() => this.loadFactory(), 5000),
+      setInterval(() => this.loadRoutines(), 30000),
     ];
   }
 
@@ -170,6 +174,10 @@ export class DataService {
 
   async loadFactory(): Promise<void> {
     try { this.factory.set(await this.api.get<FactoryBoard>('/api/factory')); } catch { /* keep the last board */ }
+  }
+
+  async loadRoutines(): Promise<void> {
+    try { this.routines.set((await this.api.get<RoutinesResponse>('/api/routines')).routines); } catch { /* keep the last list */ }
   }
 
   async loadDeck(): Promise<void> {
