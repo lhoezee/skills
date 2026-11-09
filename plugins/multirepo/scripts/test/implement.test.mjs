@@ -486,6 +486,41 @@ test("recent: --paths keeps a file renamed out of a watched folder, with its com
   assert.ok(api.commits.some((c) => c.subject === "refactor: move keep to shared"), api.commits.map((c) => c.subject).join());
 });
 
+test("recent: --paths keeps a repo-wide doc moved out of the root, with its commit", () => {
+  const ws = recentWorkspace();
+  const seed = ws.seeds.api;
+  at("2026-02-09T00:00:00Z", () => {
+    fs.mkdirSync(path.join(seed, "guides"), { recursive: true });
+    git(seed, "mv", "README.md", "guides/README.md");
+    git(seed, "commit", "-q", "-m", "docs: move the readme to guides");
+  });
+  git(seed, "push", "-q", "origin", "HEAD:main");
+  git(ws.repo("api"), "fetch", "-q", "origin");
+  const api = recentChanges({ root: ws.root, since: "2026-02-01", repos: ["api"], paths: ["infra"] }).repos[0];
+  assert.deepEqual(api.files.find((f) => f.path === "guides/README.md"), { path: "guides/README.md", status: "renamed", from: "README.md" });
+  assert.deepEqual(api.docs.find((d) => d.path === "guides/README.md"), { path: "guides/README.md", kind: "readme", status: "renamed" });
+  assert.ok(api.commits.some((c) => c.subject === "docs: move the readme to guides"), api.commits.map((c) => c.subject).join());
+});
+
+test("recent: --paths still lists the commits of a root doc changed and then reverted (no net diff)", () => {
+  const ws = recentWorkspace();
+  const seed = ws.seeds.api;
+  const readme = fs.readFileSync(path.join(seed, "README.md"), "utf-8");
+  const adr = fs.readFileSync(path.join(seed, "docs/adr/0002-layout.md"), "utf-8");
+  at("2026-02-09T00:00:00Z", () => { commit(seed, "README.md", "# changed\n", "docs: change the readme"); commit(seed, "docs/adr/0002-layout.md", "# changed\n", "docs: change the adr"); });
+  at("2026-02-10T00:00:00Z", () => { commit(seed, "README.md", readme, "Revert \"docs: change the readme\""); commit(seed, "docs/adr/0002-layout.md", adr, "Revert \"docs: change the adr\""); });
+  git(seed, "push", "-q", "origin", "HEAD:main");
+  git(ws.repo("api"), "fetch", "-q", "origin");
+  for (const pathspecLimit of [8000, 20]) {
+    const api = recentChanges({ root: ws.root, since: "2026-02-01", repos: ["api"], paths: ["infra"], pathspecLimit }).repos[0];
+    assert.equal(api.state, "ok", api.detail);
+    assert.ok(!api.files.some((f) => f.path === "README.md"), "no net change to the readme");
+    const subjects = api.commits.map((c) => c.subject);
+    for (const s of ["docs: change the readme", "Revert \"docs: change the readme\"", "docs: change the adr", "Revert \"docs: change the adr\""]) assert.ok(subjects.includes(s), `${s} (limit ${pathspecLimit}): ${subjects.join()}`);
+    assert.ok(!subjects.some((s) => /web/.test(s)), subjects.join());
+  }
+});
+
 test("recent: a shallow clone whose history doesn't reach the date says so and lists only what it holds", () => {
   const ws = recentWorkspace();
   fs.rmSync(ws.repo("api"), { recursive: true, force: true });

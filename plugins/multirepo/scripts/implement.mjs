@@ -455,6 +455,32 @@ export function isPartialClone(repo) {
   return promisors.ok && promisors.out.split("\n").some((l) => / true$/.test(l.trim()));
 }
 
+/**
+ * The repo-wide docs (see repoWide) at any of these commits, read from trees only (never a blob a partial clone
+ * would fetch): the root's files, and the files under the root folders that can hold them (docs/, .github/, a root
+ * decision folder). → { ok, paths } or the failed gitRun.
+ */
+function repoWideDocs(repo, commits, opts) {
+  const paths = new Set();
+  for (const c of commits) {
+    const top = gitRun(repo, ["ls-tree", "-z", c], { ...opts, trim: false });
+    if (!top.ok) return top;
+    const dirs = [];
+    for (const entry of top.out.split("\0").filter(Boolean)) {
+      const tab = entry.indexOf("\t");
+      const type = entry.slice(0, tab).split(" ")[1];
+      const name = entry.slice(tab + 1);
+      if (type === "blob" && repoWide(name)) paths.add(name);
+      else if (type === "tree" && (REPO_WIDE_DECISION_DIR_RE.test(name) || /^\.github$/i.test(name))) dirs.push(name);
+    }
+    if (!dirs.length) continue;
+    const below = gitRun(repo, ["--literal-pathspecs", "ls-tree", "-r", "-z", "--name-only", c, "--", ...dirs], { ...opts, trim: false });
+    if (!below.ok) return below;
+    for (const p of below.out.split("\0").filter(Boolean)) if (repoWide(p)) paths.add(p);
+  }
+  return { ok: true, paths: [...paths] };
+}
+
 /** Where a repo's typo note goes in its notes, filled in once every repo is read. */
 const MISSING = Symbol("missing paths");
 
@@ -483,7 +509,7 @@ function chunkPaths(entries, limit) {
  * usage error. git gets it as UTC.
  * state: ok; shallow (the clone's history doesn't reach the date: the lists hold
  * only what changed after its oldest commit, which is base); error (a git read
- * failed: rev-list for the baseline, the diff or the log, including output past
+ * failed: rev-list for the baseline, the diff, ls-tree or the log, including output past
  * maxBuffer (64 MB) or a read past timeout (120 s each); detail says which and
  * why, then the notes gathered before it; files, commits and docs are empty, the
  * path lists are kept); no-origin or missing (empty lists).
@@ -509,8 +535,11 @@ function chunkPaths(entries, limit) {
  * paths (relative to each repo; absolute or with a '..' segment is a usage error) narrow files and
  * commits, except the root docs that bind the whole repo (see repoWide: the root
  * README, CONTRIBUTING at the root, docs/ or .github/, decision records at the root
- * level or under the root docs/) and files renamed out of a watched folder; another
- * top-level folder's decision records count only when it's watched. docs never
+ * level or under the root docs/) and files renamed out of a watched folder or out of
+ * a repo-wide doc's place (kind by the new path); the log also covers every repo-wide
+ * doc base or the tip has (ls-tree, trees only), so a root doc changed and then reverted
+ * still lists its commits; another top-level folder's decision records count only
+ * when it's watched. docs never
  * lists a deleted file. Past pathspecLimit characters (a big folder move) the log's
  * pathspec is split over several calls and their commits merged.
  */
@@ -578,12 +607,19 @@ export function recentChanges({
     // Past the limit git skips inexact renames with only a warning on stderr (exit 0).
     if (!partial && /rename detection was skipped/i.test(diff.err)) notes.push("too many files for rename detection: renames show as a delete and an add");
     const kept = nameStatus(diff.out).map((f) => ({ f, kind: docKind(f.path) }))
-      .filter(({ f, kind }) => under(f.path) || under(f.from) || repoWide(f.path, kind));
+      .filter(({ f, kind }) => under(f.path) || under(f.from) || repoWide(f.path, kind) || (f.from != null && repoWide(f.from)));
     const files = kept.map(({ f }) => f);
 
     // The log runs even with no net change (merged, then reverted), so its commits show. Its pathspec: the watched
-    // folders plus the files kept outside them (repo-wide docs, renames out) and their old names, chunked.
-    const spec = wanted.length ? [...new Set([...wanted, ...files.flatMap((f) => [f.path, f.from]).filter((p) => p && !under(p))])] : [];
+    // folders, the files kept outside them (repo-wide docs, renames in or out) and their old names, and every
+    // repo-wide doc on base or the tip whatever the net diff (a root README changed, then reverted), chunked.
+    let rootDocs = [];
+    if (wanted.length) {
+      const listed = repoWideDocs(r.path, [from, ref].filter(Boolean), opts);
+      if (!listed.ok) return failed("ls-tree", listed, from);
+      rootDocs = listed.paths;
+    }
+    const spec = wanted.length ? [...new Set([...wanted, ...[...files.flatMap((f) => [f.path, f.from]), ...rootDocs].filter((p) => p && !under(p))])] : [];
     const groups = spec.length ? chunkPaths(spec, pathspecLimit) : [[]];
     const seen = new Map();
     for (const group of groups) {
