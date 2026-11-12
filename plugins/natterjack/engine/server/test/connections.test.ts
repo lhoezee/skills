@@ -236,3 +236,40 @@ test("a requirement is met by any of its alternatives, the connected one first",
   assert.deepEqual(by["claude.ai Nowhere"].required?.alternatives, ["also-nowhere"]);
   assert.equal(r.problems, 1);
 });
+
+test("mcpToolServerRule: a tool's server rule, server ids with single underscores", async () => {
+  const { mcpToolServerRule } = await import("../src/connections.ts");
+  assert.equal(mcpToolServerRule("mcp__claude_ai_Slack__slack_send_message"), "mcp__claude_ai_Slack");
+  assert.equal(mcpToolServerRule("mcp__github__delete_file"), "mcp__github");
+  assert.equal(mcpToolServerRule("mcp__notion"), "mcp__notion");
+  assert.equal(mcpToolServerRule("Bash"), null);
+});
+
+test("denied: refused tools grouped by server; allowable, already allowed, blocked by deny/ask, another folder", async () => {
+  write(settingsFile, { permissions: { allow: ["mcp__mine", "mcp__docs__prod"], deny: ["mcp__octopusdeploy"], ask: ["mcp__claude_ai_Confirm__send"] } });
+  const conn = new Connections(ROOT, { run: fake });
+  await conn.list({ wait: true });
+  const tools = ["mcp__claude_ai_Linear__list_issues", "mcp__claude_ai_Linear__get_issue", "mcp__mine__x", "mcp__octopusdeploy__deploy", "mcp__claude_ai_Confirm__send", "mcp__unknown__y", "mcp__docs__prod__search"];
+  const by = Object.fromEntries((await conn.denied(tools, true)).map((d) => [d.rule, d]));
+  // A known rule beats splitting at the first "__".
+  assert.deepEqual(by.mcp__docs__prod.tools, ["mcp__docs__prod__search"]);
+  assert.equal(by.mcp__docs, undefined);
+  assert.equal(by.mcp__claude_ai_Linear.name, "claude.ai Linear");
+  assert.deepEqual(by.mcp__claude_ai_Linear.tools, ["mcp__claude_ai_Linear__list_issues", "mcp__claude_ai_Linear__get_issue"]);
+  assert.equal(by.mcp__claude_ai_Linear.canAllow, true);
+  assert.equal(by.mcp__mine.allowed, true, "allowed since the run was refused: trying again is enough");
+  assert.equal(by.mcp__mine.canAllow, false);
+  assert.equal(by.mcp__octopusdeploy.canAllow, false);
+  assert.match(by.mcp__octopusdeploy.hint || "", /deny or ask/);
+  assert.match(by.mcp__claude_ai_Confirm.hint || "", /deny or ask/, "every refused tool of it is behind an ask rule");
+  assert.equal(by.mcp__unknown.name, "unknown");
+  assert.match(by.mcp__unknown.hint || "", /isn't set up/);
+
+  const other = (await conn.denied(["mcp__claude_ai_Linear__list_issues"], false))[0];
+  assert.equal(other.canAllow, false);
+  assert.match(other.hint || "", /another folder/);
+  // Allowed here says nothing about the other folder's settings: no Try again there.
+  const otherAllowed = (await conn.denied(["mcp__mine__x"], false))[0];
+  assert.equal(otherAllowed.allowed, false);
+  assert.match(otherAllowed.hint || "", /another folder/);
+});
