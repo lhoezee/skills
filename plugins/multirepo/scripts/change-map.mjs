@@ -423,6 +423,22 @@ export function renderMarkdown(data) {
   return out.join("\n");
 }
 
+/**
+ * In a Natterjack dashboard run (DASHBOARD_OUTPUTS names the run's outputs folder), writes the page
+ * there as <name>.change-map.html, which the run page shows in its Map tab. Returns its path, or
+ * null outside a dashboard run or when the folder can't be written; never throws.
+ */
+export function copyToOutputs(html, name, dir = process.env.DASHBOARD_OUTPUTS) {
+  if (!dir) return null;
+  try {
+    const file = path.join(dir, `${String(name).replace(/[^A-Za-z0-9._-]+/g, "-") || "change"}.change-map.html`);
+    fs.writeFileSync(file, html);
+    return file;
+  } catch {
+    return null;
+  }
+}
+
 /** Opens a file in the default browser; never throws. */
 export function openFile(file) {
   try {
@@ -488,6 +504,8 @@ function main(argv) {
     const out = {};
     if (r.html) fs.writeFileSync((out.html = path.resolve(stem + ".html")), r.html);
     if (r.md) fs.writeFileSync((out.md = path.resolve(stem + ".md")), r.md);
+    // In a Natterjack dashboard run, a copy in the run's outputs folder is what its run page's Map tab shows.
+    if (r.html) out.dashboard = copyToOutputs(r.html, path.basename(stem));
     const opened = args.open && out.html ? openFile(out.html) : false;
     const { stats, unexplained, hunks, map } = r.data;
     console.log(JSON.stringify({
