@@ -16,7 +16,7 @@
  *       one or more pull requests (several: one ticket's PRs across repos), via gh
  *       Both write <dir>/<name>.diff.json (the bundle render reads) and <name>.diff.txt (the diff
  *       with each hunk labelled [h1], [h2]..., for the agent to read) and print
- *       { bundle, numbered, name, hunks, repos }. <dir> defaults to <root>/.claude/change-maps,
+ *       { bundle, numbered, name, hunks, repos, skipped, omitted }. <dir> defaults to <root>/.claude/change-maps,
  *       which is kept out of git; <name> to the ticket in the branch, else the branch, else pr-<n>.
  *   node change-map.mjs render --diff <bundle.json> --map <map.json> [--format html|md|both] [--out <file>] [--open]
  *       checks the map and writes the page (default: next to the bundle, <name>.html / <name>.md).
@@ -34,8 +34,8 @@ import { numberedDiff, parseDiff } from "./review-guide.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const TEMPLATE = path.join(HERE, "change-map.html");
-/** Untracked files bigger than this are listed, not shown. */
-const UNTRACKED_MAX = 256 * 1024;
+/** Untracked text files bigger than this are listed in `omitted`, not shown. */
+const UNTRACKED_MAX = 2 * 1024 * 1024;
 /** What a line is for, in the order the page lists them. */
 export const CATEGORIES = ["happy", "alt", "edge", "error", "test", "glue", "docs", "generated", "unexplained"];
 export const BRANCH_KINDS = ["edge", "error", "alt"];
@@ -82,6 +82,7 @@ export function localRepoDiff(repo, { base = null, committed = false } = {}) {
   const d = gitRun(repo.path, args, { trim: false, maxBuffer: 256 * 1024 * 1024, timeout: 60000 });
   if (!d.ok) return { repo: repo.name, error: d.err };
   const texts = [d.out];
+  const omitted = [];
   if (!committed) {
     const others = gitRun(repo.path, ["ls-files", "--others", "--exclude-standard", "-z"], { trim: false });
     for (const file of (others.out || "").split("\0").filter(Boolean)) {
@@ -89,8 +90,12 @@ export function localRepoDiff(repo, { base = null, committed = false } = {}) {
       let st;
       try { st = fs.statSync(full); } catch { continue; }
       if (!st.isFile()) continue;
-      const buf = st.size <= UNTRACKED_MAX ? fs.readFileSync(full) : null;
-      if (!buf || buf.includes(0)) {
+      if (st.size > UNTRACKED_MAX) {
+        omitted.push({ repo: repo.name, file: slash(file), why: `untracked, ${Math.round(st.size / 1024)} KB: too big to show` });
+        continue;
+      }
+      const buf = fs.readFileSync(full);
+      if (buf.includes(0)) {
         texts.push(`diff --git a/${file} b/${file}\nnew file mode 100644\nBinary files /dev/null and b/${file} differ`);
         continue;
       }
@@ -104,6 +109,7 @@ export function localRepoDiff(repo, { base = null, committed = false } = {}) {
     head: git(repo.path, ["rev-parse", "HEAD"]) || null,
     branch: git(repo.path, ["rev-parse", "--abbrev-ref", "HEAD"]) || null,
     files: parseDiff(texts.filter(Boolean).join("\n")),
+    omitted,
   };
 }
 
@@ -113,17 +119,22 @@ export function localBundle(root, opts = {}) {
   if (!repos.length) throw new Error(`no git repos at ${root}`);
   const parts = [];
   const skipped = [];
+  const omitted = [];
   for (const r of repos) {
     const d = localRepoDiff(r, opts);
     if (d.error) skipped.push({ repo: r.name, why: d.error });
-    else if (d.files.length) parts.push(d);
+    else {
+      omitted.push(...d.omitted);
+      if (d.files.length) parts.push(d);
+    }
   }
   const files = bundleFiles(parts);
   return {
     source: "local",
     root,
-    repos: parts.map(({ files: _f, ...rest }) => rest),
+    repos: parts.map(({ files: _f, omitted: _o, ...rest }) => rest),
     skipped,
+    omitted,
     files,
   };
 }
@@ -146,13 +157,14 @@ export function prBundle(refs) {
     const info = JSON.parse(gh(["pr", "view", String(number), "--repo", repo, "--json", "headRefOid,headRefName,baseRefName,url,title"]));
     return { repo, number, url: info.url, title: info.title, base: info.baseRefName, head: info.headRefOid, branch: info.headRefName, files: parseDiff(gh(["pr", "diff", String(number), "--repo", repo])) };
   });
-  return { source: "pr", repos: parts.map(({ files: _f, ...rest }) => rest), skipped: [], files: bundleFiles(parts) };
+  return { source: "pr", repos: parts.map(({ files: _f, ...rest }) => rest), skipped: [], omitted: [], files: bundleFiles(parts) };
 }
 
 /** A file-safe name for the change: the ticket in a branch, else pr-<n> for PRs, else the branch. */
 export function bundleName(bundle, config = {}, meta = null) {
   const branches = bundle.repos.map((r) => r.branch).filter(Boolean);
-  const ticket = meta?.ticketId || findTicket(branches, config);
+  // A worktree's own ticket names local work only: PRs may be another ticket's.
+  const ticket = (bundle.source !== "pr" && meta?.ticketId) || findTicket(branches, config);
   const pr = bundle.source === "pr" && bundle.repos[0]?.number ? `pr-${bundle.repos[0].number}` : null;
   const raw = ticket || pr || branches[0] || "change";
   return String(raw).replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80) || "change";
@@ -171,7 +183,8 @@ export function outputDir(dir) {
 /** The bundle's hunks by id, lines split into { t, s, n (new line), o (old line) }. */
 export function hunkIndex(bundle) {
   const multi = new Set(bundle.files.map((f) => f.repo)).size > 1;
-  const out = {};
+  // No prototype: a hunk id like "toString" or "__proto__" must look up nothing.
+  const out = Object.create(null);
   for (const f of bundle.files) {
     for (const h of f.hunks) {
       let n = h.newStart, o = h.oldStart;
@@ -182,7 +195,7 @@ export function hunkIndex(bundle) {
         if (t !== "+") o++;
         return row;
       });
-      out[h.id] = { id: h.id, repo: multi ? f.repo : null, file: f.path, status: f.status, header: String(h.header).replace(/^@@[^@]*@@\s?/, ""), lines, cat: lines.map(() => null) };
+      out[h.id] = { id: h.id, repo: multi ? f.repo : null, file: f.path, prose: PROSE.test(f.path), status: f.status, header: String(h.header).replace(/^@@[^@]*@@\s?/, ""), lines, cat: lines.map(() => null) };
     }
   }
   return out;
@@ -290,7 +303,10 @@ export function normalizeMap(raw, hunks) {
 const TRIVIAL = /^\s*(?:[})\];,]*|<\/[\w.-]+>\s*)\s*$/;
 const IMPORT = /^\s*(?:import\b|export\s+(?:type\s+)?\{[^}]*\}\s+from\b|using\s+[\w.]+;|require\(|from\s+[\w.]+\s+import\b|#include\b)/;
 /** Comment lines take the category of the code they sit on: the next added line that has one. */
-const COMMENT = /^\s*(?:\/\/|\/\*|\*|<!--|#(?![\w-]*\s*[=(:{]))/;
+const COMMENT = /^\s*(?:\/\/|\/\*|\*(?:\s|\/|$)|<!--|#(?![\w-]*\s*[=(:{]))/;
+/** Prose files: a "#" or "*" there is a heading or a bullet, not a comment. */
+const PROSE = /\.(?:md|mdx|markdown|txt|rst|adoc)$/i;
+const isComment = (h, s) => !h.prose && COMMENT.test(s);
 
 /**
  * Sets every added line's category on hunks (in place) and counts them. Branch slices claim
@@ -309,7 +325,7 @@ export function classify(map, hunks) {
       const l = h.lines[i];
       if (l.t !== "+") continue;
       if (h.cat[i]) next = h.cat[i];
-      else if (COMMENT.test(l.s) && next) h.cat[i] = next;
+      else if (isComment(h, l.s) && next) h.cat[i] = next;
       else if (!TRIVIAL.test(l.s)) next = null;
     }
   }
@@ -319,10 +335,11 @@ export function classify(map, hunks) {
     let run = null;
     h.lines.forEach((l, i) => {
       if (l.t !== "+") { run = null; return; }
-      if (!h.cat[i]) h.cat[i] = map.tags[h.id] || (TRIVIAL.test(l.s) ? "trivial" : IMPORT.test(l.s) ? "glue" : COMMENT.test(l.s) ? "trivial" : "unexplained");
+      if (!h.cat[i]) h.cat[i] = map.tags[h.id] || (TRIVIAL.test(l.s) ? "trivial" : IMPORT.test(l.s) ? "glue" : isComment(h, l.s) ? "trivial" : "unexplained");
       if (h.cat[i] in stats) stats[h.cat[i]]++;
       if (h.cat[i] === "unexplained") {
-        if (run && run.b === i - 1) run.b = i;
+        // A run carries over blank lines, closers and comments (they don't reset it), so one block is one item.
+        if (run) run.b = i;
         else unexplained.push((run = { hunk: h.id, a: i, b: i }));
       } else if (h.cat[i] !== "trivial") run = null;
     });
@@ -356,7 +373,7 @@ export function renderHtml(data, template = fs.readFileSync(TEMPLATE, "utf-8")) 
 const LABELS = { happy: "happy path", alt: "alternate outcomes", edge: "edge cases", error: "error handling", test: "tests", glue: "glue", docs: "docs", generated: "generated", unexplained: "on no flow" };
 const KIND_LABEL = { edge: "Edge case", error: "Error", alt: "Alternate" };
 const BRANCH_PLURAL = { edge: ["edge case", "edge cases"], error: ["error", "errors"], alt: ["alternate", "alternates"] };
-const mermaidText = (s) => String(s).replace(/`/g, "").replace(/"/g, "#quot;").replace(/</g, "#lt;").replace(/>/g, "#gt;").slice(0, 90);
+const mermaidText = (s) => String(s).replace(/\s+/g, " ").replace(/`/g, "").replace(/"/g, "#quot;").replace(/</g, "#lt;").replace(/>/g, "#gt;").slice(0, 90);
 const mdText = (s) => String(s).replace(/\s*\n\s*/g, " ").replace(/[<>]/g, (c) => (c === "<" ? "&lt;" : "&gt;"));
 
 /** Markdown: the weight line, each flow as a Mermaid diagram plus a list, and what no flow explains. */
@@ -374,7 +391,7 @@ export function renderMarkdown(data) {
     if (f.trigger) out.push(mdText(f.trigger), "");
     out.push("```mermaid", "flowchart TD");
     f.steps.forEach((s, i) => {
-      out.push(`  s${i}["${i + 1}. ${mermaidText(s.title)}"]`);
+      out.push(`  s${i}["${i + 1} · ${mermaidText(s.title)}"]`);
       if (i) out.push(`  s${i - 1} --> s${i}`);
       // One node per step for its branches, counted by kind (the list below names them): one node
       // per branch makes a diagram too wide to read in a PR comment.
@@ -410,7 +427,9 @@ export function renderMarkdown(data) {
 export function openFile(file) {
   try {
     const [cmd, args] = process.platform === "win32" ? ["cmd", ["/c", "start", "", file]] : process.platform === "darwin" ? ["open", [file]] : ["xdg-open", [file]];
-    spawn(cmd, args, { detached: true, stdio: "ignore", windowsHide: true }).unref();
+    const child = spawn(cmd, args, { detached: true, stdio: "ignore", windowsHide: true });
+    child.on("error", () => {}); // a missing opener (no xdg-open) is reported here, not thrown
+    child.unref();
     return true;
   } catch {
     return false;
@@ -449,9 +468,10 @@ function main(argv) {
     const file = path.join(dir, `${name}.diff.json`);
     const numbered = path.join(dir, `${name}.diff.txt`);
     fs.writeFileSync(file, JSON.stringify(bundle));
-    fs.writeFileSync(numbered, numberedText(bundle.files));
+    const notShown = (bundle.omitted || []).map((o) => `${o.repo}: ${o.file} (${o.why})`);
+    fs.writeFileSync(numbered, numberedText(bundle.files) + (notShown.length ? `\n\n=== Not shown\n${notShown.join("\n")}\n` : ""));
     const hunkCount = bundle.files.reduce((n, f) => n + f.hunks.length, 0);
-    console.log(JSON.stringify({ bundle: file, numbered, name, hunks: hunkCount, repos: bundle.repos.map((r) => ({ repo: r.repo, base: r.base, branch: r.branch, files: bundle.files.filter((f) => f.repo === r.repo).length })), skipped: bundle.skipped }, null, 2));
+    console.log(JSON.stringify({ bundle: file, numbered, name, hunks: hunkCount, repos: bundle.repos.map((r) => ({ repo: r.repo, base: r.base, branch: r.branch, files: bundle.files.filter((f) => f.repo === r.repo).length })), skipped: bundle.skipped, omitted: bundle.omitted || [] }, null, 2));
     if (!hunkCount) process.stderr.write("No changes to map.\n");
     return 0;
   }

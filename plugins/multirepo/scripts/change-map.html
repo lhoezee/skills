@@ -402,7 +402,7 @@ function drawEdges(on) {
       const isOn = on.has(e.from) && on.has(e.to), isNear = selected && (e.from === selected || e.to === selected);
       const cls = isOn ? "on" : isNear ? "near" : "";
       const mk = isOn ? "happy" : isNear ? "ink-soft" : "line";
-      return `<path class="edge-path ${cls}" d="${d}" marker-end="url(#ar-${mk})"><title>${esc(nodes[e.from].symbol)} ${e.kind} ${esc(nodes[e.to].symbol)}</title></path>`;
+      return `<path class="edge-path ${cls}" d="${d}" marker-end="url(#ar-${mk})"><title>${esc(nodes[e.from].symbol)} ${esc(e.kind)} ${esc(nodes[e.to].symbol)}</title></path>`;
     }).join("");
 }
 function selectNode(id) {
@@ -416,8 +416,8 @@ function selectNode(id) {
     if (touch) where.push(`<li>Step ${i + 1}: ${esc(s.title)}</li>`);
     s.branches.forEach((b) => { if (b.code.some((r) => n.hunks.includes(r.hunk))) where.push(`<li><span class="kind" style="--k:var(--${b.kind});--kb:var(--${b.kind}-bg)">${KIND[b.kind]}</span> ${esc(b.title)} <span class="muted">(step ${i + 1})</span></li>`); });
   }));
-  const ins = M.edges.filter((e) => e.to === id).map((e) => `${esc(nodes[e.from].symbol)} <span class="muted">${e.kind}</span>`);
-  const outs = M.edges.filter((e) => e.from === id).map((e) => `<span class="muted">${e.kind}</span> ${esc(nodes[e.to].symbol)}`);
+  const ins = M.edges.filter((e) => e.to === id).map((e) => `${esc(nodes[e.from].symbol)} <span class="muted">${esc(e.kind)}</span>`);
+  const outs = M.edges.filter((e) => e.from === id).map((e) => `<span class="muted">${esc(e.kind)}</span> ${esc(nodes[e.to].symbol)}`);
   $("#nodeDetail").innerHTML = `<h3>${esc(n.symbol)}</h3><div class="muted mono" style="overflow-wrap:anywhere">${esc(n.file)}</div>
     ${ins.length ? `<div style="margin-top:8px">← ${ins.join(", ")}</div>` : ""}${outs.length ? `<div>→ ${outs.join(", ")}</div>` : ""}
     ${where.length ? `<ul>${where.join("")}</ul>` : `<p class="muted">Unchanged: shown because changed code calls it.</p>`}

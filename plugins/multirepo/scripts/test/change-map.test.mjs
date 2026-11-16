@@ -147,7 +147,7 @@ test("markdown: weight line, a Mermaid diagram with branches counted per step, a
   const r = build(bundle(), MAP, { format: "md" });
   assert.equal(r.html, null);
   assert.match(r.md, /\*\*Where the added lines go:\*\* happy path 4 · edge cases 1 · error handling 2 · tests 2 · glue 1 · on no flow 1/);
-  assert.match(r.md, /```mermaid\nflowchart TD\n {2}s0\["1\. Posts it"\]\n {2}s0 -\.- b0\(\["1 edge case · 1 error · 1 untested"\]\)/);
+  assert.match(r.md, /```mermaid\nflowchart TD\n {2}s0\["1 · Posts it"\]\n {2}s0 -\.- b0\(\["1 edge case · 1 error · 1 untested"\]\)/);
   assert.match(r.md, /- Error: \*\*Post fails\*\*: {2}_\(no test\)_/);
   assert.match(r.md, /### Changed code on no flow[\s\S]*- `src\/api\.ts:12` `audit\(x\);`/);
 });
@@ -202,4 +202,31 @@ test("the local change: committed, uncommitted and untracked work against the me
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("review fixes: one unexplained block across blank lines, prototype keys, PR names, Mermaid labels, prose files", () => {
+  const diff = [
+    "diff --git a/src/x.ts b/src/x.ts", "--- a/src/x.ts", "+++ b/src/x.ts", "@@ -1,1 +1,5 @@",
+    " keep();", "+foo();", "+", "+// why", "+bar();",
+    "diff --git a/README.md b/README.md", "--- a/README.md", "+++ b/README.md", "@@ -1,1 +1,3 @@",
+    " intro", "+# New section", "+* an item",
+  ].join("\n");
+  const b = { source: "local", repos: [{ repo: "x", branch: "main" }], skipped: [], files: bundleFiles([{ repo: "x", files: parseDiff(diff) }]) };
+  const map = { title: "T", nodes: [{ id: "n", hunks: ["h1"] }], flows: [{ id: "f", title: "F", steps: [{ node: "n", title: "Line one\nand two", code: [{ hunk: "h1", from: "keep" }] }] }] };
+  const r = build(b, map, { format: "md" });
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.data.unexplained, [{ hunk: "h1", a: 1, b: 4 }, { hunk: "h2", a: 1, b: 2 }], "foo..bar is one item; markdown headings and bullets aren't comments");
+  assert.match(r.md, /s0\["1 · Line one and two"\]/, "one line, and no '1.' for Mermaid to read as a list");
+
+  const hunks = hunkIndex(b);
+  for (const key of ["toString", "constructor", "__proto__"]) assert.match(resolveRef({ hunk: key, from: "x" }, hunks).error, /no hunk/);
+  const { errors } = normalizeMap({ ...map, tags: { toString: "test" }, nodes: [{ id: "n", hunks: ["constructor"] }] }, hunks);
+  assert.ok(errors.includes("nodes[n]: no hunk constructor") && errors.includes("tags.toString: no such hunk"), JSON.stringify(errors));
+
+  assert.equal(bundleName({ source: "pr", repos: [{ number: 42, branch: "fix/thing" }] }, {}, { ticketId: "ENG-1" }), "pr-42", "the worktree's ticket doesn't name another PR");
+});
+
+test("an edge kind is escaped on the page", () => {
+  const html = fs.readFileSync(new URL("../change-map.html", import.meta.url), "utf-8");
+  assert.doesNotMatch(html, /\$\{e\.kind\}/);
 });
