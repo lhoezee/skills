@@ -95,8 +95,7 @@ export function outputHeaders(name: string, size: number): Record<string, string
   };
 }
 
-/** A change map a run made: the change-map skill's self-contained page, <name>.change-map.html in its outputs. */
-export const CHANGE_MAP_RE = /^(?:[^/]+\/)*[^/]+\.change-map\.html$/i;
+export { CHANGE_MAP_RE } from "../../shared/change-map.ts";
 
 /**
  * Headers for a change map shown in the run page's Map tab. Unlike any other output it runs its own

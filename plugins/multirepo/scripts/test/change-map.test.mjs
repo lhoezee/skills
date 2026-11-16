@@ -234,10 +234,17 @@ test("an edge kind is escaped on the page", () => {
 test("in a dashboard run the page is also written to the run's outputs, for its Map tab", () => {
   const dir = tmp("change-map-out-");
   try {
-    assert.equal(copyToOutputs("<p>", "ENG-7", undefined), null, "not a dashboard run");
+    assert.equal(copyToOutputs("<p>", "ENG-7", ""), null, "not a dashboard run");
     const file = copyToOutputs("<p>", "feat/odd name", dir);
     assert.equal(path.basename(file), "feat-odd-name.change-map.html");
     assert.equal(fs.readFileSync(file, "utf-8"), "<p>");
+    assert.equal(path.basename(copyToOutputs("<p>", ".review", dir)), "review.change-map.html", "never a dotfile, which the outputs listing skips");
+    assert.equal(path.basename(copyToOutputs("<p>", "ENG-1.change-map", dir)), "ENG-1.change-map.html", "no double suffix");
+    const already = path.join(dir, "ENG-2.change-map.html");
+    fs.writeFileSync(already, "<b>");
+    const before = fs.readdirSync(dir).length;
+    assert.equal(copyToOutputs("<b>", "ENG-2.change-map", dir, already), already, "render already wrote it there: no second copy");
+    assert.equal(fs.readdirSync(dir).length, before);
     assert.equal(copyToOutputs("<p>", "x", path.join(dir, "missing", "deeper")), null, "an unwritable folder is skipped, not thrown");
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });

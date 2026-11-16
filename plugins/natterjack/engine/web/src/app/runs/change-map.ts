@@ -1,16 +1,16 @@
 import type { RunOutput } from '../../../../shared/api';
+import { CHANGE_MAP_RE } from '../../../../shared/change-map';
 
-/** The change-map skill's pages in a run's outputs (<name>.change-map.html): what the Map tab shows. */
-const CHANGE_MAP = /\.change-map\.html$/i;
+const SUFFIX = /\.change-map\.html$/i;
 
-/** A run's change maps, newest first. */
+/** A run's change maps (the files the server's change-map route serves), newest first. */
 export function changeMaps(outputs: RunOutput[]): RunOutput[] {
-  return outputs.filter((o) => CHANGE_MAP.test(o.name)).sort((a, b) => b.modifiedAt.localeCompare(a.modifiedAt));
+  return outputs.filter((o) => CHANGE_MAP_RE.test(o.name)).sort((a, b) => b.modifiedAt.localeCompare(a.modifiedAt));
 }
 
 /** What a person calls a map: "maps/ENG-12.change-map.html" → "ENG-12". */
 export function changeMapLabel(name: string): string {
-  return (name.split('/').pop() || name).replace(CHANGE_MAP, '');
+  return (name.split('/').pop() || name).replace(SUFFIX, '');
 }
 
 /**

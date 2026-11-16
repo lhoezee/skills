@@ -36,7 +36,7 @@ import { changeMapLabel, changeMapUrl } from '../../runs/change-map';
     .bar label { display: inline-flex; align-items: center; gap: 6px; }
     .meta { color: var(--ink-faint); font-size: 12px; }
     .bar a { margin-left: auto; }
-    iframe { display: block; width: 100%; height: var(--feed-max-h, 75vh); min-height: 420px; border: 0; background: #fff; }
+    iframe { display: block; width: 100%; height: var(--feed-max-h, 75vh); min-height: 420px; border: 0; background: var(--paper); }
     @media (max-width: 760px) { iframe { height: 80vh; } }
   `],
 })

@@ -2006,8 +2006,11 @@ function serveRunOutput(res: http.ServerResponse, runId: string, rel: string) {
 function serveRunChangeMap(res: http.ServerResponse, runId: string, rel: string) {
   if (!CHANGE_MAP_RE.test(rel)) return sendError(res, 404, "Not a change map");
   const full = attachments.output(runId, rel);
-  if (!full) return sendError(res, 404, "That change map is gone (a run's files are deleted a while after it's done).");
-  res.writeHead(200, changeMapHeaders(fs.statSync(full).size));
+  const gone = () => sendError(res, 404, "That change map is gone (a run's files are deleted a while after it's done).");
+  if (!full) return gone();
+  let size: number;
+  try { size = fs.statSync(full).size; } catch { return gone(); } // deleted or rewritten since output() looked
+  res.writeHead(200, changeMapHeaders(size));
   fs.createReadStream(full).pipe(res);
 }
 
