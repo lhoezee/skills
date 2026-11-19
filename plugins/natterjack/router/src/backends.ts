@@ -29,6 +29,8 @@ export interface Backend {
   stop?(email: string): Promise<void>;
   /** Emails whose containers are running now (so idle ones are stopped even after a router restart). */
   running?(): Promise<string[]>;
+  /** Everyone with a dashboard, running or not (the usage report's rows). */
+  everyone(): Promise<string[]>;
 }
 
 /**
@@ -102,6 +104,8 @@ export class StaticBackend implements Backend {
     const url = this.map().get(email);
     return url ? { url, ready: true, canStart: false } : null;
   }
+
+  async everyone(): Promise<string[]> { return [...this.map().keys()]; }
 }
 
 // ------------------------------------------------------------------ kubernetes
@@ -202,6 +206,8 @@ export class KubernetesBackend implements Backend {
   async running(): Promise<string[]> {
     return [...(await this.dashboards()).entries()].filter(([, d]) => d.replicas > 0).map(([e]) => e);
   }
+
+  async everyone(): Promise<string[]> { return [...(await this.dashboards()).keys()]; }
 }
 
 // ------------------------------------------------------------------ Azure App Service
@@ -318,6 +324,8 @@ export class AppServiceBackend implements Backend {
   async running(): Promise<string[]> {
     return [...(await this.sites()).entries()].filter(([, s]) => s.running).map(([e]) => e);
   }
+
+  async everyone(): Promise<string[]> { return [...(await this.sites()).keys()]; }
 }
 
 /** natterjack-owner; or, for one set up by hand before the People page, owner on a hosted-workspace-dashboard. */

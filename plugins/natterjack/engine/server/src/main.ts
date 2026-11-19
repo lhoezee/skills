@@ -49,6 +49,7 @@ import { type FactoryRun, type FoundPr, type PrLookup, type PrLookupHistory, add
 import { Watcher, commandAllowed } from "./watches.ts";
 import { Usage } from "./usage.ts";
 import { UsageHistory } from "./usage-history.ts";
+import { usageSummary } from "./usage-summary.ts";
 import { AppLauncher, appsConfig } from "./apps.ts";
 import { LiveHub } from "./live.ts";
 import { Trackers } from "./issues/index.ts";
@@ -2236,6 +2237,11 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
       return sendJson(res, p === "/api/reviews/guide" ? await reviews.savedGuide(repo, number) : await reviews.savedSecurity(repo, number));
     }
     if (p === "/api/usage") return sendJson(res, await usage.get(force));
+    // Totals only (no prompts or results): what the hosted router collects for the admins' Reports page.
+    if (p === "/api/usage/summary") {
+      const days = Math.min(Math.max(parseInt(q("days") || "", 10) || 30, 7), 90);
+      return sendJson(res, usageSummary({ runs: runs.list(), tokenDays: (await usageHistory.report(days)).days, limits: usage.history(14), days }));
+    }
     if (p === "/api/usage/history") {
       const days = Math.min(Math.max(parseInt(q("days") || "", 10) || 30, 7), 90);
       if (force) await usageHistory.refresh(true);

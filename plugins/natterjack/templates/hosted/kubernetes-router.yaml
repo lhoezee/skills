@@ -64,6 +64,12 @@ spec:
             - { name: ROUTER_BIND, value: "127.0.0.1" }   # only the sidecar below reaches it
             - { name: ROUTER_IDLE_MINUTES, value: "60" }
             - { name: ROUTER_ADMIN, value: "the platform team" }
+            # The usage report (references/hosting.md, "Usage report"): who may open Reports, and where
+            # usage is kept. Without ROUTER_DATA_DIR it's memory only and starts empty after a restart.
+            # For a volume: a 1Gi PersistentVolumeClaim mounted at /data, and `strategy: { type: Recreate }`
+            # on this Deployment (a ReadWriteOnce volume can't attach to the old and new pod at once).
+            # - { name: ROUTER_ADMINS, value: "you@example.com" }
+            # - { name: ROUTER_DATA_DIR, value: /data }
             - { name: ROUTER_PROXY_SECRET, valueFrom: { secretKeyRef: { name: dashboard-router, key: proxy-secret } } }
             - { name: ROUTER_BACKEND_SECRET, valueFrom: { secretKeyRef: { name: dashboard-router, key: backend-secret } } }
           resources:
