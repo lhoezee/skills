@@ -936,6 +936,8 @@ export interface FactoryStageConfig {
   agent: AgentId | null;
   model: string | null;
   effort: string | null;
+  /** Runs only for tickets carrying at least one of these labels (any case); empty: every ticket. */
+  labels: string[];
 }
 
 /** A security scanner the security stage runs in each repo, e.g. `npm audit --audit-level=high`. */
@@ -1150,6 +1152,8 @@ export interface FactoryManifest {
   workroot: string | null;
   branch: string | null;
   repos: string[];
+  /** The ticket's labels (the Approver's risk rules and stages limited to labels read them). */
+  labels: string[];
   plan: string | null;
   startedAt: string;
   updatedAt: string;

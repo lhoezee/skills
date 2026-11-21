@@ -462,6 +462,8 @@ export function validate(root) {
     for (const s of Array.isArray(fac.stages) ? fac.stages : []) {
       if (!s || !STAGES.includes(s.id)) err("factory.json", `stage "${s && s.id}" isn't one of ${STAGES.join(", ")}`);
       else if (s.id === "build" && s.on === false) err("factory.json", "the build stage can't be off: it's where the work happens");
+      if (s && s.labels !== undefined && !(Array.isArray(s.labels) && s.labels.every((l) => typeof l === "string"))) err("factory.json", `stage "${s.id}": labels must be a list of label names`);
+      else if (s && s.id === "build" && Array.isArray(s.labels) && s.labels.some((l) => l.trim())) err("factory.json", "the build stage runs for every ticket: it can't be limited to labels");
     }
     for (const [g, m] of Object.entries(fac.gates || {})) {
       if (!["spec", "plan", "prePr", "merge"].includes(g)) warn("factory.json", `gates.${g} isn't a gate (spec, plan, prePr, merge); ignored`);

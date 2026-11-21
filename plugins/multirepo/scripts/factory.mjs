@@ -29,7 +29,10 @@
  *   node factory.mjs decide --ticket <id> --gate spec|plan|prePr|merge [--run interactive|autonomous] [--can-ask yes|no]
  *                          what to do at a gate by the policy: { action: own-rules|skip|pass|ask|stop|handoff|approver, reason }
  *   node factory.mjs wip   --ticket <id>       other tickets in flight vs the policy's WIP limit: { inFlight, limit, ok }
- *   node factory.mjs stage-on --stage <stage>   whether the policy runs a stage: { policy, on } (on: null with no policy on)
+ *   node factory.mjs stage-on --stage <stage> [--ticket <id>] [--labels a,b]
+ *                          whether the policy runs a stage: { policy, on, labels?, ticketLabels?, reason? } (on: null with
+ *                          no policy on). A stage with labels runs only for a ticket carrying one (its labels: the ones
+ *                          start --labels recorded, plus --labels); with neither --ticket nor --labels that isn't applied.
  *   node factory.mjs intake --ticket <id> [--record]  whether intake may take it: { ok, why } (not in the
  *                          factory, never pulled before: the dashboard's history too); --record: it's taken
  *
@@ -282,7 +285,10 @@ export function normalizePolicy(raw) {
   return {
     enabled: r.enabled === true,
     gates: Object.fromEntries(GATES.map((g) => [g, ALL_GATE_MODES.includes(r.gates && r.gates[g]) ? r.gates[g] : "human"])),
-    stages: STAGES.map((id) => { const s = listed.find((x) => x && x.id === id); return { id, on: s ? s.on !== false : !DEFAULT_OFF.includes(id) }; }),
+    stages: STAGES.map((id) => {
+      const s = listed.find((x) => x && x.id === id);
+      return { id, on: s ? s.on !== false : !DEFAULT_OFF.includes(id), labels: dedupeCi(strs(s && s.labels) ?? []) };
+    }),
     limits: { wip: Math.round(num(r.limits && r.limits.wip, 3, 1, 50)) },
     security: {
       agentReview: sec.agentReview !== false,
@@ -327,10 +333,33 @@ function latestRows(m, stage) {
   return [...by.values()];
 }
 
-/** Whether the policy turns a stage on (stages it doesn't list keep the dashboard's defaults). */
-export function stageOn(policy, id) {
+/** Labels once each, whatever their case (the first spelling kept). */
+function dedupeCi(labels) {
+  const seen = new Set();
+  return labels.filter((l) => !seen.has(l.toLowerCase()) && seen.add(l.toLowerCase()));
+}
+
+/**
+ * Whether the policy runs a stage for a ticket: { on, labels, reason }. A stage with `labels` runs
+ * only for tickets carrying at least one of them (any case). `ticketLabels` undefined (no ticket
+ * named) doesn't apply that filter, as before stages had labels, and `reason` says so.
+ */
+export function stageCheck(policy, id, ticketLabels) {
   const s = normalizePolicy(policy).stages.find((x) => x.id === id);
-  return !!(s && s.on);
+  if (!s || !s.on) return { on: false, labels: s ? s.labels : [], reason: null };
+  if (!s.labels.length) return { on: true, labels: [], reason: null };
+  const names = s.labels.length > 1 ? `${s.labels.slice(0, -1).join(", ")} or ${s.labels.at(-1)}` : s.labels[0];
+  const only = `${id} runs only for tickets labelled ${names}`;
+  if (ticketLabels === undefined) return { on: true, labels: s.labels, reason: `${only}: pass --ticket or --labels to check this ticket.` };
+  const has = new Set(ticketLabels.map((l) => String(l).trim().toLowerCase()));
+  return s.labels.some((l) => has.has(l.toLowerCase()))
+    ? { on: true, labels: s.labels, reason: null }
+    : { on: false, labels: s.labels, reason: `${only}, and this one has ${ticketLabels.length ? `only ${ticketLabels.join(", ")}` : "none recorded"}.` };
+}
+
+/** Whether the policy turns a stage on (stages it doesn't list keep the dashboard's defaults), for a ticket with these labels (undefined: any ticket). */
+export function stageOn(policy, id, ticketLabels) {
+  return stageCheck(policy, id, ticketLabels).on;
 }
 
 /**
@@ -490,9 +519,21 @@ async function main(argv) {
   }
   if (command === "stage-on") {
     if (!STAGES.includes(args.stage)) throw usage(`--stage must be one of ${STAGES.join(", ")}`);
-    const policy = readPolicy(sourceWorkspace(start));
-    const enabled = normalizePolicy(policy).enabled;
-    process.stdout.write(JSON.stringify({ stage: args.stage, policy: enabled, on: enabled ? stageOn(policy, args.stage) : null }, null, 2) + "\n");
+    const ws = sourceWorkspace(start);
+    const policy = readPolicy(ws);
+    if (!normalizePolicy(policy).enabled) { process.stdout.write(JSON.stringify({ stage: args.stage, policy: false, on: null }, null, 2) + "\n"); return; }
+    // The ticket's labels: the ones start --labels recorded, and any --labels given here.
+    const ticket = typeof args.ticket === "string" && args.ticket.trim() ? args.ticket.trim() : null;
+    const file = ticket ? manifestPath(ws, ticket) : null;
+    const recorded = file && fs.existsSync(file) ? (readJson(file) || {}).labels : null;
+    const ticketLabels = ticket || list(args.labels).length
+      ? [...new Set([...(Array.isArray(recorded) ? recorded.filter((l) => typeof l === "string") : []), ...list(args.labels)])]
+      : undefined;
+    const r = stageCheck(policy, args.stage, ticketLabels);
+    process.stdout.write(JSON.stringify({
+      stage: args.stage, policy: true, on: r.on,
+      ...(r.labels.length ? { labels: r.labels } : {}), ...(ticketLabels ? { ticketLabels } : {}), ...(r.reason ? { reason: r.reason } : {}),
+    }, null, 2) + "\n");
     return;
   }
   if (command === "intake") {

@@ -180,6 +180,25 @@ test("policy prints factory.json, or exists: false", () => {
   assert.deepEqual(JSON.parse(execFileSync(process.execPath, [SCRIPT, "policy", "--root", none.wt], { encoding: "utf-8" })), { exists: false });
 });
 
+test("stage-on applies a stage's labels to the ticket's recorded labels (and --labels); without a ticket it only reports them", () => {
+  const { wt } = workspace({ policy: { enabled: true, stages: [{ id: "qa", on: true, labels: ["Design"] }] } });
+  const stageOn = (...a) => JSON.parse(execFileSync(process.execPath, [SCRIPT, "stage-on", "--stage", "qa", "--root", wt, ...a], { encoding: "utf-8" }));
+  update("start", { ticket: "ENG-1", labels: "Backend" }, { start: wt });
+  const off = stageOn("--ticket", "ENG-1");
+  assert.deepEqual([off.policy, off.on, off.labels, off.ticketLabels], [true, false, ["Design"], ["Backend"]]);
+  assert.match(off.reason, /qa runs only for tickets labelled Design/);
+  assert.equal(stageOn("--ticket", "ENG-1", "--labels", "design").on, true, "--labels adds to the recorded ones");
+  update("start", { ticket: "ENG-1", labels: "DESIGN" }, { start: wt });
+  assert.equal(stageOn("--ticket", "ENG-1").on, true);
+  assert.equal(stageOn("--labels", "Backend").on, false);
+  assert.equal(stageOn("--ticket", "ENG-404").on, false, "a ticket with no labels recorded has none");
+  const bare = stageOn();
+  assert.deepEqual([bare.on, bare.labels], [true, ["Design"]]);
+  assert.match(bare.reason, /pass --ticket or --labels/);
+  const none = workspace();
+  assert.deepEqual(JSON.parse(execFileSync(process.execPath, [SCRIPT, "stage-on", "--stage", "qa", "--ticket", "ENG-1", "--root", none.wt], { encoding: "utf-8" })), { stage: "qa", policy: false, on: null });
+});
+
 test("reports made at the same moment (one subagent per repo) are all kept", async () => {
   const { ws, wt } = workspace();
   const { spawn } = await import("node:child_process");
