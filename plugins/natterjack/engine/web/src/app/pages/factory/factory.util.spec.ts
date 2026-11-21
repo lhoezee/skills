@@ -8,7 +8,7 @@ function config(): FactoryConfig {
   return {
     enabled: false, preset: 'supervised', mode: 'interactive', intake: { states: [], labels: [] },
     limits: { wip: 3, itemBudgetUsd: null, dayBudgetUsd: null, itemHours: null },
-    stages: STAGES.map((id) => ({ id, on: !['align', 'qa', 'approve'].includes(id), agent: null, model: null, effort: null })),
+    stages: STAGES.map((id) => ({ id, on: !['align', 'qa', 'approve'].includes(id), agent: null, model: null, effort: null, labels: [] })),
     security: { agentReview: true, secretScan: true, scanners: [], failOn: 'high' },
     gates: { spec: 'human', plan: 'human', prePr: 'human', merge: 'human' },
     requiredChecks: [], reviewers: { bots: [], pipeline: true, noUnresolved: true },

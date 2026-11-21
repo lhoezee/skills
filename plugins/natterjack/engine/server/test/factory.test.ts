@@ -139,6 +139,39 @@ test("buildBoard joins runs by ticket and rolls up repos, cost, risk and WIP", (
   assert.equal(buildBoard(cfg, false, [], []).enabled, false);
 });
 
+test("a stage with labels: kept through normalizing and saving, and a ticket without one of them skips it on the board", () => {
+  const raw = { ...defaultFactoryConfig(), stages: defaultFactoryConfig().stages.map((s) => (s.id === "qa" ? { id: "qa", on: true, labels: [" Design ", "design", "", 7, "UX"] } : s)) };
+  const c = normalizeFactoryConfig(raw);
+  assert.deepEqual(c.stages.find((s) => s.id === "qa"), { id: "qa", on: true, agent: null, model: null, effort: null, labels: ["Design", "UX"] });
+  assert.deepEqual(c.stages.find((s) => s.id === "review")!.labels, []);
+  assert.deepEqual(defaultFactoryConfig().stages[0].labels, []);
+  const dir = tmp();
+  const saved = saveFactoryConfig({ config: c, mtimeMs: null }, dir);
+  assert.deepEqual(saved.config.stages.find((s) => s.id === "qa")!.labels, ["Design", "UX"]);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dir, "factory.json"), "utf-8")).stages.find((s: any) => s.id === "qa").labels, ["Design", "UX"]);
+  // Build runs for every ticket: labels on it are a problem.
+  const b = normalizeFactoryConfig({ stages: [{ id: "build", labels: ["Design"] }] });
+  assert.match(factoryConfigProblems(b).join(" "), /Build stage runs for every ticket/);
+
+  // The board: QA is a column, but a ticket without the label passes it (skipped); one with it waits there.
+  const cfg = { ...c, enabled: true };
+  assert.ok(boardColumns(cfg).some((col) => col.id === "qa"));
+  const done = (id: string) => ({ id, repo: "web", status: "done" });
+  const reviewed = { gates: [{ id: "spec", decision: "approved", at }, { id: "plan", decision: "approved", at }], stages: ["plan", "build", "review", "security"].map(done) };
+  const backend = manifest({ ...reviewed, labels: ["Backend"] });
+  const design = manifest({ ...reviewed, ticket: "ENG-2", labels: ["design"] });
+  assert.deepEqual(normalizeManifest({ ticket: "X", labels: ["a", 3, " b "] })!.labels, ["a", "b"]);
+  const items = buildBoard(cfg, true, [backend, design], []).items;
+  const [b1, d1] = items;
+  assert.equal(b1.column, "guide");
+  assert.equal(b1.steps.find((s) => s.id === "qa")!.state, "skipped");
+  assert.equal(d1.column, "qa");
+  assert.equal(d1.steps.find((s) => s.id === "qa")!.state, "pending");
+  // A ticket that ran QA anyway shows it.
+  const ran = buildBoard(cfg, true, [manifest({ ...reviewed, stages: [...reviewed.stages, { id: "qa", repo: "web", status: "running" }] })], []).items[0];
+  assert.deepEqual([ran.column, ran.steps.find((s) => s.id === "qa")!.state], ["qa", "running"]);
+});
+
 test("readManifests reads the folder newest first and reports files it can't read", () => {
   const dir = tmp();
   fs.writeFileSync(path.join(dir, "ENG-1.json"), JSON.stringify({ ticket: "ENG-1", updatedAt: "2026-10-01T00:00:00Z" }));
@@ -363,7 +396,7 @@ test("the multirepo scripts read the policy as the dashboard does", async (t) =>
   const { normalizePolicy } = await import(pathToFileURL(path.join(scripts, "factory.mjs")).href);
   const inputs = [
     null, {}, { enabled: true },
-    { enabled: true, limits: { wip: 0 }, gates: { plan: "sometimes", merge: "auto" }, stages: [{ id: "security", on: false }, { id: "qa" }] },
+    { enabled: true, limits: { wip: 0 }, gates: { plan: "sometimes", merge: "auto" }, stages: [{ id: "security", on: false }, { id: "qa", labels: ["Design", " design ", "UX", 4] }] },
     { limits: { wip: "7.6" }, security: { failOn: "medium", secretScan: false, agentReview: false, scanners: [{ command: "  osv-scanner -r .  ", when: " go.mod ", failOn: "x" }, { name: "n" }] } },
     { security: { scanners: [] } },
     { requiredChecks: [" build ", "build", 3], reviewers: { bots: ["copilot"], pipeline: false, noUnresolved: false },
@@ -376,7 +409,7 @@ test("the multirepo scripts read the policy as the dashboard does", async (t) =>
     const cli = normalizePolicy(raw);
     assert.deepEqual(cli, {
       enabled: d.enabled, gates: d.gates,
-      stages: STAGE_IDS.map((id) => ({ id, on: d.stages.find((s) => s.id === id)!.on })),
+      stages: STAGE_IDS.map((id) => ({ id, on: d.stages.find((s) => s.id === id)!.on, labels: d.stages.find((s) => s.id === id)!.labels })),
       limits: { wip: d.limits.wip },
       security: { agentReview: d.security.agentReview, secretScan: d.security.secretScan, failOn: d.security.failOn, scanners: d.security.scanners },
       intake: d.intake, requiredChecks: d.requiredChecks, reviewers: d.reviewers, approver: d.approver,

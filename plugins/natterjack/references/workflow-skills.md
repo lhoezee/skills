@@ -43,13 +43,13 @@ The pipeline behind the Issues page's Implement button. The deck preset is `"/im
 
 ### Reporting to the Factory board
 
-A pipeline that reports its progress gets a card on the **Factory** page. Each work item has one manifest, `<workspace>/.claude/ledger/factory/<ticket>.json` (in the source workspace's ledger even when the work is in a worktree; the ticket id made file-safe, `acme/api#7` → `acme_api_7.json`). The board reads that folder; it never scrapes transcripts. `/multirepo:implement` writes it through `scripts/factory.mjs` (`start`, `stage`, `gate`, `pr`, `done`), asks it what the team's policy says at each gate (`decide`, `wip`, `stage-on`), and runs the security stage's scanners with `scripts/security-scan.mjs`; a pipeline of your own can call the same scripts or write the same shape:
+A pipeline that reports its progress gets a card on the **Factory** page. Each work item has one manifest, `<workspace>/.claude/ledger/factory/<ticket>.json` (in the source workspace's ledger even when the work is in a worktree; the ticket id made file-safe, `acme/api#7` → `acme_api_7.json`). The board reads that folder; it never scrapes transcripts. `/multirepo:implement` writes it through `scripts/factory.mjs` (`start`, `stage`, `gate`, `pr`, `done`), asks it what the team's policy says at each gate and stage (`decide`, `wip`, `stage-on --ticket`, which applies a stage's `labels` to the ticket's), and runs the security stage's scanners with `scripts/security-scan.mjs`; a pipeline of your own can call the same scripts or write the same shape:
 
 ```json
 {
   "version": 1, "ticket": "ENG-123", "title": "Retry failed calls", "url": "https://linear.app/acme/issue/ENG-123",
   "mode": "interactive", "policy": { "preset": "supervised", "updatedAt": "2026-10-27T10:00:00Z" },
-  "workroot": "/work/acme/worktrees/eng-123", "branch": "feature/ENG-123", "repos": ["api", "web"],
+  "workroot": "/work/acme/worktrees/eng-123", "branch": "feature/ENG-123", "repos": ["api", "web"], "labels": ["Backend"],
   "plan": "~/.claude/plans/ENG-123-retries.md",
   "startedAt": "2026-10-27T10:00:00Z", "updatedAt": "2026-10-27T10:40:00Z",
   "stages": [{ "id": "build", "repo": "api", "agent": "dotnet-dev", "status": "done", "startedAt": "…", "endedAt": "…", "note": "Added RetryPolicy; 14 tests" }],
@@ -59,6 +59,7 @@ A pipeline that reports its progress gets a card on the **Factory** page. Each w
 }
 ```
 
+- **`labels`**: the ticket's labels (`factory.mjs start --labels`); the Approver's risk rules read them, and a stage the policy limits to labels counts as skipped for a ticket without one of them.
 - **`stages[]`**: one row per stage and repo, `status` `pending` | `running` | `done` | `failed` | `skipped`; the latest status counts (a failed build that's running again is running).
 - **`spec`**: the ticket's spec readiness from `spec-check.mjs --ticket` (`score`, `level`, the team's levels, and each check's `score`, `finding` and any `override` the agent made with its reason), shown on the card and in its details.
 - **`roundStartedAt`**: when the current round began; `start` on a finished ticket begins a new one, and gate decisions from earlier rounds stop counting (they stay in the trail).

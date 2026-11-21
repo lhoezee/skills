@@ -527,7 +527,7 @@ The team's rules for agent work, from ticket to merged PR (the **Factory** page,
   "limits": { "wip": 3, "itemBudgetUsd": 25, "dayBudgetUsd": 200, "itemHours": 4 },
   "stages": [
     { "id": "plan", "on": true }, { "id": "build", "on": true }, { "id": "review", "on": true, "agent": "codex" },
-    { "id": "security", "on": true }, { "id": "qa", "on": false }, { "id": "pr", "on": true }
+    { "id": "security", "on": true }, { "id": "qa", "on": true, "labels": ["Design"] }, { "id": "pr", "on": true }
   ],
   "security": {
     "agentReview": true, "secretScan": true, "failOn": "high",
@@ -542,7 +542,8 @@ The team's rules for agent work, from ticket to merged PR (the **Factory** page,
 ```
 
 - **`preset`**: `supervised` (every gate a person), `risk-tiered` (people approve the spec and plan, the Approver rates the PR, a person merges), `lights-out` (autonomous; the Approver auto-merges low risk and sends `samplingPct` to a person anyway), or `custom`. A preset sets `gates`, `mode` and the Approver's `enabled`, `mergeAction` and `samplingPct`; anything else is kept.
-- **`stages`**: `align`, `plan`, `build`, `review`, `security`, `qa`, `guide`, `pr`, `approve`, `merge`, in pipeline order. Each has `on`, and optionally `agent` (`claude` | `copilot` | `codex`), `model` and `effort`. Stages left out keep their defaults. `build` can't be off. `guide` runs once the PRs are open (`/multirepo:review-guide` posts a guided review on each PR, which the Reviews page shows and a Factory card links to); it never blocks a PR.
+- **`stages`**: `align`, `plan`, `build`, `review`, `security`, `qa`, `guide`, `pr`, `approve`, `merge`, in pipeline order. Each has `on`, and optionally `agent` (`claude` | `copilot` | `codex`), `model`, `effort` and `labels`. Stages left out keep their defaults. `build` can't be off.
+  - **`labels`** (default empty: every ticket) limits a stage that's on to tickets carrying at least one of them, in any case, e.g. `qa` only for `Design` tickets. A ticket's labels are the ones `/multirepo:implement` recorded when it read the ticket; `factory.mjs stage-on --stage <id> --ticket <ID>` answers for that ticket, and says why when the labels rule it out (without `--ticket` or `--labels` it doesn't apply them). On the board a ticket without one of them passes the stage as skipped. `build` can't be limited to labels. `guide` runs once the PRs are open (`/multirepo:review-guide` posts a guided review on each PR, which the Reviews page shows and a Factory card links to); it never blocks a PR.
 - **`gates`**: `spec` (before planning), `plan` (after it), `prePr` (before the PR) and `merge`, each `human`, `approver`, `auto` (passes when `requiredChecks` pass) or `off`. A gate on the Approver needs `approver.enabled`; `approver.mergeAction` other than `none` needs `gates.merge: "approver"`.
 - **`spec`**: spec readiness, the spec gate's score (0-100) of how ready a ticket is to start on, made when a session reads it (`/multirepo:implement` runs `spec-check.mjs`). It looks for what any good spec has under whatever headings the team uses: problem, outcome, acceptance criteria (testable ones), scope, constraints, affected areas, no open questions, how to verify. `readyAt` / `needsWorkAt` set the levels (Ready, Needs work, below that Not ready); `minScore` stops autonomous runs below it (they comment on the ticket with what's missing); `weights` per check (`problem`, `outcome`, `criteria`, `scope`, `constraints`, `affected`, `questions`, `verify`; defaults 15, 15, 25, 10, 5, 10, 10, 10; 0 turns one off).
 - **`approver`**: the Approver (`/multirepo:approve`), which rates each change `low`, `medium` or `high` risk.

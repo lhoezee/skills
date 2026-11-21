@@ -100,7 +100,7 @@ const GATE_HELP: Record<FactoryGateId, string> = {
         <div class="panel">
           <div class="panel-h"><h2>Pipeline</h2></div>
           <table class="stages">
-            <thead><tr><th>Stage</th><th>On</th><th>Agent</th><th>Model</th></tr></thead>
+            <thead><tr><th>Stage</th><th>On</th><th>Agent</th><th>Model</th><th>Only for labels</th></tr></thead>
             <tbody>
               @for (s of c.stages; track s.id) {
                 <tr [class.off]="!s.on">
@@ -115,6 +115,7 @@ const GATE_HELP: Record<FactoryGateId, string> = {
                     </select>
                   </td>
                   <td><input [ngModel]="s.model || ''" (ngModelChange)="setStage(s.id, 'model', $event || null)" placeholder="Default" [attr.aria-label]="stageLabel(s.id) + ' model'" /></td>
+                  <td><input [ngModel]="(s.labels || []).join(', ')" (ngModelChange)="setStage(s.id, 'labels', $event)" [ngModelOptions]="{ updateOn: 'blur' }" [disabled]="s.id === 'build'" [placeholder]="s.id === 'build' ? 'Every ticket' : 'Every ticket, or e.g. Design'" [attr.aria-label]="stageLabel(s.id) + ' only for tickets labelled'" title="Runs only for tickets carrying one of these labels (any case); empty: every ticket" /></td>
                 </tr>
               }
             </tbody>
@@ -399,8 +400,8 @@ export class FactorySettingsComponent implements OnInit {
   setLimit(key: keyof FactoryConfig['limits'], v: unknown): void {
     this.edit((c) => { if (key === 'wip') c.limits.wip = Math.max(1, Math.round(numOrNull(v) ?? 1)); else c.limits[key] = numOrNull(v); });
   }
-  setStage(id: FactoryStageId, key: 'on' | 'agent' | 'model', v: any): void {
-    this.edit((c) => { const s = c.stages.find((x) => x.id === id); if (s) (s as any)[key] = key === 'agent' ? (v as AgentId | null) : v; });
+  setStage(id: FactoryStageId, key: 'on' | 'agent' | 'model' | 'labels', v: any): void {
+    this.edit((c) => { const s = c.stages.find((x) => x.id === id); if (s) (s as any)[key] = key === 'agent' ? (v as AgentId | null) : key === 'labels' ? splitList(v) : v; });
   }
   setSecurity(key: 'agentReview' | 'secretScan' | 'failOn', v: any): void { this.edit((c) => { (c.security as any)[key] = v; }); }
   setScanner(i: number, key: keyof FactoryScanner, v: any): void { this.edit((c) => { (c.security.scanners[i] as any)[key] = v as Severity; }); }

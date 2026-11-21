@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { decide, normalizePolicy, stageOn, update, wip } from "../factory.mjs";
+import { decide, normalizePolicy, stageCheck, stageOn, update, wip } from "../factory.mjs";
 import { changedFiles, runScanner, scanSecrets, securityScan } from "../security-scan.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -56,6 +56,27 @@ test("decide: automatic gates pass on their checks", () => {
   const noSec = { ...p, stages: [{ id: "security", on: false }] };
   assert.equal(stageOn(noSec, "security"), false);
   assert.equal(decide(noSec, rows(...reviewed), "prePr").action, "pass");
+});
+
+test("a stage with labels runs only for tickets carrying one of them (any case); without labels, for every ticket", () => {
+  const p = on({}, { stages: [{ id: "qa", on: true, labels: [" Design ", "design", "", 3, "UX"] }, { id: "security", on: true, labels: [] }] });
+  assert.deepEqual(normalizePolicy(p).stages.find((s) => s.id === "qa"), { id: "qa", on: true, labels: ["Design", "UX"] });
+  assert.deepEqual(normalizePolicy(p).stages.find((s) => s.id === "build"), { id: "build", on: true, labels: [] });
+  assert.equal(stageOn(p, "qa", ["design"]), true);
+  assert.equal(stageOn(p, "qa", ["Backend", "ux"]), true);
+  assert.equal(stageOn(p, "qa", ["Backend"]), false);
+  assert.equal(stageOn(p, "qa", []), false);
+  assert.equal(stageOn(p, "qa"), true, "no ticket labels given: the filter isn't applied (as before labels existed)");
+  assert.equal(stageOn(p, "security", []), true, "no labels on the stage: every ticket");
+  const off = stageCheck(p, "qa", ["Backend"]);
+  assert.equal(off.on, false);
+  assert.match(off.reason, /qa runs only for tickets labelled Design or UX/);
+  assert.deepEqual(stageCheck(p, "qa", ["Design"]), { on: true, labels: ["Design", "UX"], reason: null });
+  assert.match(stageCheck(p, "qa").reason, /pass --ticket or --labels/);
+  // A stage that's off stays off whatever the labels.
+  const qaOff = on({}, { stages: [{ id: "qa", on: false, labels: ["Design"] }] });
+  assert.equal(stageOn(qaOff, "qa", ["Design"]), false);
+  assert.equal(stageCheck(qaOff, "qa", ["Design"]).reason, null);
 });
 
 test("decide: an unattended run below the team's minimum spec score stops whatever the spec gate is", () => {

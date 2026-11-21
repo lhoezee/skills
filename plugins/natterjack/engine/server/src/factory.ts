@@ -58,7 +58,7 @@ export const SPEC_CHECKS: { id: SpecCheckId; label: string; help: string; weight
 ];
 const SPEC_IDS = SPEC_CHECKS.map((c) => c.id);
 
-const stage = (id: FactoryStageId, on: boolean): FactoryStageConfig => ({ id, on, agent: null, model: null, effort: null });
+const stage = (id: FactoryStageId, on: boolean): FactoryStageConfig => ({ id, on, agent: null, model: null, effort: null, labels: [] });
 
 /** The Supervised preset with the factory off: what Settings starts from. */
 export function defaultFactoryConfig(): FactoryConfig {
@@ -112,6 +112,8 @@ export function applyPreset(c: FactoryConfig, preset: FactoryPreset): FactoryCon
 
 // ------------------------------------------------------------------ reading factory.json
 
+/** Labels once each, whatever their case (the first spelling kept). */
+const dedupeCi = (labels: string[]) => { const seen = new Set<string>(); return labels.filter((l) => !seen.has(l.toLowerCase()) && !!seen.add(l.toLowerCase())); };
 const strs = (v: unknown, max = 50) => (Array.isArray(v) ? [...new Set(v.filter((x) => typeof x === "string").map((x) => x.trim()).filter(Boolean))].slice(0, max) : null);
 const pick = <T>(v: unknown, allowed: readonly T[], d: T): T => (allowed.includes(v as T) ? (v as T) : d);
 const optStr = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim().slice(0, 200) : null);
@@ -147,6 +149,7 @@ export function normalizeFactoryConfig(raw: any): FactoryConfig {
     listed.push({
       id: s.id, on: s.on !== false,
       agent: AGENTS.includes(s.agent) ? s.agent : null, model: optStr(s.model), effort: optStr(s.effort),
+      labels: dedupeCi(strs(s.labels) ?? []),
     });
   }
   const stages = [...listed, ...d.stages.filter((s) => !listed.some((x) => x.id === s.id))];
@@ -236,6 +239,7 @@ export function factoryConfigProblems(c: FactoryConfig): string[] {
   const out: string[] = [];
   const on = (id: FactoryStageId) => c.stages.some((s) => s.id === id && s.on);
   if (!on("build")) out.push("The Build stage can't be turned off: it's where the work happens.");
+  if (c.stages.some((s) => s.id === "build" && s.labels.length)) out.push("The Build stage runs for every ticket: it can't be limited to labels.");
   if (Object.values(c.gates).includes("approver") && !c.approver.enabled) out.push("A gate is set to the Approver, but the Approver is off.");
   if (c.approver.mergeAction !== "none" && c.gates.merge !== "approver") out.push("The Approver can only merge when the merge gate is set to the Approver.");
   if (c.approver.enabled && c.approver.enforce && !c.approver.identity) out.push("The Approver decides only as its own account: name its identity, or leave it advisory.");
@@ -312,6 +316,7 @@ export function normalizeManifest(raw: any): FactoryManifest | null {
     workroot: typeof raw.workroot === "string" ? raw.workroot : null,
     branch: optStr(raw.branch),
     repos: strs(raw.repos, 100) ?? [],
+    labels: strs(raw.labels, 100) ?? [],
     plan: typeof raw.plan === "string" ? raw.plan : null,
     startedAt: started,
     updatedAt: iso(raw.updatedAt) || started,
@@ -801,12 +806,21 @@ export interface FactoryRun {
 
 const WHO: Record<FactoryGateMode, string> = { human: "you", approver: "the Approver", auto: "its checks", off: "" };
 
+/**
+ * The stages that are on but limited to labels this ticket doesn't carry (any case): it passes
+ * them, unless it reported them anyway.
+ */
+export function stagesNotFor(c: FactoryConfig, m: FactoryManifest): Set<FactoryStageId> {
+  const has = new Set((m.labels || []).map((l) => l.toLowerCase()));
+  return new Set(c.stages.filter((s) => s.on && s.labels.length && !s.labels.some((l) => has.has(l.toLowerCase())) && !m.stages.some((x) => x.id === s.id)).map((s) => s.id));
+}
+
 /** Where an item is: the first step it hasn't finished, and whether it's moving, waiting or failing. */
-export function placeItem(full: FactoryManifest, steps: PipelineStep[]): { column: string; state: FactoryItem["state"]; reason: string | null } {
+export function placeItem(full: FactoryManifest, steps: PipelineStep[], notFor: Set<FactoryStageId> = new Set()): { column: string; state: FactoryItem["state"]; reason: string | null } {
   const m = { ...full, gates: roundGates(full) };
   // Stopped short (spec or plan rejected, aborted): it stays where it stopped, failing, with why.
   if (m.done && m.error) {
-    const at = placeItem({ ...m, done: false, error: null }, steps);
+    const at = placeItem({ ...m, done: false, error: null }, steps, notFor);
     return { column: at.column, state: "failing", reason: `Stopped: ${m.error}` };
   }
   if (m.done || everyPrMerged(m)) return { column: "done", state: "done", reason: null };
@@ -818,7 +832,7 @@ export function placeItem(full: FactoryManifest, steps: PipelineStep[]): { colum
     const col = s.kind === "stage" ? s.id : `gate:${s.id}`;
     if (s.kind === "stage") {
       const rows = m.stages.filter((x) => x.id === s.id);
-      if (!rows.length) { if (hasActivity(i + 1)) continue; return { column: col, state: "idle", reason: null }; }
+      if (!rows.length) { if (notFor.has(s.id) || hasActivity(i + 1)) continue; return { column: col, state: "idle", reason: null }; }
       // The latest row per repo decides (a failed review then a passing one is passing).
       const latest = new Map<string, FactoryStepStatus>();
       for (const r of rows) latest.set(r.repo || "", r.status);
@@ -899,7 +913,7 @@ export function waitingGate(m: FactoryManifest, steps: FactoryItemStep[]): Facto
 }
 
 /** Every pipeline step for one item: its state, times, per-repo rows and gate decisions. */
-export function itemSteps(m: FactoryManifest, steps: PipelineStep[], column: string): FactoryItemStep[] {
+export function itemSteps(m: FactoryManifest, steps: PipelineStep[], column: string, notFor: Set<FactoryStageId> = new Set()): FactoryItemStep[] {
   const colId = (s: PipelineStep) => (s.kind === "stage" ? s.id : `gate:${s.id}`);
   const laterActivity = (i: number) => steps.slice(i + 1).some((s) => (s.kind === "stage" ? m.stages.some((x) => x.id === s.id) : m.gates.some((g) => g.id === s.id)));
   const minIso = (xs: (string | null)[]) => xs.filter((x): x is string => !!x).sort()[0] ?? null;
@@ -912,7 +926,7 @@ export function itemSteps(m: FactoryManifest, steps: PipelineStep[], column: str
       const rows = latestPerRepo(m.stages.filter((x) => x.id === s.id));
       const repos = rows.map((r) => ({ repo: r.repo, status: r.status, agent: r.agent, note: r.note, startedAt: r.startedAt, endedAt: r.endedAt }));
       const st = rows.map((r) => r.status);
-      const state: FactoryItemStep["state"] = !rows.length ? (laterActivity(i) || m.done ? "skipped" : "pending")
+      const state: FactoryItemStep["state"] = !rows.length ? (notFor.has(s.id) || laterActivity(i) || m.done ? "skipped" : "pending")
         : st.includes("failed") ? "failed" : st.includes("running") ? "running" : st.includes("pending") ? "pending"
         : st.every((x) => x === "skipped") ? "skipped" : "done";
       const finished = state === "done" || state === "skipped" || state === "failed";
@@ -938,7 +952,8 @@ export function buildBoard(cfg: FactoryConfig, configured: boolean, manifests: F
   const order = new Map(steps.map((s, i) => [s.kind === "stage" ? s.id : `gate:${s.id}`, i]));
   const items = manifests.map((m): FactoryItem => {
     const mine = runs.filter((r) => r.ticket && r.ticket.toLowerCase() === m.ticket.toLowerCase()).sort((a, b) => b.startedAt.localeCompare(a.startedAt));
-    let { column, state, reason } = placeItem(m, steps);
+    const notFor = stagesNotFor(cfg, m);
+    let { column, state, reason } = placeItem(m, steps, notFor);
     // A live run says more than the manifest's last write: a question waiting, or work going on.
     const live = mine.find((r) => r.status === "waiting" || r.status === "running");
     if (state !== "done" && live) {
@@ -954,7 +969,7 @@ export function buildBoard(cfg: FactoryConfig, configured: boolean, manifests: F
     const assessed = m.assessments.filter((a) => !m.roundStartedAt || a.at >= m.roundStartedAt).at(-1) || null;
     const gateRisk = m.gates.filter((g) => g.risk).at(-1);
     const risk = assessed ? { risk: assessed.level, rationale: assessed.rationale || assessed.reason } : gateRisk;
-    const itemStepList = itemSteps(m, steps, column);
+    const itemStepList = itemSteps(m, steps, column, notFor);
     const overridable = overridableGate(m);
     return {
       ticket: m.ticket, title: m.title, url: m.url, column, state, reason,
