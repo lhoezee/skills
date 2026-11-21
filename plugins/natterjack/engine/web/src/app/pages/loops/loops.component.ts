@@ -159,6 +159,7 @@ import { type RoutineDraft, blankDraft, draftFrom, draftToInput, lastSummary, wa
               }
             </div>
             <div class="acts">
+              <a class="btn sm" routerLink="/runs" [queryParams]="{ routine: r.id, status: '' }" title="Show only this routine's runs">History</a>
               <button class="btn sm" (click)="runNow(r)" [disabled]="!!r.problem || busy() === r.id">Run now</button>
               <button class="btn sm" (click)="setEnabled(r, !r.enabled)" [disabled]="busy() === r.id">{{ r.enabled ? 'Turn off' : 'Turn on' }}</button>
               @if (r.source === 'personal') {

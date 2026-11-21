@@ -1,4 +1,5 @@
 import { ChangeDetectionStrategy, Component, computed, effect, ElementRef, inject, input, signal, untracked, viewChild } from '@angular/core';
+import { toSignal } from '@angular/core/rxjs-interop';
 import { ActivatedRoute, Router, RouterLink } from '@angular/router';
 import type { RunMeta } from '../../../../../shared/api';
 import { ApiService } from '../../core/api.service';
@@ -8,7 +9,7 @@ import { SmallScreenService } from '../../core/small-screen';
 import { dur, lsGet, lsSet, pct } from '../../core/util';
 import { PageHeaderComponent } from '../../shared/page-header.component';
 import { RunRowComponent } from '../../shared/run-row.component';
-import { toReview, unrated } from '../../shared/run-status';
+import { filterRuns, MANUAL_RUNS, routineOf, toReview, unrated } from '../../shared/run-status';
 import { QuestionDock } from './question-dock';
 import { RunDetailComponent } from './run-detail.component';
 import { RunQuestionsComponent } from './run-questions.component';
@@ -36,6 +37,8 @@ const HISTORY_W_KEY = 'dash.runs.historyWidth';
 const ASKING_W_KEY = 'dash.runs.questionsShare';
 const HISTORY_W_DEFAULT = 400;
 const HISTORY_OPEN_KEY = 'dash.runs.historyOpenWhileAsking';
+/** The last "Started by" choice, used when the URL has no ?routine=. */
+const ROUTINE_KEY = 'dash.runs.routine';
 const ASKING_W_DEFAULT = 0.5;
 const LEFT_MIN_PX = 280;
 const RUN_MIN_PX = 420;
@@ -87,9 +90,23 @@ const parse = (s: string | null | undefined) => new Set(String(s || '').split(',
               </button>
             }
           </div>
+          <div class="list-filters">
+            <input type="search" class="run-search" placeholder="Search titles…" aria-label="Search runs by title or ticket"
+              [value]="q()" (input)="setQuery($any($event.target).value)" (keydown.escape)="setQuery('')" />
+            <label for="routine-filter">Started by</label>
+            <select id="routine-filter" [value]="routine()" (change)="setRoutine($any($event.target).value)">
+              <option value="" [selected]="!routine()">All runs</option>
+              <option [value]="manual" [selected]="routine() === manual">You (not a routine)</option>
+              @if (routineOptions().length) {
+                <optgroup label="Routines">
+                  @for (o of routineOptions(); track o.id) { <option [value]="o.id" [selected]="o.id === routine()">{{ o.label }}</option> }
+                </optgroup>
+              }
+            </select>
+          </div>
           <div class="panel-b runs-list">
             @for (r of list(); track r.id) { <dash-run-row [run]="r" [selected]="r.id === selectedId()" [keepQuery]="true" /> }
-            @empty { <div class="empty">{{ selected().size ? 'Nothing here right now.' : 'No runs yet.' }}</div> }
+            @empty { <div class="empty">{{ q() || routine() ? 'No runs match.' : selected().size ? 'Nothing here right now.' : 'No runs yet.' }}</div> }
           </div>
           }
         </div>
@@ -175,16 +192,38 @@ export class RunsComponent {
   readonly selected = signal<Set<string>>(parse(this.route.snapshot.queryParamMap.get('status') ?? lsGet('dash.runs.status', '')));
   readonly isFocus = computed(() => this.selected().size === FOCUS.length && FOCUS.every((k) => this.selected().has(k)));
   readonly chips = computed(() => CHIPS.map((c) => {
-    const count = this.data.activityRuns().filter((r) => c.test(r, this.data)).length;
+    const count = this.scoped().filter((r) => c.test(r, this.data)).length;
     return { key: c.key, label: c.label, count, hot: (c.key === 'waiting' || c.key === 'running' || c.key === 'flagged') && count > 0 };
   }));
+
+  /**
+   * "Started by": one routine's runs (?routine=<id>, also set by a routine's History link on Loops),
+   * MANUAL_RUNS for the runs no routine started, or empty for all. Without ?routine= in the URL, the last choice.
+   */
+  private readonly query = toSignal(this.route.queryParamMap, { initialValue: this.route.snapshot.queryParamMap });
+  readonly manual = MANUAL_RUNS;
+  readonly routine = computed(() => this.query().get('routine') ?? lsGet(ROUTINE_KEY, ''));
+  /** The title search (?q=). Set straight away on typing; the URL follows. */
+  readonly q = signal(this.route.snapshot.queryParamMap.get('q') || '');
+  /** The routines to pick from: every one defined, plus any that only exist in the history. */
+  readonly routineOptions = computed(() => {
+    const byId = new Map<string, string>();
+    for (const r of this.data.routines() || []) byId.set(r.id, r.label || r.id);
+    for (const r of this.data.activityRuns()) { const id = routineOf(r); if (id && !byId.has(id)) byId.set(id, id); }
+    // The filter in the URL always has an option, even for a deleted routine with no runs left in the feed.
+    const active = this.routine();
+    if (active && active !== MANUAL_RUNS && !byId.has(active)) byId.set(active, active);
+    return [...byId].map(([id, label]) => ({ id, label }));
+  });
+  /** The runs the status chips count and filter: narrowed by "Started by" and the search. */
+  private readonly scoped = computed(() => filterRuns(this.data.activityRuns(), { routine: this.routine(), q: this.q() }));
 
   readonly selectedId = computed(() => this.id() || null);
   readonly list = computed(() => {
     const sel = this.selected();
-    if (!sel.size) return this.data.activityRuns();
+    if (!sel.size) return this.scoped();
     const tests = CHIPS.filter((c) => sel.has(c.key)).map((c) => c.test);
-    const hits = this.data.activityRuns().filter((r) => tests.some((t) => t(r, this.data)));
+    const hits = this.scoped().filter((r) => tests.some((t) => t(r, this.data)));
     // In a filtered view, flagged runs come first (stable, so newest-first holds within each group).
     return [...hits.filter((r) => r.flagged), ...hits.filter((r) => !r.flagged)];
   });
@@ -199,6 +238,7 @@ export class RunsComponent {
   });
 
   constructor() {
+    if (this.data.routines() === null) this.data.loadRoutines();
     effect((onCleanup) => {
       const el = this.layout()?.nativeElement;
       if (!el) return;
@@ -285,6 +325,17 @@ export class RunsComponent {
     const s = new Set(this.selected());
     if (s.has(key)) s.delete(key); else s.add(key);
     this.setFilter([...s]);
+  }
+
+  /** Kept in localStorage too, for the next visit without ?routine=. */
+  setRoutine(id: string): void {
+    lsSet(ROUTINE_KEY, id);
+    this.router.navigate([], { relativeTo: this.route, queryParams: { routine: id || null }, queryParamsHandling: 'merge', replaceUrl: true });
+  }
+
+  setQuery(q: string): void {
+    this.q.set(q);
+    this.router.navigate([], { relativeTo: this.route, queryParams: { q: q.trim() ? q : null }, queryParamsHandling: 'merge', replaceUrl: true });
   }
 
   /** Keeps the choice in localStorage and the URL (bookmarkable). The open run stays open even if filtered out. */

@@ -4,6 +4,32 @@ export const REVIEW_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 /** A run from a terminal session (trigger terminal, terminal:auto, terminal:moved) with no turn from here yet (as the server's terminalOnlyRun). */
 const terminalOnly = (r: { trigger?: string | null; turns?: number }) => String(r.trigger || '').startsWith('terminal') && (r.turns ?? 1) <= 1;
+/** The id of the routine that started a run (trigger "routine:<id>"), or null. */
+export const routineOf = (r: { trigger?: string | null }): string | null => {
+  const t = String(r.trigger || '');
+  return t.startsWith('routine:') ? t.slice('routine:'.length) : null;
+};
+/** The Activity page's "Started by" value for runs no routine started (routine ids never start with `_`). */
+export const MANUAL_RUNS = '_manual';
+/**
+ * The Activity page's History filters. `routine`: a routine's id (only its runs), MANUAL_RUNS (no
+ * routine's runs) or empty (all). `q`: every whitespace-separated term must appear in the run's
+ * title or ticket, case-insensitively.
+ */
+export const filterRuns = <T extends { trigger?: string | null; label?: string | null; implementingTicket?: string | null }>(
+  runs: T[], { routine = '', q = '' }: { routine?: string; q?: string },
+): T[] => {
+  const terms = q.toLowerCase().split(/\s+/).filter(Boolean);
+  return runs.filter((r) => {
+    const from = routineOf(r);
+    if (routine === MANUAL_RUNS ? from : routine && from !== routine) return false;
+    if (!terms.length) return true;
+    const text = `${r.label || ''} ${r.implementingTicket || ''}`.toLowerCase();
+    return terms.every((t) => text.includes(t));
+  });
+};
+/** A routine run that finished fine: it ran on a schedule, so it needs no rating (a failed one still does). */
+const routineDone = (r: { trigger?: string | null; status: string }) => !!routineOf(r) && r.status === 'succeeded';
 /**
  * Finished fine in the last day and not rated yet: it may still be waiting on you (e.g. "test this
  * and tell me"). Never a run mirrored from a linked computer (RunMeta.remote): it's rated there.
@@ -12,6 +38,7 @@ export function toReview(r: Pick<RunMeta, 'status' | 'verdict' | 'endedAt' | 're
   if (r.remote) return false;
   // A session from a terminal (opened or moved here) is yours already: only a turn run from here is up for review.
   if (terminalOnly(r)) return false;
+  if (routineDone(r)) return false;
   return r.status === 'succeeded' && !r.verdict && !!r.endedAt && now - Date.parse(r.endedAt) < REVIEW_WINDOW_MS;
 }
 
@@ -19,6 +46,7 @@ export function toReview(r: Pick<RunMeta, 'status' | 'verdict' | 'endedAt' | 're
 export function unrated(r: Pick<RunMeta, 'status' | 'verdict' | 'remote'> & Partial<Pick<RunMeta, 'trigger' | 'turns'>>): boolean {
   if (r.remote) return false;
   if (terminalOnly(r)) return false; // as in toReview
+  if (routineDone(r)) return false;
   return r.status !== 'running' && r.status !== 'waiting' && !r.verdict;
 }
 
