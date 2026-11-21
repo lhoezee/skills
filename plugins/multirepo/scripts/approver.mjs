@@ -11,6 +11,7 @@
  *   - a repo's latest security stage failed                                                         high
  *   - what changed in a repo can't be told (no merge base with its default branch)                  high
  *   - more than maxFiles files, maxLines changed lines, or maxRepos repos                           medium
+ *     (files matching ignoreForSize globs, such as tests, don't count toward maxFiles or maxLines)
  *   - a new dependency (package.json, requirements*.txt, go.mod, *.csproj)                           medium
  * With no rule tripped, the risk is the agent's judgement (--risk), or medium without one. The
  * merge gate's rules read each PR as it is on the code host (its files at its head commit: what
@@ -170,14 +171,23 @@ export function evaluateRules(approver, { repos = [], labels = [], securityFaile
   for (const l of labels) if (wanted.has(String(l).toLowerCase())) rules.push({ id: "label", level: "high", detail: `The ticket is labelled ${l}` });
   for (const repo of securityFailed) rules.push({ id: "security", level: "high", detail: `The security stage failed for ${repo}` });
   for (const r of repos) if (r.unknown) rules.push({ id: "unknown", level: "high", detail: `Couldn't tell what changed in ${r.name} (${typeof r.unknown === "string" ? r.unknown : "no merge base with its default branch"})` });
-  const files = repos.reduce((n, r) => n + r.files.length, 0);
-  const lines = repos.reduce((n, r) => n + r.files.reduce((m, f) => m + f.lines, 0), 0);
+  // Files matching ignoreForSize (tests, snapshots) are left out of maxFiles and maxLines only.
+  const ignore = (approver.ignoreForSize || []).map((g) => globRegex(g));
+  const all = repos.flatMap((r) => r.files);
+  const ignored = all.filter((f) => ignore.some((re) => re.test(f.path.replace(/\\/g, "/"))));
+  const sum = (fs) => fs.reduce((n, f) => n + f.lines, 0);
+  const ignoredFiles = ignored.length, ignoredLines = sum(ignored);
+  const files = all.length - ignoredFiles;
+  const lines = sum(all) - ignoredLines;
   const touched = repos.filter((r) => r.files.length).length;
-  if (files > approver.maxFiles) rules.push({ id: "files", level: "medium", detail: `${files} files changed (more than ${approver.maxFiles})` });
-  if (lines > approver.maxLines) rules.push({ id: "lines", level: "medium", detail: `${lines} lines changed (more than ${approver.maxLines})` });
+  const left = (n) => (n ? `; ${n} left out by ignoreForSize` : "");
+  if (files > approver.maxFiles) rules.push({ id: "files", level: "medium", detail: `${files} files changed (more than ${approver.maxFiles}${left(ignoredFiles)})` });
+  if (lines > approver.maxLines) rules.push({ id: "lines", level: "medium", detail: `${lines} lines changed (more than ${approver.maxLines}${left(ignoredLines)})` });
   if (touched > approver.maxRepos) rules.push({ id: "repos", level: "medium", detail: `${touched} repos changed (more than ${approver.maxRepos})` });
   for (const r of repos) for (const d of r.newDeps || []) rules.push({ id: "dependency", level: "medium", detail: `New dependency ${d.name} (${repos.length > 1 ? `${r.name}/` : ""}${d.file})` });
-  return { level: worst(...rules.map((r) => r.level)), rules: rules.slice(0, 50), stats: { files, lines, repos: touched } };
+  // files and lines are what the size rules counted; ignoredFiles/ignoredLines what ignoreForSize left out.
+  const stats = { files, lines, repos: touched, ...(ignore.length ? { ignoredFiles, ignoredLines } : {}) };
+  return { level: worst(...rules.map((r) => r.level)), rules: rules.slice(0, 50), stats };
 }
 
 /** The newest row per repo of one stage. */

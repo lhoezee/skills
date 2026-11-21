@@ -41,6 +41,9 @@ test("normalize keeps good values, drops bad ones and fills the rest", () => {
   assert.deepEqual(c.gates, { spec: "human", plan: "approver", prePr: "human", merge: "human" });
   assert.equal(c.approver.samplingPct, 100);
   assert.equal(c.approver.mergeMethod, "rebase");
+  assert.deepEqual(c.approver.ignoreForSize, [], "no paths are left out of the size rules by default");
+  assert.deepEqual(normalizeFactoryConfig({ approver: { ignoreForSize: [" **/*.spec.ts ", "**/*.spec.ts", "", 7] } }).approver.ignoreForSize, ["**/*.spec.ts"]);
+  assert.deepEqual(normalizeFactoryConfig({ approver: { ignoreForSize: "**/*.spec.ts" } }).approver.ignoreForSize, []);
 });
 
 test("presets set gates, mode and the Approver, and keep the rest", () => {
@@ -74,7 +77,11 @@ test("save writes factory.json and refuses a stale edit or a config with problem
   assert.throws(() => saveFactoryConfig({ config: first.config, mtimeMs: null }, dir), (e: any) => e.status === 409);
   const bad = { ...first.config, gates: { ...first.config.gates, merge: "approver" } };
   assert.throws(() => saveFactoryConfig({ config: bad, mtimeMs: first.mtimeMs }, dir), (e: any) => e.status === 400 && /Approver is off/.test(e.message));
-  assert.equal(saveFactoryConfig({ config: { ...first.config, mode: "autonomous" }, mtimeMs: first.mtimeMs }, dir).config.mode, "autonomous");
+  const second = saveFactoryConfig({ config: { ...first.config, mode: "autonomous" }, mtimeMs: first.mtimeMs }, dir);
+  assert.equal(second.config.mode, "autonomous");
+  const sized = { ...second.config, approver: { ...second.config.approver, ignoreForSize: ["**/*.spec.ts"] } };
+  assert.deepEqual(saveFactoryConfig({ config: sized, mtimeMs: second.mtimeMs }, dir).config.approver.ignoreForSize, ["**/*.spec.ts"]);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dir, "factory.json"), "utf-8")).approver.ignoreForSize, ["**/*.spec.ts"], "saving keeps the size globs");
 });
 
 test("the pipeline places each gate where it guards, and leaves out gates that are off", () => {
@@ -402,6 +409,7 @@ test("the multirepo scripts read the policy as the dashboard does", async (t) =>
     { requiredChecks: [" build ", "build", 3], reviewers: { bots: ["copilot"], pipeline: false, noUnresolved: false },
       approver: { enabled: true, enforce: true, identity: " approver-bot ", highRiskPaths: [], highRiskLabels: ["Security", ""], maxFiles: "0", maxLines: 99.6, maxRepos: 500, mergeAction: "merge", mergeMethod: "fast", samplingPct: 101 } },
     { approver: { enforce: "yes", identity: "", highRiskLabels: "security" } },
+    { approver: { ignoreForSize: [" **/*.spec.ts ", "**/*.spec.ts", "", 7, "**/__snapshots__/**"] } }, { approver: { ignoreForSize: "**/*.spec.ts" } },
     { intake: { states: ["Ready", " ready "], labels: ["factory"], auto: true, everyMinutes: 2 } }, { intake: { auto: "yes", everyMinutes: "45", unassigned: true } },
   ];
   for (const raw of inputs) {

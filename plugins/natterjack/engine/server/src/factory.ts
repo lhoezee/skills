@@ -79,7 +79,7 @@ export function defaultFactoryConfig(): FactoryConfig {
       enabled: false, enforce: false, identity: null,
       highRiskPaths: ["**/migrations/**", "**/auth/**", "infra/**", ".github/workflows/**", "**/*.lock"],
       highRiskLabels: ["security"],
-      maxFiles: 20, maxLines: 400, maxRepos: 1,
+      maxFiles: 20, maxLines: 400, maxRepos: 1, ignoreForSize: [],
       mergeAction: "none", mergeMethod: "squash", samplingPct: 0,
     },
   };
@@ -211,6 +211,7 @@ export function normalizeFactoryConfig(raw: any): FactoryConfig {
       maxFiles: Math.round(num(ap.maxFiles, d.approver.maxFiles, 1, 10_000)),
       maxLines: Math.round(num(ap.maxLines, d.approver.maxLines, 1, 1_000_000)),
       maxRepos: Math.round(num(ap.maxRepos, d.approver.maxRepos, 1, 100)),
+      ignoreForSize: strs(ap.ignoreForSize, 100) ?? d.approver.ignoreForSize,
       mergeAction: pick(ap.mergeAction, ["none", "auto-merge", "merge"] as const, "none"),
       mergeMethod: pick(ap.mergeMethod, ["squash", "merge", "rebase"] as MergeMethod[], "squash"),
       samplingPct: Math.round(num(ap.samplingPct, 0, 0, 100)),
