@@ -51,6 +51,26 @@ test("the rules: paths, labels and a failed scan are high; size, repos and new d
   assert.match(risky.rules[0].detail, /db\/migrations\/1\.sql matches \*\*\/migrations\/\*\*/);
 });
 
+test("ignoreForSize: matching files don't count toward maxFiles or maxLines, but still trip every other rule", () => {
+  assert.deepEqual(AP.ignoreForSize, [], "nothing is left out by default");
+  const ap = normalizePolicy({ approver: { maxFiles: 5, maxLines: 100, ignoreForSize: ["**/*.spec.ts", "**/__snapshots__/**"] } }).approver;
+  const src = Array.from({ length: 3 }, (_, i) => ({ path: `src/f${i}.ts`, lines: 20 }));
+  const specs = Array.from({ length: 6 }, (_, i) => ({ path: `src/f${i}.spec.ts`, lines: 100 }));
+  const r = evaluateRules(ap, { repos: [{ name: "api", files: [...src, ...specs, { path: "src\\__snapshots__\\a.snap", lines: 50 }] }] });
+  assert.equal(r.level, null, "only 3 files and 60 lines count");
+  assert.deepEqual(r.stats, { files: 3, lines: 60, repos: 1, ignoredFiles: 7, ignoredLines: 650 });
+  const big = evaluateRules({ ...ap, maxFiles: 2, maxLines: 50 }, { repos: [{ name: "api", files: [...src, ...specs] }] });
+  assert.deepEqual(big.rules.map((x) => x.id), ["files", "lines"]);
+  assert.match(big.rules[0].detail, /^3 files changed \(more than 2; 6 left out by ignoreForSize\)$/);
+  assert.match(big.rules[1].detail, /^60 lines changed \(more than 50; 600 left out by ignoreForSize\)$/);
+  const risky = evaluateRules({ ...ap, highRiskPaths: ["**/auth/**"] }, {
+    repos: [{ name: "api", files: [{ path: "src/auth/login.spec.ts", lines: 5 }], newDeps: [{ file: "package.json", name: "left-pad" }] }],
+  });
+  assert.deepEqual(risky.rules.map((x) => x.id), ["path", "dependency"], "an ignored file still matches highRiskPaths");
+  assert.equal(risky.stats.repos, 1, "a repo with only ignored files still counts toward maxRepos");
+  assert.deepEqual(evaluateRules(AP, { repos: [{ name: "api", files: src }] }).stats, { files: 3, lines: 60, repos: 1 }, "no ignored counts without the setting");
+});
+
 test("a PR's conditions: checks, review bots, threads, drafts and the Approver's own PRs", () => {
   const p = (over = {}) => normalizePolicy({ reviewers: { bots: ["copilot"] }, ...over });
   const pr = (over = {}) => ({ url: "https://github.com/acme/api/pull/7", author: { login: "sam" }, isDraft: false, unresolved: 0,

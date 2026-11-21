@@ -231,6 +231,10 @@ const GATE_HELP: Record<FactoryGateId, string> = {
                 <label class="field">Max lines <input type="number" min="1" [ngModel]="c.approver.maxLines" (ngModelChange)="setApprover('maxLines', +$event)" /></label>
                 <label class="field">Max repos <input type="number" min="1" [ngModel]="c.approver.maxRepos" (ngModelChange)="setApprover('maxRepos', +$event)" /></label>
               </div>
+              <label class="field">Left out of max files and lines (paths)
+                <textarea rows="3" class="mono" placeholder="e.g. **/*.spec.ts&#10;**/*.test.*&#10;**/__snapshots__/**" [ngModel]="(c.approver.ignoreForSize || []).join('\\n')" (ngModelChange)="setSizeIgnore($event)" [ngModelOptions]="{ updateOn: 'blur' }"></textarea>
+                <span class="faint">Tests and snapshots, say. They still count for every other rule (a high-risk path, a new dependency).</span>
+              </label>
               <label class="field">When it approves
                 <select [ngModel]="c.approver.mergeAction" (ngModelChange)="setApprover('mergeAction', $event)">
                   <option value="none">Approve only; a person merges</option>
@@ -411,6 +415,7 @@ export class FactorySettingsComponent implements OnInit {
   setBots(text: string): void { this.edit((c) => { c.reviewers.bots = splitList(text); }); }
   setReviewers(key: 'pipeline' | 'noUnresolved', v: boolean): void { this.edit((c) => { c.reviewers[key] = v; }); }
   setRiskPaths(text: string): void { this.edit((c) => { c.approver.highRiskPaths = splitLines(text); }); }
+  setSizeIgnore(text: string): void { this.edit((c) => { c.approver.ignoreForSize = splitLines(text); }); }
   readonly noticeEvents: { id: FactoryNoticeEvent; label: string }[] = [
     { id: 'gate-waiting', label: 'Gate waiting' }, { id: 'stage-failed', label: 'Stage failed twice' }, { id: 'budget', label: 'Budget reached' },
     { id: 'stopped', label: 'Stopped' }, { id: 'merged', label: 'Merged' },

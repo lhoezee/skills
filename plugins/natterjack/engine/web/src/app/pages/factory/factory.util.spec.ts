@@ -12,7 +12,7 @@ function config(): FactoryConfig {
     security: { agentReview: true, secretScan: true, scanners: [], failOn: 'high' },
     gates: { spec: 'human', plan: 'human', prePr: 'human', merge: 'human' },
     requiredChecks: [], reviewers: { bots: [], pipeline: true, noUnresolved: true },
-    approver: { enabled: false, highRiskPaths: [], maxFiles: 20, maxLines: 400, maxRepos: 1, mergeAction: 'none', mergeMethod: 'squash', samplingPct: 0 },
+    approver: { enabled: false, highRiskPaths: [], maxFiles: 20, maxLines: 400, maxRepos: 1, ignoreForSize: [], mergeAction: 'none', mergeMethod: 'squash', samplingPct: 0 },
   };
 }
 

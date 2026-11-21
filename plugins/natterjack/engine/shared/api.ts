@@ -1021,6 +1021,8 @@ export interface FactoryConfig {
     maxFiles: number;
     maxLines: number;
     maxRepos: number;
+    /** Paths (globs) left out of the maxFiles and maxLines counts, such as tests; they still count for every other rule. */
+    ignoreForSize: string[];
     mergeAction: 'none' | 'auto-merge' | 'merge';
     mergeMethod: MergeMethod;
     /** Share of auto-approvable items sent to a person anyway (0-100). */

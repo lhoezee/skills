@@ -313,6 +313,7 @@ export function normalizePolicy(raw) {
       maxFiles: Math.round(num(ap.maxFiles, 20, 1, 10_000)),
       maxLines: Math.round(num(ap.maxLines, 400, 1, 1_000_000)),
       maxRepos: Math.round(num(ap.maxRepos, 1, 1, 100)),
+      ignoreForSize: strs(ap.ignoreForSize, 100) ?? [],
       mergeAction: pick(ap.mergeAction, ["none", "auto-merge", "merge"], "none"),
       mergeMethod: pick(ap.mergeMethod, ["squash", "merge", "rebase"], "squash"),
       samplingPct: Math.round(num(ap.samplingPct, 0, 0, 100)),
