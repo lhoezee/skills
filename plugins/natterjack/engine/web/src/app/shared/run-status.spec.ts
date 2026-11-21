@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { RunMeta } from '../../../../shared/api';
-import { REVIEW_WINDOW_MS, needsAnswer, toReview, unrated } from './run-status';
+import { MANUAL_RUNS, REVIEW_WINDOW_MS, filterRuns, needsAnswer, toReview, unrated } from './run-status';
 
 const NOW = Date.parse('2026-10-23T12:00:00.000Z');
 const ended = (ms: number) => new Date(NOW - ms).toISOString();
@@ -71,5 +71,48 @@ describe('needsAnswer', () => {
   });
   it('a live link state never affects a local run', () => {
     expect(needsAnswer(waiting, false)).toBe(true);
+  });
+});
+
+describe('routine runs', () => {
+  const run = { status: 'succeeded' as const, verdict: null, endedAt: new Date().toISOString(), trigger: 'routine:triage-backlog' };
+  it('a routine run that succeeded is neither to review nor unrated', () => {
+    expect(toReview(run)).toBe(false);
+    expect(unrated(run)).toBe(false);
+  });
+  it('a routine run that failed is still unrated', () => {
+    expect(unrated({ ...run, status: 'failed' })).toBe(true);
+  });
+});
+
+describe('filterRuns', () => {
+  const run = (id: string, trigger: string, label: string, implementingTicket?: string) => ({ id, trigger, label, implementingTicket });
+  const runs = [
+    run('a', 'manual', 'Fix the login page'),
+    run('b', 'routine:triage', 'Triage backlog'),
+    run('c', 'issues', 'Explain ticket', 'PROJ-42'),
+    run('d', 'terminal:auto', 'Update the docs'),
+    run('e', 'routine:dependabot', 'Dependabot PR sweep'),
+  ];
+  const ids = (xs: { id: string }[]) => xs.map((x) => x.id);
+
+  it('no routine and no search keeps every run', () => {
+    expect(ids(filterRuns(runs, {}))).toEqual(['a', 'b', 'c', 'd', 'e']);
+  });
+  it('MANUAL_RUNS drops every routine run and keeps the rest', () => {
+    expect(ids(filterRuns(runs, { routine: MANUAL_RUNS }))).toEqual(['a', 'c', 'd']);
+  });
+  it('a routine id keeps only that routine\'s runs', () => {
+    expect(ids(filterRuns(runs, { routine: 'triage' }))).toEqual(['b']);
+  });
+  it('search matches the title or the ticket, case-insensitively, every term', () => {
+    expect(ids(filterRuns(runs, { q: 'LOGIN' }))).toEqual(['a']);
+    expect(ids(filterRuns(runs, { q: 'proj-42' }))).toEqual(['c']);
+    expect(ids(filterRuns(runs, { q: '  triage   backlog ' }))).toEqual(['b']);
+    expect(ids(filterRuns(runs, { q: 'triage login' }))).toEqual([]);
+  });
+  it('search and routine combine', () => {
+    expect(ids(filterRuns(runs, { routine: MANUAL_RUNS, q: 'sweep' }))).toEqual([]);
+    expect(ids(filterRuns(runs, { routine: MANUAL_RUNS, q: 'docs' }))).toEqual(['d']);
   });
 });

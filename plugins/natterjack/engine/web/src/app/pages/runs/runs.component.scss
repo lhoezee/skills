@@ -43,6 +43,11 @@
 .panel-h select { padding: 4px 8px; font-size: 12.5px; }
 .panel-h .shown { font-size: 12px; color: var(--text-muted); }
 .chips { display: flex; flex-wrap: wrap; gap: 5px; padding: 8px 12px 10px; border-bottom: 1px solid var(--line-soft); align-items: center; }
+.list-filters { display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-bottom: 1px solid var(--line-soft); font-size: 12px; color: var(--ink-soft); }
+.list-filters .run-search { flex: 1 1 140px; min-width: 0; font: inherit; font-size: 12px; color: var(--ink); padding: 3px 8px; border: 1px solid var(--border); border-radius: var(--r-pill); background: var(--surface); }
+.list-filters .run-search:focus { outline: none; border-color: var(--border-strong); }
+.list-filters label { white-space: nowrap; }
+.list-filters select { flex: 0 1 auto; min-width: 0; max-width: 45%; font-size: 12px; }
 .chip { border: 1px solid var(--border); background: var(--surface); border-radius: var(--r-pill); padding: 2px 9px; font-size: 12px; color: var(--ink-soft); cursor: pointer; display: inline-flex; align-items: center; gap: 5px; }
 .chip:hover { border-color: var(--border-strong); color: var(--ink); }
 .chip.on { background: var(--brand-800); border-color: var(--brand-800); color: #fff; }
