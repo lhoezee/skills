@@ -1,0 +1,14 @@
+.stats { margin-bottom: 14px; }
+.panel { margin-bottom: 14px; }
+.flush { padding: 0; overflow-x: auto; }
+.ty { font-size: 12px; color: var(--text-muted); }
+.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
+.tbl th { text-align: left; font-family: var(--font-mono); font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-soft); font-weight: 500; padding: 8px 12px 6px; white-space: nowrap; }
+.tbl td { padding: 7px 12px; border-top: 1px solid var(--line-soft); }
+.tbl .num { text-align: right; font-family: var(--font-mono); font-size: 12px; white-space: nowrap; }
+.tbl .who { font-weight: 600; white-space: nowrap; }
+.tbl .top { font-family: var(--font-mono); font-size: 12px; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tbl tr.idle td { color: var(--text-muted); }
+.tag { margin-left: 6px; font-size: 10.5px; font-weight: 500; padding: 1px 6px; border-radius: var(--r-pill); background: var(--paper-2); color: var(--ink-soft); }
+.empty { padding: 16px; color: var(--text-muted); }
+.foot { padding: 0 2px 20px; }

@@ -22,7 +22,8 @@ import { SearchPaletteComponent } from './shared/search-palette.component';
  * `group` starts a labelled section of the sidebar at that item. `needs`: a boot field the
  * page depends on; while it's null the page isn't in the nav (meetings: meetings.json).
  */
-interface NavItem { path: string; label: string; icon: string; exact?: boolean; group?: string; needs?: 'meetings' }
+/** needs: a boot flag the page wants, or 'routerAdmin' (the hosted router says you're an admin). */
+interface NavItem { path: string; label: string; icon: string; exact?: boolean; group?: string; needs?: 'meetings' | 'routerAdmin' }
 
 /** A sidebar section: its heading (none for the top one), the pages showing, and how many the toggle covers (0: no toggle). */
 interface NavSection { key: string; group?: string; shown: NavItem[]; open: boolean; more: number; toggleLabel: string }
@@ -164,6 +165,7 @@ export class AppComponent implements OnInit {
     { path: '/models', label: 'Models', icon: 'models' },
     { path: '/connections', label: 'Connections', icon: 'connections' },
     { path: '/usage', label: 'Usage', icon: 'usage' },
+    { path: '/reports', label: 'Reports', icon: 'usage', needs: 'routerAdmin' },
     { path: '/apps', label: 'Apps', icon: 'apps', group: 'Workspace' },
     { path: '/workspaces', label: 'Workspaces', icon: 'workspaces' },
     { path: '/explore', label: 'Explore', icon: 'explore' },
@@ -173,6 +175,8 @@ export class AppComponent implements OnInit {
     { path: '/machine', label: 'Machine', icon: 'machine' },
     { path: '/settings', label: 'Settings', icon: 'settings' },
   ];
+  /** The hosted router says this person is an admin (ROUTER_ADMINS): Reports shows. */
+  private readonly routerAdmin = signal(false);
   /** The nav minus the pages this person's role hides and the ones this workspace hasn't set up; a hidden group's first page hands its heading on. */
   readonly visibleNav = computed<NavItem[]>(() => {
     const boot = this.api.boot();
@@ -181,7 +185,8 @@ export class AppComponent implements OnInit {
     let heading: string | undefined;
     for (const n of this.nav) {
       if (n.group) heading = n.group;
-      if (hidden.has(n.path.replace(/^\//, '')) || (n.needs && !boot?.[n.needs])) continue;
+      if (hidden.has(n.path.replace(/^\//, ''))) continue;
+      if (n.needs === 'routerAdmin' ? !this.routerAdmin() : n.needs && !boot?.[n.needs]) continue;
       out.push(heading ? { ...n, group: heading } : { ...n, group: undefined });
       heading = undefined;
     }
@@ -283,6 +288,11 @@ export class AppComponent implements OnInit {
 
   ngOnInit(): void {
     this.api.loadBoot().then(() => {
+      // Hosted: the router answers /_router/me itself (admins see Reports). It's the router that
+      // refuses the report to everyone else; this only decides what the nav shows.
+      if (this.api.hosted()) {
+        fetch('/_router/me').then((r) => (r.ok ? r.json() : null)).then((me) => this.routerAdmin.set(!!me?.admin)).catch(() => {});
+      }
       const ws = this.api.workspace();
       if (!ws) { this.autoOpening.set(false); return; }
       // The team's favicon, and "<page> · <title> · <name>" titles (WorkspaceTitleStrategy).

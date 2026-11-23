@@ -18,12 +18,24 @@ import { SECRET_HEADER, checkHostedRequest } from "../../engine/server/src/hoste
 import { REMOTE_PREFIX, linkTokenOf, parseLinkToken, resolvedPath } from "../../engine/server/src/link-tokens.ts";
 import { routerConfig } from "./config.ts";
 import { HOP, backendHeaders, backendUrl, makeBackend, type Backend } from "./backends.ts";
+import { UsageStore, fetchSummary, isPageOpen, usageReport } from "./usage.ts";
 
 const cfg = (() => {
   try { return routerConfig(process.env, (f) => { try { return fs.readFileSync(f, "utf-8"); } catch { return null; } }); }
   catch (e) { console.error(e.message); process.exit(1); }
 })();
 const backend: Backend = makeBackend(cfg);
+const usage = new UsageStore(cfg.dataDir);
+
+/** The router's own paths: answered here, never passed to a dashboard. */
+const ROUTER_PREFIX = "/_router/";
+
+/** Fetch and keep this person's usage summary. Never throws: a dashboard that can't answer keeps its last one. */
+async function collect(email: string, url: string, host?: string) {
+  const headers = { [SECRET_HEADER]: cfg.backendSecret, [cfg.backendIdentityHeader]: email, host: host || [...cfg.front.hosts][0] };
+  try { usage.collected(email, await fetchSummary(backendUrl(url, "/api/usage/summary?days=30"), headers)); }
+  catch (e) { console.error(`Usage for ${email}: ${e.message}`); }
+}
 
 // Per person: when they last made a request, and how many are still open (a run's stream
 // stays open while its page is). Idle = nothing open and nothing for ROUTER_IDLE_MINUTES.
@@ -101,9 +113,12 @@ const server = http.createServer(async (req, res) => {
   // (there's no browser to sign in with), so the token's email says whose dashboard to send
   // it to. That's only a routing hint: the dashboard checks the token against its own.
   const link = linkTokenOf(req.url, req.headers);
+  const routerPath = String(req.url || "").startsWith(ROUTER_PREFIX) || !!resolvedPath(req.url)?.startsWith(ROUTER_PREFIX);
   let email: string;
   if (link) {
     if (!cfg.front.hosts.has(String(req.headers.host || "").toLowerCase())) { res.writeHead(421); return res.end("Misdirected request"); }
+    // The router's own paths are for a signed-in browser only: a link token never opens them.
+    if (routerPath) return json(res, 403, { error: "Sign in to open this." });
     email = parseLinkToken(link)!.email;
   } else if (String(req.url || "").startsWith(REMOTE_PREFIX) || resolvedPath(req.url)?.startsWith(REMOTE_PREFIX)) {
     // The login proxy doesn't sign anyone in here, so its headers mean nothing on this path.
@@ -113,6 +128,7 @@ const server = http.createServer(async (req, res) => {
     const verdict = checkHostedRequest(cfg.front, req.headers);
     if (verdict.ok === false) { res.writeHead(verdict.status, { "Content-Type": "text/plain; charset=utf-8" }); return res.end(verdict.message); }
     email = verdict.user;
+    if (routerPath) return routerApi(req, res, email);
   }
   let target;
   try { target = await backend.find(email); }
@@ -124,9 +140,48 @@ const server = http.createServer(async (req, res) => {
     if (link) { res.writeHead(403, { "Content-Type": "application/json" }); return res.end(JSON.stringify({ error: "That link token doesn't belong to anyone with a hosted dashboard." })); }
     return page(res, 403, "No dashboard for you yet", `There's no dashboard set up for ${email}.${cfg.admin ? ` Ask ${cfg.admin} to add you.` : " Ask whoever runs the dashboards to add you."}`);
   }
+  if (!link && isPageOpen(req)) usage.seen(email); // a page load: not the app's own polling, nor a linked computer
   if (!target.ready && target.canStart) { touch(email, 0); startOnce(email); return starting(req, res); }
   proxy(req, res, target.url, email, target.host);
 });
+
+function json(res: http.ServerResponse, status: number, body: unknown) {
+  res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+  res.end(JSON.stringify(body));
+}
+
+/**
+ * /_router/me: whether the signed-in person is an admin (the dashboard shows Reports for them).
+ * /_router/admin/usage: everyone's usage (usage.ts); admins only. ?refresh=1 collects from the
+ * dashboards that are running first.
+ */
+async function routerApi(req: http.IncomingMessage, res: http.ServerResponse, email: string) {
+  if (req.method !== "GET") return json(res, 405, { error: "Method not allowed" });
+  const u = new URL(req.url || "/", "http://router.invalid");
+  const p = resolvedPath(req.url);
+  if (p === "/_router/me") return json(res, 200, { email, admin: cfg.admins.has(email) });
+  if (p === "/_router/admin/usage") {
+    if (!cfg.admins.has(email)) return json(res, 403, { error: "Only admins can see the usage report." });
+    let everyone: string[] = [], running: Set<string> | null = null;
+    try {
+      everyone = await backend.everyone();
+      running = backend.running ? new Set(await backend.running()) : null;
+    } catch (e) { console.error(`Listing dashboards: ${e.message}`); }
+    if (u.searchParams.get("refresh") === "1") await collectAll(running ? [...running] : everyone);
+    return json(res, 200, { ...usageReport(usage, everyone, running), collectEveryMinutes: cfg.usageMinutes, kept: cfg.dataDir ? "disk" : "memory" });
+  }
+  return json(res, 404, { error: "Not found" });
+}
+
+/** Collect from these people's dashboards, one at a time (never starts one). */
+async function collectAll(emails: string[]) {
+  for (const email of emails) {
+    try {
+      const t = await backend.find(email);
+      if (t && t.ready) await collect(email, t.url, t.host);
+    } catch (e) { console.error(`Usage for ${email}: ${e.message}`); }
+  }
+}
 // Run streams stay open as long as their page; don't time out a quiet one.
 server.requestTimeout = 0;
 server.headersTimeout = 60_000;
@@ -168,7 +223,14 @@ async function sweep() {
     try {
       const t = await backend.find(email);
       if (!t || !t.canStart) { activity.delete(email); continue; }
+      const seenAt = a.last;
       if (await hasRunningRun(t.url, email, t.host)) continue;
+      // The last figures before it stops: the report shows them until it runs again. That
+      // takes a moment, in which they may have come back or started a run: look again.
+      if (cfg.usageMinutes > 0 && t.ready) {
+        await collect(email, t.url, t.host);
+        if (a.last !== seenAt || a.open > 0 || (await hasRunningRun(t.url, email, t.host))) continue;
+      }
       await backend.stop!(email);
       activity.delete(email);
       console.log(`Stopped ${email}'s dashboard after ${cfg.idleMinutes} idle minutes.`);
@@ -182,8 +244,25 @@ if (cfg.idleMinutes > 0 && backend.stop) {
   setInterval(() => { if (busy) return; busy = true; sweep().finally(() => { busy = false; }); }, every).unref();
 }
 
+// ------------------------------------------------------------------ usage collection
+
+if (cfg.usageMinutes > 0) {
+  let busy = false;
+  const round = async () => {
+    // Only dashboards that are up: collecting must never start one, or keep an idle one awake
+    // (these requests don't count as activity: they don't go through proxy()).
+    const emails = backend.running ? await backend.running() : await backend.everyone();
+    await collectAll(emails);
+  };
+  setInterval(() => {
+    if (busy) return;
+    busy = true;
+    round().catch((e) => console.error(`Collecting usage: ${e.message}`)).finally(() => { busy = false; });
+  }, Math.max(500, cfg.usageMinutes * 60_000)).unref();
+}
+
 server.listen(cfg.port, cfg.bind, () => {
-  console.log(`natterjack router on ${cfg.bind}:${cfg.port} for ${cfg.front.publicOrigin} (${cfg.backend} backend${cfg.idleMinutes ? `, idle stop after ${cfg.idleMinutes} min` : ""})`);
+  console.log(`natterjack router on ${cfg.bind}:${cfg.port} for ${cfg.front.publicOrigin} (${cfg.backend} backend${cfg.idleMinutes ? `, idle stop after ${cfg.idleMinutes} min` : ""}${cfg.usageMinutes ? `, usage every ${cfg.usageMinutes} min${cfg.dataDir ? "" : " (memory only)"}` : ""})`);
 });
 // Open run streams would hold close() forever; the browser reconnects to the next router.
-for (const sig of ["SIGINT", "SIGTERM"] as const) process.on(sig, () => { server.close(() => process.exit(0)); server.closeAllConnections(); });
+for (const sig of ["SIGINT", "SIGTERM"] as const) process.on(sig, () => { usage.flush(); server.close(() => process.exit(0)); server.closeAllConnections(); });

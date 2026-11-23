@@ -10,9 +10,14 @@
  *   ROUTER_BACKEND=static | kubernetes | azure-app-service   how it finds (and starts) each person's container
  *   ROUTER_IDLE_MINUTES=60                             optional: stop a container this long after
  *                                                      its last request, unless a run is going
+ *   ROUTER_ADMINS=a@example.com,b@example.com          optional: who may open the usage report
+ *   ROUTER_DATA_DIR=/data                              optional: where usage is kept (else memory only)
+ *   ROUTER_USAGE_MINUTES=15                            optional: how often to collect usage from
+ *                                                      running dashboards (0 = never)
  */
 
 import type { HostedConfig } from "../../engine/server/src/hosted.ts";
+import { parseAdmins } from "./usage.ts";
 
 export interface RouterConfig {
   port: number;
@@ -26,6 +31,12 @@ export interface RouterConfig {
   idleMinutes: number;
   /** Who to ask for a dashboard, shown to someone who doesn't have one yet. */
   admin: string | null;
+  /** Lowercase emails that may open the usage report (usage.ts). */
+  admins: Set<string>;
+  /** Where usage is kept; null = memory only. */
+  dataDir: string | null;
+  /** 0 = don't collect usage. */
+  usageMinutes: number;
   backend: "static" | "kubernetes" | "azure-app-service";
   /** static: a JSON file of { "<email>": "<dashboard URL>" }. */
   staticFile: string;
@@ -75,6 +86,8 @@ export function routerConfig(env: NodeJS.ProcessEnv = process.env, readFile: (f:
   if (backend === "static" && !staticFile) problems.push("ROUTER_STATIC_FILE must name the JSON file of { \"<email>\": \"<dashboard URL>\" }");
   const idle = Number(env.ROUTER_IDLE_MINUTES || 0);
   if (!(idle >= 0)) problems.push("ROUTER_IDLE_MINUTES must be a number of minutes (0 = never stop)");
+  const usageMinutes = env.ROUTER_USAGE_MINUTES === undefined || env.ROUTER_USAGE_MINUTES === "" ? 15 : Number(env.ROUTER_USAGE_MINUTES);
+  if (!(usageMinutes >= 0)) problems.push("ROUTER_USAGE_MINUTES must be a number of minutes (0 = don't collect usage)");
   if (problems.length) throw new Error(`The router isn't set up:\n  - ${problems.join("\n  - ")}`);
 
   const extra = String(env.ROUTER_ALLOWED_HOSTS || "").split(",").map((h) => h.trim().toLowerCase()).filter(Boolean);
@@ -95,6 +108,9 @@ export function routerConfig(env: NodeJS.ProcessEnv = process.env, readFile: (f:
     backendIdentityHeader: (String(env.ROUTER_BACKEND_IDENTITY_HEADER || "").trim() || "x-forwarded-email").toLowerCase(),
     idleMinutes: idle,
     admin: String(env.ROUTER_ADMIN || "").trim() || null,
+    admins: parseAdmins(env.ROUTER_ADMINS),
+    dataDir: String(env.ROUTER_DATA_DIR || "").trim() || null,
+    usageMinutes,
     backend: backend as RouterConfig["backend"],
     staticFile,
     kubernetes: {

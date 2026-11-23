@@ -166,6 +166,9 @@ browser ── login proxy (adds the email and ROUTER_PROXY_SECRET)
 | `ROUTER_BACKEND` | (required) | `kubernetes`, `azure-app-service` or `static` (below). |
 | `ROUTER_IDLE_MINUTES` | 0 (never) | Stop a container this long after its last request. Never while a run is going (it asks the dashboard), and not while a page has a stream open. Only for backends that can stop containers. |
 | `ROUTER_ADMIN` | none | Who to ask for a dashboard, shown to people without one. |
+| `ROUTER_ADMINS` | none | Emails (comma-separated) that may open the usage report. See "Usage report" below. |
+| `ROUTER_DATA_DIR` | none (memory only) | Where the router keeps usage: one small JSON file per person. |
+| `ROUTER_USAGE_MINUTES` | 15 | How often to collect usage from running dashboards. 0 turns collection off. |
 | `ROUTER_IDENTITY_HEADER` / `ROUTER_BACKEND_IDENTITY_HEADER` | `X-Forwarded-Email` | Where the login proxy puts the email, and where the dashboards expect it. |
 | `ROUTER_ALLOWED_HOSTS` | none | Extra `Host` values, comma-separated. |
 | `ROUTER_PORT` / `ROUTER_BIND` | 8080 / `0.0.0.0` | `127.0.0.1` when the login proxy is a sidecar. |
@@ -182,7 +185,19 @@ Backends:
   - Starting and stopping is `start` / `stop` on the Web App, which keeps its file share.
   - Azure says Running as soon as it starts the container, minutes before a first start has installed the workspace. So the router also asks the dashboard's `/healthz`, and shows the starting page until it answers. Without that, a request would be held by App Service until the login proxy gave up (a Cloudflare 524).
 - **`static`.** `ROUTER_STATIC_FILE` names a JSON file of `{ "<email>": "<dashboard URL>" }`, re-read when it changes. Use it for containers someone else keeps running: a VM with Docker, ECS services. The router never starts or stops them.
-- **Another platform.** Implement `Backend` in `router/src/backends.ts` (find a person's URL, and optionally start/stop/list running ones) and add it to `makeBackend()`.
+- **Another platform.** Implement `Backend` in `router/src/backends.ts` (find a person's URL, list everyone with a dashboard, and optionally start/stop/list running ones) and add it to `makeBackend()`.
+
+### Usage report
+
+Admins can see how much each person uses their hosted dashboard on the **Reports** page. It shows in the sidebar only for the emails in `ROUTER_ADMINS`.
+
+- **What it shows:** per person over the last 30 days: when they last opened their dashboard, how many days they opened it, runs (and how many failed), tokens, API-equivalent cost, the share of rated runs marked good, the weekly plan limit's last reading, and their most-used skills and presets.
+- **What it never collects:** prompts, results or files. Each dashboard's `GET /api/usage/summary` returns totals only. The one thing taken from a prompt is the name of the slash command it starts with, and only when it's a command that dashboard knows (`/report.csv is broken` starts with a slash too).
+- **What the router keeps:** only the fields the report shows, each checked. A dashboard is untrusted, since Claude runs shell commands in it. Anything else it sends is dropped, a malformed summary is refused (the last good one stays), and a response over 256 KB or slower than 15 seconds is cut off.
+- **How it's collected:** every `ROUTER_USAGE_MINUTES` the router fetches the summary from each dashboard that's running, and once more just before an idle stop. If the person comes back or starts a run while it's collecting, the stop is called off. It never starts a dashboard to collect, and collecting doesn't count as activity. The summaries are running totals, so a stopped dashboard keeps showing its last figures, and the 30-day columns count only days inside the current window.
+- **"Last opened" and days** count page loads the router passes through (`Sec-Fetch-Dest: document`), not the app's own requests, so a tab left open in the background doesn't count as a visit.
+- **Who decides who's an admin:** only the router, on the email the login proxy signed in (`/_router/me`, `/_router/admin/usage`). A dashboard can't vouch for anyone: they all hold the backend secret, and Claude runs shell commands in them. The router answers `/_router/*` itself and never passes it to a dashboard.
+- **Where it's kept:** `ROUTER_DATA_DIR`, one JSON file per person (named by a hash of the email). Without it, the report starts empty after each router restart.
 
 Build it from `plugins/natterjack`, so it gets the engine's shared request checks: `node <engine>/bin/hosted-images.mjs --router --push` ("The image" above), or by hand:
 

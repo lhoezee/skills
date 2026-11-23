@@ -21,6 +21,7 @@ export const routes: Routes = [
   { path: 'loops', loadComponent: () => import('./pages/loops/loops.component').then((m) => m.LoopsComponent), title: 'Loops' },
   { path: 'reviews', loadComponent: () => import('./pages/reviews/reviews.component').then((m) => m.ReviewsComponent), title: 'Reviews' },
   { path: 'usage', loadComponent: () => import('./pages/usage/usage.component').then((m) => m.UsageComponent), title: 'Usage' },
+  { path: 'reports', loadComponent: () => import('./pages/reports/reports.component').then((m) => m.ReportsComponent), title: 'Reports' },
   { path: 'issues', loadComponent: () => import('./pages/issues/issues.component').then((m) => m.IssuesComponent), title: 'Issues' },
   { path: 'meetings', loadComponent: () => import('./pages/meetings/meetings.component').then((m) => m.MeetingsComponent), title: 'Meetings' },
   { path: 'apps', loadComponent: () => import('./pages/apps/apps.component').then((m) => m.AppsComponent), title: 'Apps' },
