@@ -3,7 +3,10 @@
  * collects it from every person's dashboard for the admins' Reports page (router/src/usage.ts),
  * so it never carries what anyone asked or got back: no prompts, no result text, no file
  * names. The one thing taken from a prompt is the name of the slash command it starts with
- * ("/implement"), which says which skill was used and nothing else.
+ * ("/implement"), and only when it's a command this dashboard knows (the list it already
+ * cached for autocomplete): "/customer-123.csv is broken" starts with a slash too, and that
+ * name must not leave. With no cached list, no skills are reported; collecting never starts
+ * Claude to get one.
  *
  * Everything here is already on the dashboard's own disk: the run records (ledger), the
  * Claude transcripts' token counts (usage-history.ts) and the last /usage reading
@@ -76,6 +79,8 @@ export function usageSummary(input: {
   tokenDays: { date: string; byModel: Record<string, TokenCounts>; sessions: number }[];
   /** usage.ts history(): [{ at, meters: [{ kind, pct }] }] */
   limits: { at: string; meters: { kind: string; pct: number }[] }[];
+  /** Slash commands this dashboard knows (lowercase, no slash); null = none known, so no skills reported. */
+  knownCommands: Set<string> | null;
   days: number;
   now?: Date;
 }): UsageSummary {
@@ -110,7 +115,7 @@ export function usageSummary(input: {
     if (!lastRunAt || r.startedAt > lastRunAt) lastRunAt = r.startedAt;
     if (r.presetId) presets.set(r.presetId, (presets.get(r.presetId) || 0) + 1);
     const skill = skillOf(r.prompt);
-    if (skill) skills.set(skill, (skills.get(skill) || 0) + 1);
+    if (skill && input.knownCommands?.has(skill)) skills.set(skill, (skills.get(skill) || 0) + 1);
     const trig = String(r.trigger || "manual").startsWith("routine:") ? "routine" : r.presetId ? "preset" : String(r.trigger || "manual");
     triggers[trig] = (triggers[trig] || 0) + 1;
     const day = days.get(localDate(t));

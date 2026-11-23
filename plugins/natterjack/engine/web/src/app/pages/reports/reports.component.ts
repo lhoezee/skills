@@ -3,39 +3,7 @@ import { ApiService } from '../../core/api.service';
 import { compact } from '../../core/palette';
 import { relTime } from '../../core/util';
 import { PageHeaderComponent } from '../../shared/page-header.component';
-
-/** engine server/src/usage-summary.ts, as the router keeps it. */
-interface SummaryDay { date: string; runs: number; succeeded: number; failed: number; tokens: number; costUsd: number; sessions: number }
-interface UsageSummary {
-  version: number;
-  totals: { runs: number; rated: number; good: number };
-  lastRunAt: string | null;
-  days: SummaryDay[];
-  presets: { id: string; runs: number }[];
-  skills: { name: string; runs: number }[];
-  weeklyLimitPct: number | null;
-}
-/** router/src/usage.ts usageReport() */
-interface PersonRow {
-  email: string;
-  hasDashboard: boolean;
-  running: boolean | null;
-  lastSeen: string | null;
-  activeDays7: number;
-  activeDays30: number;
-  collectedAt: string | null;
-  summary: UsageSummary | null;
-}
-interface UsageReportResponse { generatedAt: string; people: PersonRow[]; collectEveryMinutes: number; kept: 'disk' | 'memory' }
-
-interface Row extends PersonRow {
-  runs30: number;
-  failed30: number;
-  tokens30: number;
-  cost30: number;
-  top: string;
-  goodPct: number | null;
-}
+import { type Row, type UsageReportResponse, rowsOf } from './rows';
 
 /**
  * Admins' Reports: how much each person uses their hosted dashboard. The data is the
@@ -105,21 +73,7 @@ export class ReportsComponent implements OnInit {
   readonly error = signal<string | null>(null);
   readonly busy = signal(false);
 
-  readonly rows = computed<Row[]>(() => (this.report()?.people || []).filter((p) => p.hasDashboard || p.summary).map((p) => {
-    const days = p.summary?.days || [];
-    const t = p.summary?.totals;
-    const top = [...(p.summary?.skills || []).map((s) => ({ n: `/${s.name}`, c: s.runs })), ...(p.summary?.presets || []).map((s) => ({ n: s.id, c: s.runs }))]
-      .sort((a, b) => b.c - a.c).slice(0, 3).map((x) => `${x.n} (${x.c})`).join(', ');
-    return {
-      ...p,
-      runs30: days.reduce((s, d) => s + d.runs, 0),
-      failed30: days.reduce((s, d) => s + d.failed, 0),
-      tokens30: days.reduce((s, d) => s + d.tokens, 0),
-      cost30: days.reduce((s, d) => s + d.costUsd, 0),
-      top,
-      goodPct: t && t.rated ? Math.round((t.good / t.rated) * 100) : null,
-    };
-  }).sort((a, b) => b.activeDays30 - a.activeDays30 || b.runs30 - a.runs30 || a.email.localeCompare(b.email)));
+  readonly rows = computed<Row[]>(() => rowsOf(this.report()));
   readonly activeWeek = computed(() => this.rows().filter((r) => r.activeDays7 > 0).length);
 
   ngOnInit(): void { void this.load(false); }

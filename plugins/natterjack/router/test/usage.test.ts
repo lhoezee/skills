@@ -9,7 +9,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { UsageStore, activeDays, parseAdmins, usageReport } from "../src/usage.ts";
+import { UsageStore, activeDays, cleanSummary, fetchSummary, isPageOpen, parseAdmins, usageReport } from "../src/usage.ts";
 import { routerConfig } from "../src/config.ts";
 import { LinkTokens } from "../../engine/server/src/link-tokens.ts";
 import { freePort } from "../../engine/server/test/ports.ts";
@@ -29,6 +29,61 @@ let fakeHits: { path: string; secret: unknown; email: unknown }[] = [];
 test("parseAdmins: commas or spaces, lowercase, emails only", () => {
   assert.deepEqual([...parseAdmins(" Ana@X.com, bo@x.com  cy@x.com,,nobody ")], ["ana@x.com", "bo@x.com", "cy@x.com"]);
   assert.equal(parseAdmins(undefined).size, 0);
+});
+
+const goodSummary = () => ({
+  version: 1, generatedAt: "2026-11-19T12:00:00.000Z",
+  totals: { runs: 2, succeeded: 1, failed: 1, turns: 3, toolCalls: 4, durationMs: 5, costUsd: 0.5, rated: 1, good: 1, tokens: 900 },
+  firstRunAt: "2026-11-01T10:00:00.000Z", lastRunAt: "2026-11-19T10:00:00.000Z",
+  days: [{ date: "2026-11-19", runs: 2, succeeded: 1, failed: 1, turns: 3, toolCalls: 4, durationMs: 5, costUsd: 0.5, tokens: 900, sessions: 1 }],
+  presets: [{ id: "explain", runs: 1 }], skills: [{ name: "implement", runs: 1 }], triggers: { manual: 2 }, weeklyLimitPct: 12,
+});
+
+test("cleanSummary: keeps only the report's fields, checked; refuses a malformed one", () => {
+  const dirty: any = goodSummary();
+  dirty.prompt = "secret prompt";
+  dirty.days[0].resultText = "secret result";
+  dirty.skills.push({ name: "has spaces and secrets", runs: 1 }, { name: "x", runs: -1 });
+  dirty.triggers["what the customer said"] = 3;
+  const c = cleanSummary(dirty);
+  assert.ok(!JSON.stringify(c).includes("secret"), "extra fields and odd labels are dropped");
+  assert.deepEqual(c.skills, [{ name: "implement", runs: 1 }]);
+  assert.deepEqual(c.triggers, { manual: 2 });
+  assert.equal(c.totals.tokens, 900);
+
+  assert.throws(() => cleanSummary({ version: 1, days: {} }), /days/, "days must be a list (the Reports page reduces it)");
+  assert.throws(() => cleanSummary({ ...goodSummary(), version: 2 }), /version 1/);
+  assert.throws(() => cleanSummary({ ...goodSummary(), totals: { ...goodSummary().totals, runs: "lots" } }), /totals.runs/);
+  assert.throws(() => cleanSummary({ ...goodSummary(), days: [{ date: "yesterday" }] }), /date/);
+});
+
+test("fetchSummary: refuses a non-200 unread, cuts off an endless body, and has a deadline", async () => {
+  let mode = "";
+  const s = http.createServer((req, res) => {
+    if (mode === "500") { res.writeHead(500); return res.end("x".repeat(10_000_000)); }
+    if (mode === "huge") { res.writeHead(200); const t = setInterval(() => res.write("x".repeat(64 * 1024)), 1); res.on("close", () => clearInterval(t)); return; }
+    if (mode === "trickle") { res.writeHead(200); const t = setInterval(() => res.write(" "), 50); res.on("close", () => clearInterval(t)); return; }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(goodSummary()));
+  });
+  const port = await listen(s);
+  const url = new URL(`http://127.0.0.1:${port}/api/usage/summary`);
+  try {
+    assert.equal((await fetchSummary(url, {})).totals.runs, 2);
+    mode = "500"; await assert.rejects(fetchSummary(url, {}), /500/);
+    mode = "huge"; await assert.rejects(fetchSummary(url, {}, 15000, 256 * 1024), /over 262144 bytes/);
+    // Each chunk arrives well inside the socket timeout; only the overall deadline stops it.
+    mode = "trickle"; await assert.rejects(fetchSummary(url, {}, 600), /took too long/);
+  } finally { s.close(); }
+});
+
+test("isPageOpen: a browser's page load counts; the app's own requests don't", () => {
+  assert.equal(isPageOpen({ method: "GET", headers: { "sec-fetch-dest": "document" } }), true);
+  assert.equal(isPageOpen({ method: "GET", headers: { "sec-fetch-dest": "empty", accept: "application/json" } }), false, "fetch() polling");
+  assert.equal(isPageOpen({ method: "GET", headers: { "sec-fetch-dest": "empty", accept: "text/html" } }), false);
+  assert.equal(isPageOpen({ method: "GET", headers: { accept: "text/html,application/xhtml+xml" } }), true, "no Sec-Fetch headers: HTML is a page");
+  assert.equal(isPageOpen({ method: "GET", headers: { accept: "application/json" } }), false);
+  assert.equal(isPageOpen({ method: "POST", headers: { "sec-fetch-dest": "document" } }), false);
 });
 
 test("routerConfig: usage settings and their defaults", () => {
@@ -169,7 +224,9 @@ test("router: a link token never opens the router's own paths", async () => {
 });
 
 test("router: collects each running dashboard's summary, with no prompts or results, and records visits", async () => {
-  await request(P.router, "/api/boot", as("ana@example.com")); // ana opens her dashboard
+  // bo's tab polls in the background (fetch()): not a visit. ana loads the page: a visit.
+  await request(P.router, "/api/runs", { ...as("bo@example.com"), "sec-fetch-dest": "empty" });
+  await request(P.router, "/", { ...as("ana@example.com"), accept: "text/html", "sec-fetch-dest": "document" });
   let report: any = null;
   for (let i = 0; i < 80; i++) {
     report = JSON.parse((await request(P.router, "/_router/admin/usage", as("boss@example.com"))).text);
@@ -181,12 +238,14 @@ test("router: collects each running dashboard's summary, with no prompts or resu
   assert.ok(ana?.summary, "ana's summary collected");
   assert.equal(ana.summary.totals.runs, 1);
   assert.equal(ana.summary.totals.costUsd, 0.42);
-  assert.deepEqual(ana.summary.skills, [{ name: "implement", runs: 1 }]);
+  // This dashboard has no command list cached (no Claude here), so "/implement" can't be told
+  // from a file name and isn't reported (engine usage-summary.ts).
+  assert.deepEqual(ana.summary.skills, []);
   assert.ok(ana.lastSeen, "her visit is recorded");
   assert.equal(ana.activeDays7, 1);
   assert.ok(!JSON.stringify(report).includes("secret-words-here"), "no prompt or result text in the report");
   assert.equal(bo.summary, null, "an older dashboard without the endpoint just has no figures");
-  assert.equal(bo.lastSeen, null, "collecting isn't a visit");
+  assert.equal(bo.lastSeen, null, "neither collecting nor a tab's polling is a visit");
   assert.ok(fakeHits.some((h) => h.path.startsWith("/api/usage/summary") && h.secret === BACK && h.email === "bo@example.com"), "asked as its owner, with the backend secret");
   assert.equal(report.kept, "disk");
   assert.ok(fs.readdirSync(path.join(TMP, "router-data")).length >= 1, "kept on disk");

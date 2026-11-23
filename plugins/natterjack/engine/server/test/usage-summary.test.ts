@@ -26,8 +26,10 @@ test("usageSummary: totals, days, presets, skills and triggers, with no prompt t
       run({ prompt: `/implement ENG-1 ${SECRET}`, costUsd: 1.234, turns: 3, toolCalls: 7, durationMs: 60000, verdict: "good" }),
       run({ prompt: SECRET, presetId: "explain", status: "failed", startedAt: at(18), costUsd: 0.5 }),
       run({ prompt: "/implement ENG-2", trigger: "routine:daily", status: "cancelled", startedAt: at(1) }), // before the 30 days
+      run({ prompt: "/customer-account-12345.csv is broken", status: "interrupted", startedAt: at(1) }), // a slash, but not a command
       run({ startedAt: "not a date" }),
     ],
+    knownCommands: new Set(["implement", "natterjack:host"]),
     tokenDays: [
       { date: "2026-11-19", byModel: { "claude-opus-5-5": tok(1000), "claude-haiku-5-5": tok(5) }, sessions: 2 },
       { date: "2026-11-18", byModel: { "claude-opus-5-5": tok(10) }, sessions: 1 },
@@ -41,10 +43,11 @@ test("usageSummary: totals, days, presets, skills and triggers, with no prompt t
   });
 
   assert.ok(!JSON.stringify(s).includes("12345"), "no prompt text in the summary");
-  assert.equal(s.totals.runs, 3);
+  assert.ok(!JSON.stringify(s).includes("customer-account"), "a slash at the start that isn't a known command never leaves");
+  assert.equal(s.totals.runs, 4);
   assert.equal(s.totals.succeeded, 1);
   assert.equal(s.totals.failed, 1);
-  assert.equal(s.totals.turns, 5);
+  assert.equal(s.totals.turns, 6);
   assert.equal(s.totals.costUsd, 1.73);
   assert.deepEqual([s.totals.rated, s.totals.good], [1, 1]);
   assert.equal(s.totals.tokens, 1015);
@@ -61,12 +64,18 @@ test("usageSummary: totals, days, presets, skills and triggers, with no prompt t
 
   assert.deepEqual(s.presets, [{ id: "explain", runs: 1 }]);
   assert.deepEqual(s.skills, [{ name: "implement", runs: 2 }]);
-  assert.deepEqual(s.triggers, { manual: 1, preset: 1, routine: 1 });
+  assert.deepEqual(s.triggers, { manual: 2, preset: 1, routine: 1 });
   assert.equal(s.weeklyLimitPct, 41, "the newest week reading");
 });
 
+test("usageSummary: no cached command list, no skills (it never fetches one)", () => {
+  const s = usageSummary({ runs: [run({ prompt: "/implement ENG-1" })], tokenDays: [], limits: [], knownCommands: null, days: 7, now: NOW });
+  assert.deepEqual(s.skills, []);
+  assert.equal(s.totals.runs, 1);
+});
+
 test("usageSummary: an unused dashboard is all zeros", () => {
-  const s = usageSummary({ runs: [], tokenDays: [], limits: [], days: 7, now: NOW });
+  const s = usageSummary({ runs: [], tokenDays: [], limits: [], knownCommands: null, days: 7, now: NOW });
   assert.equal(s.days.length, 7);
   assert.equal(s.totals.runs, 0);
   assert.equal(s.firstRunAt, null);

@@ -2240,7 +2240,11 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
     // Totals only (no prompts or results): what the hosted router collects for the admins' Reports page.
     if (p === "/api/usage/summary") {
       const days = Math.min(Math.max(parseInt(q("days") || "", 10) || 30, 7), 90);
-      return sendJson(res, usageSummary({ runs: runs.list(), tokenDays: (await usageHistory.report(days)).days, limits: usage.history(14), days }));
+      // The commands already cached for autocomplete, never a fresh fetch (that starts Claude).
+      const knownCommands = Array.isArray(usage.commands) && usage.commands.length
+        ? new Set<string>(usage.commands.map((c: any) => String(c?.name || "").toLowerCase()).filter(Boolean))
+        : null;
+      return sendJson(res, usageSummary({ runs: runs.list(), tokenDays: (await usageHistory.report(days)).days, limits: usage.history(14), knownCommands, days }));
     }
     if (p === "/api/usage/history") {
       const days = Math.min(Math.max(parseInt(q("days") || "", 10) || 30, 7), 90);

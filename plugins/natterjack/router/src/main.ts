@@ -18,7 +18,7 @@ import { SECRET_HEADER, checkHostedRequest } from "../../engine/server/src/hoste
 import { REMOTE_PREFIX, linkTokenOf, parseLinkToken, resolvedPath } from "../../engine/server/src/link-tokens.ts";
 import { routerConfig } from "./config.ts";
 import { HOP, backendHeaders, backendUrl, makeBackend, type Backend } from "./backends.ts";
-import { UsageStore, fetchSummary, usageReport } from "./usage.ts";
+import { UsageStore, fetchSummary, isPageOpen, usageReport } from "./usage.ts";
 
 const cfg = (() => {
   try { return routerConfig(process.env, (f) => { try { return fs.readFileSync(f, "utf-8"); } catch { return null; } }); }
@@ -140,7 +140,7 @@ const server = http.createServer(async (req, res) => {
     if (link) { res.writeHead(403, { "Content-Type": "application/json" }); return res.end(JSON.stringify({ error: "That link token doesn't belong to anyone with a hosted dashboard." })); }
     return page(res, 403, "No dashboard for you yet", `There's no dashboard set up for ${email}.${cfg.admin ? ` Ask ${cfg.admin} to add you.` : " Ask whoever runs the dashboards to add you."}`);
   }
-  if (!link) usage.seen(email); // opening the dashboard; a linked computer's traffic isn't the person
+  if (!link && isPageOpen(req)) usage.seen(email); // a page load: not the app's own polling, nor a linked computer
   if (!target.ready && target.canStart) { touch(email, 0); startOnce(email); return starting(req, res); }
   proxy(req, res, target.url, email, target.host);
 });
@@ -223,9 +223,14 @@ async function sweep() {
     try {
       const t = await backend.find(email);
       if (!t || !t.canStart) { activity.delete(email); continue; }
+      const seenAt = a.last;
       if (await hasRunningRun(t.url, email, t.host)) continue;
-      // The last figures before it stops: the report shows them until it runs again.
-      if (cfg.usageMinutes > 0 && t.ready) await collect(email, t.url, t.host);
+      // The last figures before it stops: the report shows them until it runs again. That
+      // takes a moment, in which they may have come back or started a run: look again.
+      if (cfg.usageMinutes > 0 && t.ready) {
+        await collect(email, t.url, t.host);
+        if (a.last !== seenAt || a.open > 0 || (await hasRunningRun(t.url, email, t.host))) continue;
+      }
       await backend.stop!(email);
       activity.delete(email);
       console.log(`Stopped ${email}'s dashboard after ${cfg.idleMinutes} idle minutes.`);

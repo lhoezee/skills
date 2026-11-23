@@ -105,6 +105,19 @@ export class UsageStore {
   }
 }
 
+/**
+ * A person opening (or reloading) their dashboard: a browser's top-level page load. The app's
+ * own requests don't count, so a tab left open in the background (it polls /api/runs) doesn't
+ * keep "last opened" and active days going. Sec-Fetch-Dest says so in every current browser;
+ * without it, a GET that asks for HTML is a page load.
+ */
+export function isPageOpen(req: Pick<http.IncomingMessage, "method" | "headers">): boolean {
+  if (req.method !== "GET") return false;
+  const dest = String(req.headers["sec-fetch-dest"] || "");
+  if (dest) return dest === "document";
+  return /text\/html/.test(String(req.headers.accept || ""));
+}
+
 /** ROUTER_ADMINS: "a@x.com, b@x.com" → a set of lowercase emails. */
 export function parseAdmins(value: string | undefined): Set<string> {
   return new Set(String(value || "").split(/[,\s]+/).map((e) => e.trim().toLowerCase()).filter((e) => e.includes("@")));
@@ -136,25 +149,100 @@ export function usageReport(store: UsageStore, everyone: string[], running: Set<
   return { generatedAt: new Date(now).toISOString(), people };
 }
 
-/** GET a dashboard's usage summary as its owner (the backend secret and their email). */
-export function fetchSummary(url: URL, headers: http.OutgoingHttpHeaders, timeoutMs = 15000): Promise<any> {
+// ------------------------------------------------------------------ what a dashboard sends
+
+/** A real summary is a few KB (90 days at most); anything bigger isn't one. */
+export const MAX_SUMMARY_BYTES = 256 * 1024;
+const MAX_DAYS = 90, MAX_TOP = 10, MAX_TRIGGERS = 20;
+const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null);
+const day = (v: unknown) => (typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null);
+const iso = (v: unknown) => (typeof v === "string" && v.length <= 40 && !isNaN(Date.parse(v)) ? v : null);
+const label = (v: unknown) => (typeof v === "string" && /^[\w:.-]{1,80}$/.test(v) ? v : null);
+
+/**
+ * The summary as the router keeps it: only the fields the report shows, each checked, and
+ * nothing else a dashboard put in. Every dashboard can run shell commands, so whatever it
+ * sends is untrusted: extra fields (prompt text, say) are dropped, and a malformed summary
+ * is refused, so the last good one stays. Throws on a shape it doesn't know.
+ */
+export function cleanSummary(s: any): any {
+  if (!s || typeof s !== "object" || s.version !== 1) throw new Error("not a version 1 summary (an older or newer dashboard?)");
+  if (!Array.isArray(s.days) || !s.totals || typeof s.totals !== "object") throw new Error("summary without days or totals");
+  const t = s.totals;
+  const totals: Record<string, number> = {};
+  for (const k of ["runs", "succeeded", "failed", "turns", "toolCalls", "durationMs", "costUsd", "rated", "good", "tokens"]) {
+    const v = num(t[k]);
+    if (v === null) throw new Error(`summary totals.${k} isn't a number`);
+    totals[k] = v;
+  }
+  const days = s.days.slice(-MAX_DAYS).map((d: any) => {
+    const date = day(d?.date);
+    if (!date) throw new Error("summary day without a date");
+    const out: Record<string, unknown> = { date };
+    for (const k of ["runs", "succeeded", "failed", "turns", "toolCalls", "durationMs", "costUsd", "tokens", "sessions"]) {
+      const v = num(d[k]);
+      if (v === null) throw new Error(`summary day ${date}: ${k} isn't a number`);
+      out[k] = v;
+    }
+    return out;
+  });
+  const top = (list: unknown, key: "id" | "name") => (Array.isArray(list) ? list : []).slice(0, MAX_TOP)
+    .map((x: any) => ({ [key]: label(x?.[key]), runs: num(x?.runs) }))
+    .filter((x) => x[key] !== null && x.runs !== null);
+  const triggers: Record<string, number> = {};
+  for (const [k, v] of Object.entries(s.triggers && typeof s.triggers === "object" ? s.triggers : {}).slice(0, MAX_TRIGGERS)) {
+    if (label(k) && num(v) !== null) triggers[k] = v as number;
+  }
+  const pct = num(s.weeklyLimitPct);
+  return {
+    version: 1,
+    generatedAt: iso(s.generatedAt),
+    totals,
+    firstRunAt: iso(s.firstRunAt),
+    lastRunAt: iso(s.lastRunAt),
+    days,
+    presets: top(s.presets, "id"),
+    skills: top(s.skills, "name"),
+    triggers,
+    weeklyLimitPct: pct === null ? null : Math.min(pct, 1000),
+  };
+}
+
+/**
+ * GET a dashboard's usage summary as its owner (the backend secret and their email), cleaned
+ * (cleanSummary). A dashboard is untrusted, and the router is shared: a non-200 is refused
+ * before reading its body, a body over MAX_SUMMARY_BYTES is cut off, and the whole fetch has
+ * a deadline, so one dashboard can't hold the router's memory or its collection round.
+ */
+export function fetchSummary(url: URL, headers: http.OutgoingHttpHeaders, timeoutMs = 15000, maxBytes = MAX_SUMMARY_BYTES): Promise<any> {
   const lib = url.protocol === "https:" ? https : http;
   return new Promise((resolve, reject) => {
+    let settled = false;
+    const done = (err: Error | null, value?: any) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      if (err) { req.destroy(); reject(err); } else resolve(value);
+    };
+    const deadline = setTimeout(() => done(new Error("usage summary: took too long")), timeoutMs);
     const req = lib.request(url, { headers: { ...headers, accept: "application/json" }, timeout: timeoutMs }, (r) => {
-      let text = "";
-      r.on("data", (d) => (text += d));
-      r.on("error", reject);
+      if ((r.statusCode || 0) !== 200) { r.resume(); return done(new Error(`usage summary: ${r.statusCode}`)); }
+      const chunks: Buffer[] = [];
+      let size = 0;
+      r.on("data", (d: Buffer) => {
+        size += d.length;
+        if (size > maxBytes) return done(new Error(`usage summary: over ${maxBytes} bytes`));
+        chunks.push(d);
+      });
+      r.on("error", (e) => done(e));
       r.on("end", () => {
-        if ((r.statusCode || 0) !== 200) return reject(new Error(`usage summary: ${r.statusCode}`));
-        try {
-          const s = JSON.parse(text);
-          if (!s || typeof s !== "object" || typeof s.version !== "number") return reject(new Error("usage summary: not a summary (an older dashboard?)"));
-          resolve(s);
-        } catch { reject(new Error("usage summary: not JSON")); }
+        let s: any;
+        try { s = JSON.parse(Buffer.concat(chunks).toString("utf-8")); } catch { return done(new Error("usage summary: not JSON")); }
+        try { done(null, cleanSummary(s)); } catch (e) { done(new Error(`usage summary: ${e.message}`)); }
       });
     });
-    req.on("timeout", () => req.destroy(new Error("usage summary: timed out")));
-    req.on("error", reject);
+    req.on("timeout", () => done(new Error("usage summary: timed out")));
+    req.on("error", (e) => done(e));
     req.end();
   });
 }
